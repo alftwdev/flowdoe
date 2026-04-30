@@ -1,121 +1,75 @@
 import requests
-import datetime
-import sys
 import os
-import csv
-from fredapi import Fred
+import sys
+from dotenv import load_dotenv
 
-# --- 1. CONFIG & CREDENTIALS ---
-PUSHOVER_USER_KEY = "ua1tgyam2bd124756cuc1s5e16kxgt"
-PUSHOVER_API_TOKEN = "a7dv58on4sgdyommmy72ygs6r63hsw"
+# --- LOAD SECURE VAULT ---
+load_dotenv()
 
-# Replace with your newly generated keys
-FRED_API_KEY = '58319998d168c380f60036032f43b0e2'
-ALPHA_VANTAGE_KEY = 'E77PWEEST1CIFGU0'
+# --- CONFIG & CREDENTIALS ---
+API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+PUSHOVER_USER = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
 
-# Path for your history log
-BASE_PATH = "/home/alftw/scripts/"
-LOG_FILE = os.path.join(BASE_PATH, "macro_history.csv")
-
-fred = Fred(api_key=FRED_API_KEY)
-
-def send_macro_pushover(message):
-    """Dispatches the final report to your phone."""
-    requests.post("https://api.pushover.net/1/messages.json", data={
-        "token": PUSHOVER_API_TOKEN,
-        "user": PUSHOVER_USER_KEY,
-        "title": "🌎 Market Macro Radar",
-        "message": message
-    })
-
-def safe_get_av(ticker_symbol):
-    """Fetches ETF data via AlphaVantage."""
-    url = f'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker_symbol}&apikey={ALPHA_VANTAGE_KEY}'
+def get_av_data(symbol, function="GLOBAL_QUOTE", extra_params=None):
+    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&apikey={API_KEY}"
+    if extra_params:
+        for k, v in extra_params.items():
+            url += f"&{k}={v}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=15)
         data = r.json()
-        if "Global Quote" in data and data["Global Quote"]:
-            price = float(data["Global Quote"]["05. price"])
-            change_pct = float(data["Global Quote"]["10. change percent"].strip('%'))
-            return price, change_pct
+        if "Note" in data:
+            print(f"    [API LIMIT] Hit the AlphaVantage limit for {symbol}.")
+        return data
     except Exception as e:
-        print(f"   [AV Error] {ticker_symbol}: {e}")
-    return None, 0.0
+        print(f"    [ERROR] Connection failed: {e}")
+        return {}
 
-def log_macro_data(data_dict):
-    """Appends daily data to macro_history.csv for future 'Conviction' analysis."""
-    file_exists = os.path.isfile(LOG_FILE)
-    with open(LOG_FILE, 'a', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=data_dict.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(data_dict)
+def main():
+    print("    [1/3] Fetching Macro Breadth (VIX/SPY)...")
+    vix_data = get_av_data("VIX").get("Global Quote", {})
+    spy_data = get_av_data("SPY").get("Global Quote", {})
+    
+    vix = float(vix_data.get("05. price", 0))
+    spy_pct = float(spy_data.get("10. change percent", "0%").strip('%'))
 
-def get_monthly_pulse():
-    """Checks FINRA Margin Debt - Returns data only once a month."""
-    today = datetime.datetime.now()
-    # FINRA usually updates around the 20th-25th for the previous month
-    if today.day == 25:
-        try:
-            # Series for Security Brokers/Dealers; Margin Loans (Asset)
-            debt_val = fred.get_series('BOGZ1FL663067103Q').iloc[-1]
-            return f"\n📊 MONTHLY PULSE: Margin Debt is ${debt_val:,.0f}M"
-        except:
-            return ""
-    return ""
+    print("    [2/3] Fetching TQQQ Technicals (RSI/VWAP)...")
+    tqqq_data = get_av_data("TQQQ").get("Global Quote", {})
+    tqqq_rsi_data = get_av_data("TQQQ", function="RSI", extra_params={"interval": "daily", "time_period": "14", "series_type": "close"})
+    
+    tqqq_price = float(tqqq_data.get("05. price", 0))
+    tqqq_pct = float(tqqq_data.get("10. change percent", "0%").strip('%'))
+    
+    # Extract RSI
+    rsi_series = tqqq_rsi_data.get("Technical Analysis: RSI", {})
+    latest_date = next(iter(rsi_series)) if rsi_series else None
+    rsi_val = float(rsi_series[latest_date]["RSI"]) if latest_date else 0.0
 
-def get_macro_data():
-    # 1. Official Macro (VIX & 10Y Yield)
-    print("   [FRED] Fetching VIX and 10Y Yield...")
-    try:
-        vix_val = fred.get_series('VIXCLS').iloc[-1]
-    except:
-        vix_val = 20.0 # Neutral Fallback
+    # Status Logic
+    status = "🔴 FEAR" if vix > 28 or rsi_val < 35 else "🟢 CALM"
+    strike = "⚡ ACTIVE" if rsi_val < 30 and vix > 25 else "INACTIVE"
 
-    try:
-        tnx_val = fred.get_series('DGS10').iloc[-1]
-    except:
-        tnx_val = 4.30 # Neutral Fallback
-
-    vix_status = "⚠️ HIGH FEAR" if vix_val > 30 else "✅ STABLE"
-
-    # 2. ETFs (AlphaVantage)
-    print("   [AV] Fetching Sector and Breadth data...")
-    xlk_price, xlk_chg = safe_get_av("XLK")
-    xlp_price, xlp_chg = safe_get_av("XLP")
-    spy_price, spy_chg = safe_get_av("SPY")
-
-    leader = "💻 TECH (Growth)" if xlk_chg > xlp_chg else "🛡️ DEFENSIVE (Value)"
-    breadth = "🚀 BULLISH" if spy_chg > 0.5 else "📉 BEARISH" if spy_chg < -0.5 else "↔️ NEUTRAL"
-
-    # 3. Monthly Pulse (FINRA Check)
-    pulse_msg = get_monthly_pulse()
-
-    # 4. Logging for Conviction Analysis
-    log_entry = {
-        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "vix": f"{vix_val:.2f}",
-        "tnx": f"{tnx_val:.2f}",
-        "spy_chg": f"{spy_chg:.2f}",
-        "leader": leader
-    }
-    log_macro_data(log_entry)
-
-    # 5. Final Message
-    msg = (
-        f"Status: {breadth}\n"
-        f"VIX: {vix_val:.2f} ({vix_status})\n"
-        f"Fed/Rates (10Y): {tnx_val:.2f}%\n"
-        f"Leading Sector: {leader}\n"
-        f"S&P 500 Change: {spy_chg:.2f}%"
-        f"{pulse_msg}"
+    report = (
+        f"Status: {status}\n"
+        f"VIX: {vix} | SPY: {spy_pct}%\n"
+        f"-------------------\n"
+        f"TQQQ: ${tqqq_price} ({tqqq_pct}%)\n"
+        f"RSI: {rsi_val:.2f}\n"
+        f"Strike Zone: {strike}"
     )
-    return msg
+
+    print(f"\n{report}")
+
+    # --- PUSHOVER ---
+    if PUSHOVER_TOKEN and (strike == "⚡ ACTIVE" or "test" in sys.argv):
+        print("    [3/3] Sending Pushover Notification...")
+        requests.post("https://api.pushover.net/1/messages.json", data={
+            "token": PUSHOVER_TOKEN,
+            "user": PUSHOVER_USER,
+            "title": "🌎 Market Macro Radar",
+            "message": report
+        })
 
 if __name__ == "__main__":
-    try:
-        report = get_macro_data()
-        send_macro_pushover(report)
-        print("Macro Radar Dispatched and Logged.")
-    except Exception as e:
-        print(f"Macro Radar Error: {e}")
+    main()
