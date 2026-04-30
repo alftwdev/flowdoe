@@ -9,13 +9,13 @@ import smtplib
 from email.message import EmailMessage
 from alpha_vantage.timeseries import TimeSeries
 from edgar import Company, set_identity
-from dotenv import load_dotenv  # <-- New Import
+from dotenv import load_dotenv
 
 # --- 0. LOAD SECURE VAULT ---
+# This looks for a .env file in the same directory as the script
 load_dotenv() 
 
 # --- 1. IDENTITY & CREDENTIALS ---
-# Pulling from .env
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
@@ -27,17 +27,17 @@ WORK_EMAIL = os.getenv("WORK_EMAIL")
 set_identity(f"Alwin Almazan {SENDER_EMAIL}")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Dynamic pathing for your MacBook
+# Dynamic pathing for consistent file access across Mac and PythonAnywhere
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
-# Recipients list including work email if provided
+# Recipients list
 RECIPIENTS = [SENDER_EMAIL]
 if WORK_EMAIL:
     RECIPIENTS.append(WORK_EMAIL)
 
 def send_emergency_email(subject, body):
-    """Bypasses cellular data and sends a direct email to your Gmail/Work accounts."""
+    """Bypasses cellular data and sends a direct email."""
     print(f"    [EMAIL] Preparing email for {RECIPIENTS}...")
     msg = EmailMessage()
     msg.set_content(body)
@@ -53,7 +53,7 @@ def send_emergency_email(subject, body):
         print(f"    [EMAIL] ERROR: {e}")
 
 def get_official_nav(ticker):
-    """Morningstar 2026 Regex: Pulls live NAV from background JSON."""
+    """Pulls live NAV from Morningstar."""
     print(f"    [NAV] Fetching {ticker} from Morningstar...")
     url = f"https://www.morningstar.com/cefs/xase/{ticker.lower()}/quote"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -66,14 +66,18 @@ def get_official_nav(ticker):
             return val
     except Exception as e:
         print(f"    [NAV] ERROR: {e}")
+    # Hardcoded fallbacks only if scraping fails
     return 6.43 if ticker == "CLM" else 6.23
 
 def get_market_data(ticker):
-    """AlphaVantage 2026: Pulls Price and Volume for Institutional Exit Detection."""
+    """AlphaVantage 2026: Pulls Price and Volume."""
     print(f"    [MKT] Fetching Price/Vol for {ticker}...")
+    
+    # FIX: Explicitly passing the key into the TimeSeries constructor
     ts = TimeSeries(key=ALPHA_VANTAGE_KEY, output_format='pandas')
+    
     try:
-        time.sleep(1.2)
+        time.sleep(1.2) # Avoid API rate limits
         data, _ = ts.get_quote_endpoint(symbol=ticker)
         return {
             "price": float(data['05. price'].iloc[0]),
@@ -105,7 +109,7 @@ def run_sentry_check():
     for ticker in ["CLM", "CRF"]:
         print(f"\nPROCESS: Analyzing {ticker}...")
         try:
-            # 1. SEC WATCHDOG (N-2 Detector)
+            # 1. SEC WATCHDOG
             comp = Company(ticker)
             filings = comp.get_filings(form=["N-2", "N-2/A", "424B3"])
             sec_alert = False
@@ -114,14 +118,21 @@ def run_sentry_check():
                 if not os.path.exists(LOG_FILE): 
                     open(LOG_FILE, 'w').close()
                 with open(LOG_FILE, "r") as f:
-                    if f_id not in f.read():
+                    content = f.read()
+                    if f_id not in content:
                         sec_alert = True
                         with open(LOG_FILE, "a") as f_app: 
                             f_app.write(f"{f_id}\n")
 
-            # 2. MARKET SENTINEL (Whale Dump & Premium)
+            # 2. MARKET SENTINEL
             mkt = get_market_data(ticker)
             anchor_file = os.path.join(BASE_PATH, f"{ticker}_anchor.txt")
+            
+            # Ensure the anchor file exists before reading
+            if not os.path.exists(anchor_file):
+                nav = get_official_nav(ticker)
+                with open(anchor_file, "w") as f: f.write(str(nav))
+            
             with open(anchor_file, "r") as f:
                 nav = float(f.read().strip())
 
@@ -145,15 +156,18 @@ def run_sentry_check():
     if reports:
         msg = "\n\n".join(reports)
 
-        # Pushover: Every run when there's data
+        # Pushover dispatch
         print("\nACTION: Dispatching Pushover...")
-        requests.post("https://api.pushover.net/1/messages.json", data={
-            "token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
-            "title": "🚨 EMERGENCY: SELL" if emergency else "🤖 Daily Heartbeat",
-            "message": msg
-        })
+        try:
+            requests.post("https://api.pushover.net/1/messages.json", data={
+                "token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
+                "title": "🚨 EMERGENCY: SELL" if emergency else "🤖 Daily Heartbeat",
+                "message": msg
+            }, timeout=10)
+        except Exception as e:
+            print(f"    [PUSH] ERROR: {e}")
 
-        # Email: Only on Emergency, Heartbeat Hour, or Manual Test
+        # Email dispatch
         if emergency or is_heartbeat_hour or is_manual_test:
             print("ACTION: Dispatching Email...")
             subj = "🚨 PORTFOLIO EMERGENCY" if emergency else "🤖 Daily Heartbeat: All Clear"
