@@ -9,26 +9,36 @@ import smtplib
 from email.message import EmailMessage
 from alpha_vantage.timeseries import TimeSeries
 from edgar import Company, set_identity
+from dotenv import load_dotenv  # <-- New Import
+
+# --- 0. LOAD SECURE VAULT ---
+load_dotenv() 
 
 # --- 1. IDENTITY & CREDENTIALS ---
-set_identity("Alwin Almazan alwinalmazan@gmail.com")
+# Pulling from .env
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+WORK_EMAIL = os.getenv("WORK_EMAIL")
+
+# Configuration
+set_identity(f"Alwin Almazan {SENDER_EMAIL}")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Pushover Config
-PUSHOVER_USER_KEY = "ua1tgyam2bd124756cuc1s5e16kxgt"
-PUSHOVER_API_TOKEN = "a7dv58on4sgdyommmy72ygs6r63hsw"
-ALPHA_VANTAGE_KEY = 'E77PWEEST1CIFGU0'
-BASE_PATH = "/home/alftw/scripts/"
+# Dynamic pathing for your MacBook
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
-# EMAIL REDUNDANCY CONFIG
-SENDER_EMAIL = "alwinalmazan@gmail.com"
-EMAIL_APP_PASSWORD = "gbgb kosf hchc lprf" # <-- INSERT YOUR 16-DIGIT GMAIL APP PASSWORD HERE
-RECIPIENTS = ["alwinalmazan@gmail.com", "alwin.p.almazan.mil@us.navy.mil"] # <-- ADD WORK EMAIL HERE
+# Recipients list including work email if provided
+RECIPIENTS = [SENDER_EMAIL]
+if WORK_EMAIL:
+    RECIPIENTS.append(WORK_EMAIL)
 
 def send_emergency_email(subject, body):
     """Bypasses cellular data and sends a direct email to your Gmail/Work accounts."""
-    print(f"   [EMAIL] Preparing email for {RECIPIENTS}...")
+    print(f"    [EMAIL] Preparing email for {RECIPIENTS}...")
     msg = EmailMessage()
     msg.set_content(body)
     msg['Subject'] = subject
@@ -38,13 +48,13 @@ def send_emergency_email(subject, body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD)
             smtp.send_message(msg)
-            print("   [EMAIL] SUCCESS: Email sent.")
+            print("    [EMAIL] SUCCESS: Email sent.")
     except Exception as e:
-        print(f"   [EMAIL] ERROR: {e}")
+        print(f"    [EMAIL] ERROR: {e}")
 
 def get_official_nav(ticker):
     """Morningstar 2026 Regex: Pulls live NAV from background JSON."""
-    print(f"   [NAV] Fetching {ticker} from Morningstar...")
+    print(f"    [NAV] Fetching {ticker} from Morningstar...")
     url = f"https://www.morningstar.com/cefs/xase/{ticker.lower()}/quote"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -52,15 +62,15 @@ def get_official_nav(ticker):
         match = re.search(r'"lastActualNav":(\d+\.\d+)', response.text)
         if match:
             val = float(match.group(1))
-            print(f"   [NAV] SUCCESS: {ticker} = ${val}")
+            print(f"    [NAV] SUCCESS: {ticker} = ${val}")
             return val
     except Exception as e:
-        print(f"   [NAV] ERROR: {e}")
+        print(f"    [NAV] ERROR: {e}")
     return 6.43 if ticker == "CLM" else 6.23
 
 def get_market_data(ticker):
     """AlphaVantage 2026: Pulls Price and Volume for Institutional Exit Detection."""
-    print(f"   [MKT] Fetching Price/Vol for {ticker}...")
+    print(f"    [MKT] Fetching Price/Vol for {ticker}...")
     ts = TimeSeries(key=ALPHA_VANTAGE_KEY, output_format='pandas')
     try:
         time.sleep(1.2)
@@ -71,7 +81,7 @@ def get_market_data(ticker):
             "prev_close": float(data['08. previous close'].iloc[0])
         }
     except Exception as e:
-        print(f"   [MKT] ERROR: {e}")
+        print(f"    [MKT] ERROR: {e}")
         return None
 
 def run_sentry_check():
@@ -85,7 +95,9 @@ def run_sentry_check():
         print("ACTION: Refreshing Daily NAV Anchors...")
         for t in ["CLM", "CRF"]:
             nav = get_official_nav(t)
-            with open(os.path.join(BASE_PATH, f"{t}_anchor.txt"), "w") as f: f.write(str(nav))
+            anchor_path = os.path.join(BASE_PATH, f"{t}_anchor.txt")
+            with open(anchor_path, "w") as f: 
+                f.write(str(nav))
 
     reports = []
     emergency = False
@@ -99,11 +111,13 @@ def run_sentry_check():
             sec_alert = False
             if filings is not None and not filings.empty:
                 f_id = filings.latest().accession_number
-                if not os.path.exists(LOG_FILE): open(LOG_FILE, 'w').close()
+                if not os.path.exists(LOG_FILE): 
+                    open(LOG_FILE, 'w').close()
                 with open(LOG_FILE, "r") as f:
                     if f_id not in f.read():
                         sec_alert = True
-                        with open(LOG_FILE, "a") as f_app: f_app.write(f"{f_id}\n")
+                        with open(LOG_FILE, "a") as f_app: 
+                            f_app.write(f"{f_id}\n")
 
             # 2. MARKET SENTINEL (Whale Dump & Premium)
             mkt = get_market_data(ticker)
@@ -120,12 +134,12 @@ def run_sentry_check():
                 if dump_detected: status, emergency = "🚨 VOLATILITY DUMP", True
                 if premium > 25: status, emergency = "🚨 HIGH PREMIUM", True
                 if sec_alert: status, emergency = "🚨 SELL SIGNAL: SEC N-2", True
-
+                
                 reports.append(f"{ticker}: {status}\nPremium: {premium:.2f}%\nPrice: ${mkt['price']:.2f} | NAV: ${nav:.2f}\nVol: {mkt['volume']:,}")
-                print(f"   [RES] Status: {status}")
+                print(f"    [RES] Status: {status}")
 
         except Exception as e:
-            print(f"   [ERR] Failed {ticker}: {e}")
+            print(f"    [ERR] Failed {ticker}: {e}")
 
     # --- 3. DISPATCHER ---
     if reports:
