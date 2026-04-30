@@ -6,7 +6,7 @@ import time
 import urllib3
 import re
 import smtplib
-import yfinance as yf  
+from yahooquery import Ticker  # <--- Upgraded for better cloud reliability
 from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
@@ -28,9 +28,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
-
-# Ensure yfinance doesn't trip over itself on different systems
-yf.set_tz_cache_location(os.path.join(BASE_PATH, "yf_cache"))
 
 RECIPIENTS = [SENDER_EMAIL]
 if WORK_EMAIL:
@@ -66,29 +63,28 @@ def get_official_nav(ticker):
             return val
     except Exception as e:
         print(f"    [NAV] ERROR: {e}")
+    # Fallbacks based on your recent strategy anchors
     return 6.43 if ticker == "CLM" else 6.23
 
 def get_market_data(ticker):
     """
-    YFINANCE 2026 UPDATE: Pulls high-accuracy Price and Volume.
-    Uses a minimal retrieval method to avoid data center detection.
+    YAHOOQUERY 2026 UPDATE: 
+    Mimics browser behavior more effectively than yfinance.
     """
     print(f"    [MKT] Fetching Price/Vol for {ticker} from Yahoo Finance...")
     try:
-        # We access the ticker directly. yfinance handles its own headers 
-        # but we use fast_info for raw speed and to avoid extra API hits.
-        yf_ticker = yf.Ticker(ticker)
-        info = yf_ticker.fast_info
+        t = Ticker(ticker)
+        # yahooquery returns a nested dictionary keyed by ticker
+        price_data = t.price[ticker]
         
-        # Check if we got a valid response
-        price = info['last_price']
-        if price is None or price == 0:
-            raise ValueError(f"Yahoo returned empty data for {ticker}")
-            
+        # Validation to ensure we didn't get an error message back
+        if isinstance(price_data, str):
+            raise ValueError(f"Yahoo Error: {price_data}")
+
         return {
-            "price": float(price),
-            "volume": int(info['last_volume']),
-            "prev_close": float(info['previous_close'])
+            "price": float(price_data['regularMarketPrice']),
+            "volume": int(price_data['regularMarketVolume']),
+            "prev_close": float(price_data['regularMarketPreviousClose'])
         }
     except Exception as e:
         print(f"    [MKT] ERROR: {e}")
