@@ -6,7 +6,7 @@ import time
 import urllib3
 import re
 import smtplib
-import yfinance as yf  # <--- Added for accurate market pricing
+import yfinance as yf  
 from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
@@ -28,6 +28,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
+
+# Ensure yfinance doesn't trip over itself on different systems
+yf.set_tz_cache_location(os.path.join(BASE_PATH, "yf_cache"))
 
 RECIPIENTS = [SENDER_EMAIL]
 if WORK_EMAIL:
@@ -53,7 +56,7 @@ def get_official_nav(ticker):
     """Pulls live NAV from Morningstar."""
     print(f"    [NAV] Fetching {ticker} from Morningstar...")
     url = f"https://www.morningstar.com/cefs/xase/{ticker.lower()}/quote"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         match = re.search(r'"lastActualNav":(\d+\.\d+)', response.text)
@@ -68,26 +71,29 @@ def get_official_nav(ticker):
 def get_market_data(ticker):
     """
     YFINANCE 2026 UPDATE: Pulls high-accuracy Price and Volume.
-    Uses a custom session to bypass data center blocks.
+    Uses a minimal retrieval method to avoid data center detection.
     """
     print(f"    [MKT] Fetching Price/Vol for {ticker} from Yahoo Finance...")
     try:
-        # Create a session with a browser-like header to avoid being blocked
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
-        
-        yf_ticker = yf.Ticker(ticker, session=session)
-        # fast_info is great, but info is sometimes more reliable during blocks
+        # We access the ticker directly. yfinance handles its own headers 
+        # but we use fast_info for raw speed and to avoid extra API hits.
+        yf_ticker = yf.Ticker(ticker)
         info = yf_ticker.fast_info
         
+        # Check if we got a valid response
+        price = info['last_price']
+        if price is None or price == 0:
+            raise ValueError(f"Yahoo returned empty data for {ticker}")
+            
         return {
-            "price": float(info['last_price']),
+            "price": float(price),
             "volume": int(info['last_volume']),
             "prev_close": float(info['previous_close'])
         }
     except Exception as e:
         print(f"    [MKT] ERROR: {e}")
         return None
+
 def run_sentry_check():
     print(f"\n--- SENTRY START: {datetime.datetime.now()} ---")
     is_manual_test = "test" in sys.argv
@@ -136,7 +142,7 @@ def run_sentry_check():
                 nav = float(f.read().strip())
 
             if mkt and nav:
-                # PREMIUM CALCULATION (Unchanged logic, now using accurate yfinance price)
+                # PREMIUM CALCULATION
                 premium = ((mkt['price'] - nav) / nav) * 100
                 avg_vol = 1700000 if ticker == "CLM" else 600000
                 dump_detected = (mkt['volume'] > avg_vol * 1.4) and (mkt['price'] < mkt['prev_close'] * 0.97)
