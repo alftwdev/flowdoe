@@ -68,12 +68,16 @@ def get_official_nav(ticker):
 def get_market_data(ticker):
     """
     YFINANCE 2026 UPDATE: Pulls high-accuracy Price and Volume.
-    Replaces AlphaVantage for the market price component to ensure real-time accuracy.
+    Uses a custom session to bypass data center blocks.
     """
     print(f"    [MKT] Fetching Price/Vol for {ticker} from Yahoo Finance...")
     try:
-        yf_ticker = yf.Ticker(ticker)
-        # Using fast_info for low-latency market data
+        # Create a session with a browser-like header to avoid being blocked
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        
+        yf_ticker = yf.Ticker(ticker, session=session)
+        # fast_info is great, but info is sometimes more reliable during blocks
         info = yf_ticker.fast_info
         
         return {
@@ -84,7 +88,6 @@ def get_market_data(ticker):
     except Exception as e:
         print(f"    [MKT] ERROR: {e}")
         return None
-
 def run_sentry_check():
     print(f"\n--- SENTRY START: {datetime.datetime.now()} ---")
     is_manual_test = "test" in sys.argv
