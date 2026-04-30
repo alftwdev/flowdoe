@@ -6,13 +6,12 @@ import time
 import urllib3
 import re
 import smtplib
+import yfinance as yf  # <--- Added for accurate market pricing
 from email.message import EmailMessage
-from alpha_vantage.timeseries import TimeSeries
 from edgar import Company, set_identity
 from dotenv import load_dotenv
 
 # --- 0. LOAD SECURE VAULT ---
-# This looks for a .env file in the same directory as the script
 load_dotenv() 
 
 # --- 1. IDENTITY & CREDENTIALS ---
@@ -27,11 +26,9 @@ WORK_EMAIL = os.getenv("WORK_EMAIL")
 set_identity(f"Alwin Almazan {SENDER_EMAIL}")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Dynamic pathing for consistent file access across Mac and PythonAnywhere
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
-# Recipients list
 RECIPIENTS = [SENDER_EMAIL]
 if WORK_EMAIL:
     RECIPIENTS.append(WORK_EMAIL)
@@ -66,23 +63,23 @@ def get_official_nav(ticker):
             return val
     except Exception as e:
         print(f"    [NAV] ERROR: {e}")
-    # Hardcoded fallbacks only if scraping fails
     return 6.43 if ticker == "CLM" else 6.23
 
 def get_market_data(ticker):
-    """AlphaVantage 2026: Pulls Price and Volume."""
-    print(f"    [MKT] Fetching Price/Vol for {ticker}...")
-    
-    # FIX: Explicitly passing the key into the TimeSeries constructor
-    ts = TimeSeries(key=ALPHA_VANTAGE_KEY, output_format='pandas')
-    
+    """
+    YFINANCE 2026 UPDATE: Pulls high-accuracy Price and Volume.
+    Replaces AlphaVantage for the market price component to ensure real-time accuracy.
+    """
+    print(f"    [MKT] Fetching Price/Vol for {ticker} from Yahoo Finance...")
     try:
-        time.sleep(1.2) # Avoid API rate limits
-        data, _ = ts.get_quote_endpoint(symbol=ticker)
+        yf_ticker = yf.Ticker(ticker)
+        # Using fast_info for low-latency market data
+        info = yf_ticker.fast_info
+        
         return {
-            "price": float(data['05. price'].iloc[0]),
-            "volume": int(data['06. volume'].iloc[0]),
-            "prev_close": float(data['08. previous close'].iloc[0])
+            "price": float(info['last_price']),
+            "volume": int(info['last_volume']),
+            "prev_close": float(info['previous_close'])
         }
     except Exception as e:
         print(f"    [MKT] ERROR: {e}")
@@ -92,7 +89,7 @@ def run_sentry_check():
     print(f"\n--- SENTRY START: {datetime.datetime.now()} ---")
     is_manual_test = "test" in sys.argv
     current_hour_utc = datetime.datetime.now(datetime.timezone.utc).hour
-    is_heartbeat_hour = (current_hour_utc == 18) # 8:00 AM HST
+    is_heartbeat_hour = (17 <= current_hour_utc <= 19) # 8:00 AM HST
 
     # Daily NAV anchor refresh
     if is_manual_test or is_heartbeat_hour:
@@ -128,7 +125,6 @@ def run_sentry_check():
             mkt = get_market_data(ticker)
             anchor_file = os.path.join(BASE_PATH, f"{ticker}_anchor.txt")
             
-            # Ensure the anchor file exists before reading
             if not os.path.exists(anchor_file):
                 nav = get_official_nav(ticker)
                 with open(anchor_file, "w") as f: f.write(str(nav))
@@ -137,6 +133,7 @@ def run_sentry_check():
                 nav = float(f.read().strip())
 
             if mkt and nav:
+                # PREMIUM CALCULATION (Unchanged logic, now using accurate yfinance price)
                 premium = ((mkt['price'] - nav) / nav) * 100
                 avg_vol = 1700000 if ticker == "CLM" else 600000
                 dump_detected = (mkt['volume'] > avg_vol * 1.4) and (mkt['price'] < mkt['prev_close'] * 0.97)
