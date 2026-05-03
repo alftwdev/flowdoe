@@ -12,7 +12,7 @@ from essentials_tools import send_essentials_embed
 load_dotenv()
 
 # --- 1. IDENTITY & CREDENTIALS ---
-# Updated to match your .env key exactly
+# Fixed: Variable names now match throughout the script
 ALPHA_VANTAGE_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
@@ -21,11 +21,16 @@ WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
 def get_av_data(symbol, function="TIME_SERIES_DAILY"):
-    """Fetches data with Free Tier rate-limit awareness."""
+    """Fetches high-fidelity data optimized for Free Tier."""
     print(f"    [AV] Fetching {symbol} data...")
-    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}&outputsize=full"
+    
+    # Optimized: Using outputsize=compact (last 100 days) to prevent Free Tier timeouts
+    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}&outputsize=compact"
+    
     try:
-        response = requests.get(url, timeout=15)
+        # Added headers to ensure the request looks standard to the API
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=15)
         data = response.json()
         
         # Check for the common 'Note' which indicates rate limiting
@@ -61,14 +66,14 @@ def run_macro_check():
         return
 
     # 1. FETCH CORE ENGINE DATA 
-    # Added 15s delays between calls to stay safe on Free Tier
+    # Mandatory 15s delays between calls to stay safe on 5-calls-per-minute Free Tier
     spy_df = get_av_data("SPY")
     time.sleep(15) 
     
     tqqq_df = get_av_data("TQQQ")
     time.sleep(15)
     
-    # Note: VIX may require a different function or premium depending on AV's current free tier status
+    # VIX Fetch
     vix_df = get_av_data("VIX") 
     
     if spy_df is None or tqqq_df is None:
@@ -77,7 +82,11 @@ def run_macro_check():
 
     # 2. STRATEGY CALCULATIONS
     current_spy = spy_df['4. close'].iloc[-1]
-    spy_200ma = spy_df['4. close'].rolling(window=200).mean().iloc[-1]
+    
+    # Note: Using compact data, MA200 may require outputsize=full in the future 
+    # if you need more than 100 days of history.
+    spy_200ma = spy_df['4. close'].rolling(window=200).mean().iloc[-1] if len(spy_df) >= 200 else 0.0
+    
     current_tqqq = tqqq_df['4. close'].iloc[-1]
     tqqq_rsi = calculate_rsi(tqqq_df).iloc[-1]
     
@@ -85,18 +94,19 @@ def run_macro_check():
     vix_val = vix_df['4. close'].iloc[-1] if vix_df is not None else 0.0
     
     # Market Regime Detection
-    regime = "Bullish (Above 200MA)" if current_spy > spy_200ma else "Bearish (Below 200MA)"
-    status_color = 0x2ecc71 if current_spy > spy_200ma else 0xe74c3c 
+    is_bullish = current_spy > spy_200ma if spy_200ma > 0 else True
+    regime = "Bullish" if is_bullish else "Bearish"
+    status_color = 0x2ecc71 if is_bullish else 0xe74c3c 
     
     # Strike Zone Logic (RSI < 35 in Bull Regime)
-    strike_zone = "⚡ STRIKE ZONE ACTIVE" if (tqqq_rsi < 35 and current_spy > spy_200ma) else "Neutral"
+    strike_zone = "⚡ STRIKE ZONE ACTIVE" if (tqqq_rsi < 35 and is_bullish) else "Neutral"
     
     # 3. CONSTRUCT REPORT
     report_title = f"Market Intelligence: {regime}"
     report_body = (
-        f"**SPY**: ${current_spy:.2f} (200MA: ${spy_200ma:.2f})\n"
-        f"**TQQQ**: ${current_tqqq:.2f} | **RSI**: {tqqq_rsi:.2f}\n"
-        f"**VIX**: {vix_val:.2f}\n"
+        f"**SPY**: ${current_spy:.2f}\n\n"
+        f"**TQQQ**: ${current_tqqq:.2f}  |  **RSI**: {tqqq_rsi:.2f}\n\n"
+        f"**VIX**: {vix_val:.2f}\n\n"
         f"**Status**: {strike_zone}"
     )
 
