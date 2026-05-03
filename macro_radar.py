@@ -1,121 +1,127 @@
-import requests
-import os
+import datetime
 import sys
+import os
+import requests
 import pandas as pd
-from datetime import datetime
+import time
 from dotenv import load_dotenv
+# Import the professional formatting tool
+from essentials_tools import send_essentials_embed
 
-# --- LOAD SECURE VAULT ---
+# --- 0. LOAD SECURE VAULT ---
 load_dotenv()
 
-# --- CONFIG & CREDENTIALS ---
-API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
-PUSHOVER_USER = os.getenv("PUSHOVER_USER_KEY")
-PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+# --- 1. IDENTITY & CREDENTIALS ---
+# Updated to match your .env key exactly
+ALPHA_VANTAGE_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 
-# File to track TQQQ entries
-POSITIONS_FILE = "tqqq_positions.csv"
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
-def get_av_data(symbol, function="GLOBAL_QUOTE", extra_params=None):
-    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&apikey={API_KEY}"
-    if extra_params:
-        for k, v in extra_params.items():
-            url += f"&{k}={v}"
+def get_av_data(symbol, function="TIME_SERIES_DAILY"):
+    """Fetches data with Free Tier rate-limit awareness."""
+    print(f"    [AV] Fetching {symbol} data...")
+    url = f"https://www.alphavantage.co/query?function={function}&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}&outputsize=full"
     try:
-        r = requests.get(url, timeout=15)
-        data = r.json()
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        
+        # Check for the common 'Note' which indicates rate limiting
         if "Note" in data:
-            print(f"    [API LIMIT] Hit the AlphaVantage limit for {symbol}.")
-        return data
+            print(f"    [AV] RATE LIMIT REACHED: {data['Note']}")
+            return None
+            
+        if "Time Series (Daily)" in data:
+            df = pd.DataFrame.from_dict(data["Time Series (Daily)"], orient='index').astype(float)
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            return df
+            
+        print(f"    [AV] Error or No Data for {symbol}: {data.get('Error Message', 'Unknown Error')}")
+        return None
     except Exception as e:
-        print(f"    [ERROR] Connection failed: {e}")
-        return {}
+        print(f"    [AV] Connection ERROR fetching {symbol}: {e}")
+        return None
 
-def check_profit_sentry():
-    """Checks if any open TQQQ positions are in the 30-45 day exit window."""
-    if not os.path.exists(POSITIONS_FILE):
-        return ""
+def calculate_rsi(df, period=14):
+    """Calculates Relative Strength Index for strike zone detection."""
+    delta = df['4. close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1+rs))
+
+def run_macro_check():
+    print(f"\n--- MACRO RADAR START: {datetime.datetime.now()} ---")
     
-    try:
-        df = pd.read_csv(POSITIONS_FILE)
-        alerts = []
-        for _, row in df.iterrows():
-            entry_date = datetime.strptime(row['entry_date'], '%Y-%m-%d')
-            days_held = (datetime.now() - entry_date).days
-            if 30 <= days_held <= 45:
-                alerts.append(f"⚠️ EXIT WATCH: {row['ticker']} held {days_held} days.")
-        return "\n".join(alerts)
-    except Exception as e:
-        print(f"    [ERROR] Position file read failed: {e}")
-        return ""
-
-def main():
-    print("    [1/4] Fetching Macro Breadth & 200MA...")
-    vix_data = get_av_data("VIX").get("Global Quote", {})
-    spy_data = get_av_data("SPY").get("Global Quote", {})
-    spy_ma_data = get_av_data("SPY", function="SMA", extra_params={"interval": "daily", "time_period": "200", "series_type": "close"})
-    
-    # Extract Values with Safety Defaults
-    try:
-        vix = float(vix_data.get("05. price", 0))
-        spy_price = float(spy_data.get("05. price", 0))
-        spy_pct = spy_data.get("10. change percent", "0.00%")
-
-        ma_series = spy_ma_data.get("Technical Analysis: SMA", {})
-        latest_ma_date = next(iter(ma_series)) if ma_series else None
-        spy_200ma = float(ma_series[latest_ma_date]["SMA"]) if latest_ma_date else 0.0
-    except (ValueError, KeyError, StopIteration):
-        print("    [CRITICAL] Data parsing failed. Likely API limit.")
+    if not ALPHA_VANTAGE_KEY:
+        print("    [!] ERROR: ALPHAVANTAGE_API_KEY not found in .env")
         return
 
-    # Safety Gate: Prevent false BEAR regime if API returns 0
-    if spy_price == 0 or spy_200ma == 0:
-        print("    [ABORT] Incomplete data. Notification cancelled.")
+    # 1. FETCH CORE ENGINE DATA 
+    # Added 15s delays between calls to stay safe on Free Tier
+    spy_df = get_av_data("SPY")
+    time.sleep(15) 
+    
+    tqqq_df = get_av_data("TQQQ")
+    time.sleep(15)
+    
+    # Note: VIX may require a different function or premium depending on AV's current free tier status
+    vix_df = get_av_data("VIX") 
+    
+    if spy_df is None or tqqq_df is None:
+        print("    [!] Critical Data Missing. Aborting.")
         return
 
-    print("    [2/4] Fetching TQQQ Technicals (RSI)...")
-    tqqq_data = get_av_data("TQQQ").get("Global Quote", {})
-    tqqq_rsi_data = get_av_data("TQQQ", function="RSI", extra_params={"interval": "daily", "time_period": "14", "series_type": "close"})
+    # 2. STRATEGY CALCULATIONS
+    current_spy = spy_df['4. close'].iloc[-1]
+    spy_200ma = spy_df['4. close'].rolling(window=200).mean().iloc[-1]
+    current_tqqq = tqqq_df['4. close'].iloc[-1]
+    tqqq_rsi = calculate_rsi(tqqq_df).iloc[-1]
     
-    try:
-        tqqq_price = float(tqqq_data.get("05. price", 0))
-        tqqq_pct = tqqq_data.get("10. change percent", "0.00%")
-        rsi_series = tqqq_rsi_data.get("Technical Analysis: RSI", {})
-        latest_date = next(iter(rsi_series)) if rsi_series else None
-        rsi_val = float(rsi_series[latest_date]["RSI"]) if latest_date else 0.0
-    except (ValueError, KeyError, StopIteration):
-        rsi_val = 0.0
-
-    # --- STRATEGY LOGIC ---
-    market_regime = "BULL" if spy_price > spy_200ma else "BEAR"
-    status = "🔴 FEAR" if vix > 28 or rsi_val < 35 else "🟢 CALM"
-    strike = "⚡ STRIKE ZONE" if (rsi_val < 32 and vix > 25) else "INACTIVE"
-    profit_alert = check_profit_sentry()
-
-    report = (
-        f"Regime: {market_regime} (SPY vs 200MA)\n"
-        f"Status: {status}\n"
-        f"VIX: {vix} | SPY: {spy_pct}\n"
-        f"-------------------\n"
-        f"TQQQ: ${tqqq_price} ({tqqq_pct})\n"
-        f"RSI: {rsi_val:.2f}\n"
-        f"Strike Zone: {strike}\n"
-        f"{'-------------------' if profit_alert else ''}\n"
-        f"{profit_alert}"
+    # VIX Logic (Fallback if VIX data is restricted on Free Tier)
+    vix_val = vix_df['4. close'].iloc[-1] if vix_df is not None else 0.0
+    
+    # Market Regime Detection
+    regime = "Bullish (Above 200MA)" if current_spy > spy_200ma else "Bearish (Below 200MA)"
+    status_color = 0x2ecc71 if current_spy > spy_200ma else 0xe74c3c 
+    
+    # Strike Zone Logic (RSI < 35 in Bull Regime)
+    strike_zone = "⚡ STRIKE ZONE ACTIVE" if (tqqq_rsi < 35 and current_spy > spy_200ma) else "Neutral"
+    
+    # 3. CONSTRUCT REPORT
+    report_title = f"Market Intelligence: {regime}"
+    report_body = (
+        f"**SPY**: ${current_spy:.2f} (200MA: ${spy_200ma:.2f})\n"
+        f"**TQQQ**: ${current_tqqq:.2f} | **RSI**: {tqqq_rsi:.2f}\n"
+        f"**VIX**: {vix_val:.2f}\n"
+        f"**Status**: {strike_zone}"
     )
 
-    print(f"\n{report}")
+    # 4. DISPATCHER
+    print("ACTION: Dispatching to Discord #market-analysis...")
+    send_essentials_embed(
+        webhook_url=WEBHOOK_MARKET,
+        title=report_title,
+        description=report_body,
+        color=status_color
+    )
 
-    # --- PUSHOVER (HEARTBEAT MODE) ---
-    if PUSHOVER_TOKEN:
-        print("    [4/4] Sending Pushover Heartbeat...")
+    print("ACTION: Dispatching Pushover...")
+    try:
         requests.post("https://api.pushover.net/1/messages.json", data={
-            "token": PUSHOVER_TOKEN,
-            "user": PUSHOVER_USER,
-            "title": f"🌎 Macro Radar: {market_regime}",
-            "message": report,
-            "priority": 1 if strike == "⚡ STRIKE ZONE" else 0
-        })
+            "token": PUSHOVER_API_TOKEN,
+            "user": PUSHOVER_USER_KEY,
+            "title": f"🌎 Macro: {regime}",
+            "message": report_body.replace("**", ""),
+            "priority": 1 if strike_zone != "Neutral" else 0
+        }, timeout=10)
+    except Exception as e:
+        print(f"    [PUSH] ERROR: {e}")
+
+    print(f"--- MACRO RADAR FINISHED: {datetime.datetime.now()} ---\n")
 
 if __name__ == "__main__":
-    main()
+    run_macro_check()

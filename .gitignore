@@ -1,0 +1,13 @@
+# Security: Sensitive Keys
+.env
+
+# Python: Ignore compiled files and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# macOS: System junk
+.DS_Store
