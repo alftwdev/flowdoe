@@ -1,61 +1,91 @@
 import os
 import time
 import requests
+import datetime
 from dotenv import load_dotenv
-# Import the shared tool correctly
 from essentials_tools import send_essentials_embed
 
 load_dotenv()
 
-# Configuration
-# Note: Ensure these keys match your .env file names exactly
-API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+# --- 0. CONFIG ---
+TD_API_KEY = os.getenv("TD_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_TRADE_SIGNALS")
 
-# Expanded watchlist for high-volume options trading
-WATCHLIST = ["TQQQ", "NVDA", "TSLA", "PLTR", "SOFI", "AAPL", "AMD", "MARA"]
-
-def get_rsi(symbol):
-    """Fetches 15-minute RSI using Alpha Vantage Premium."""
-    url = f"https://www.alphavantage.co/query?function=RSI&symbol={symbol}&interval=15min&time_period=14&series_type=close&apikey={API_KEY}"
+def get_active_tickers():
+    """Venture Discovery: Finds high-volume targets for options liquidity."""
+    url = f"https://api.twelvedata.com/market_movers/stocks?direction=all&outputsize=10&apikey={TD_API_KEY}"
     try:
-        data = requests.get(url, timeout=15).json()
-        # Get the latest RSI value from the nested dictionary
-        latest_time = list(data['Technical Analysis: RSI'].keys())[0]
-        return float(data['Technical Analysis: RSI'][latest_time]['RSI'])
-    except Exception as e:
-        print(f"    [AV] RSI Error for {symbol}: {e}")
-        return None
+        data = requests.get(url).json()
+        core_list = ["NVDA", "TSLA", "TQQQ", "AAPL", "AMD", "SOFI", "PLTR", "MSFT"]
+        discovered = [item['symbol'] for item in data.get('values', []) if item['type'] == 'Stock']
+        return list(set(discovered + core_list))[:12]
+    except:
+        return ["NVDA", "TSLA", "TQQQ", "AAPL", "AMD", "SOFI"]
 
-def monitor_waves():
-    print(f"--- STARTING TRADE SIGNAL SCAN: {time.ctime()} ---")
-    for symbol in WATCHLIST:
-        try:
-            rsi_val = get_rsi(symbol)
-            if rsi_val is None:
-                continue
-                
-            # Essentials Algos Logic: Strike Zones
-            if rsi_val <= 30:
-                send_essentials_embed(
-                    WEBHOOK_URL, 
-                    f"🌊 {symbol} STRIKE ZONE: OVERSOLD",
-                    f"{symbol} is currently hitting a high-conviction entry point.\n**RSI:** {rsi_val:.2f}",
-                    0x2ecc71 # Green
-                )
-            elif rsi_val >= 70:
-                send_essentials_embed(
-                    WEBHOOK_URL, 
-                    f"🚨 {symbol} ALERT: OVERBOUGHT",
-                    f"{symbol} is reaching an exhaustion point. Watch for a pullback.\n**RSI:** {rsi_val:.2f}",
-                    0xe74c3c # Red
-                )
-            
-            # Respect API limits even with Premium (1 sec is safe)
-            time.sleep(1) 
-        except Exception as e:
-            print(f"Error scanning {symbol}: {e}")
-    print(f"--- SCAN COMPLETE ---")
+def get_trade_setup(symbol):
+    """Venture Analytics: Pulls VWAP, RSI, and Standard Deviation for Strike placement."""
+    vwap_url = f"https://api.twelvedata.com/vwap?symbol={symbol}&interval=15min&apikey={TD_API_KEY}"
+    rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=15min&time_period=14&apikey={TD_API_KEY}"
+    quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+    # Standard Deviation to find a 'realistic' strike offset
+    std_url = f"https://api.twelvedata.com/stdev?symbol={symbol}&interval=15min&time_period=20&apikey={TD_API_KEY}"
+
+    try:
+        price_data = requests.get(quote_url).json()
+        v_data = requests.get(vwap_url).json()
+        r_data = requests.get(rsi_url).json()
+        s_data = requests.get(std_url).json()
+
+        return {
+            "price": float(price_data['close']),
+            "vwap": float(v_data['values'][0]['vwap']),
+            "rsi": float(r_data['values'][0]['rsi']),
+            "stdev": float(s_data['values'][0]['stdev']),
+            "symbol": symbol
+        }
+    except: return None
+
+def run_discovery_scan():
+    print(f"--- 🏛️ TRADE DISCOVERY START: {datetime.datetime.now()} ---")
+    active_watchlist = get_active_tickers()
+    
+    for symbol in active_watchlist:
+        setup = get_trade_setup(symbol)
+        if not setup: continue
+
+        rsi = setup['rsi']
+        price = setup['price']
+        vwap = setup['vwap']
+        sd_offset = setup['stdev'] * 0.5 # 0.5 Sigma offset for a realistic strike target
+
+        # --- ACTIONABLE ALGO LOGIC ---
+        # BUY CALLS: Oversold and Reclaiming VWAP
+        if rsi < 35 and price >= vwap:
+            strike = round(price + sd_offset)
+            msg = (
+                f"**ACTION**: BUY CALLS\n"
+                f"**TICKER**: ${symbol}\n"
+                f"**STRIKE**: ${strike} (Targeting Momentum)\n"
+                f"**DTE**: 7-14 Days\n"
+                f"**LOGIC**: Oversold RSI + VWAP Reclaim (Bullish Pivot)\n"
+                f"**EXIT**: You must decide - set a limit to exit if needed."
+            )
+            send_essentials_embed(WEBHOOK_URL, f"🏛️ SIGNAL: BULLISH ENTRY", msg, 0x2ecc71)
+
+        # BUY PUTS: Overbought and Rejecting VWAP
+        elif rsi > 65 and price <= vwap:
+            strike = round(price - sd_offset)
+            msg = (
+                f"**ACTION**: BUY PUTS\n"
+                f"**TICKER**: ${symbol}\n"
+                f"**STRIKE**: ${strike} (Targeting Mean-Reversion)\n"
+                f"**DTE**: 7-14 Days\n"
+                f"**LOGIC**: Overbought RSI + VWAP Rejection (Bearish Exhaustion)\n"
+                f"**EXIT**: You must decide - set a limit to exit if needed."
+            )
+            send_essentials_embed(WEBHOOK_URL, f"🏛️ SIGNAL: BEARISH ENTRY", msg, 0xe74c3c)
+        
+        time.sleep(1.2)
 
 if __name__ == "__main__":
-    monitor_waves()
+    run_discovery_scan()
