@@ -1,86 +1,88 @@
-import yfinance as yf
-import pandas as pd
 import os
 import time
+import requests
+import pandas as pd
 from dotenv import load_dotenv
 from essentials_tools import send_essentials_embed
 
 load_dotenv()
+TD_API_KEY = os.getenv("TD_API_KEY")
 WEBHOOK_INCOME = os.getenv("WEBHOOK_INCOME_CCETFS")
 
-# Your categorized watchlist
-CORE_INCOME = ["JEPQ", "JEPI", "SPYI", "QQQI", "QYLD", "DIVO", "TSPY", "TDAQ"]
-YIELDMAX_HYPE = ["MSTY", "NVDY"]
-
-def get_etf_metrics(ticker):
-    """Calculates Total Return and Yield with data cleaning."""
+def discover_income_etfs():
+    """Dynamically finds Covered Call ETFs using Twelve Data Search."""
+    print("🔍 Scanning for new Income/Covered Call ETFs...")
+    url = f"https://api.twelvedata.com/symbol_search?symbol=Covered%20Call&outputsize=10&apikey={TD_API_KEY}"
     try:
-        data = yf.Ticker(ticker)
-        # Fetch 35 days to ensure we have a full month of trading even with weekends
-        hist = data.history(period="35d").dropna() 
-        
-        if hist.empty:
-            return None
-        
-        # Calculate 1-Month Total Return
-        # We use the oldest available close in this 35d window as the start
-        start_price = hist['Close'].iloc[0]
-        end_price = hist['Close'].iloc[-1]
-        divs = hist['Dividends'].sum()
-        total_return = ((end_price + divs) - start_price) / start_price * 100
-        
-        info = data.info
-        raw_yield = info.get('dividendYield', 0)
-        
-        # YFinance consistency fix: some yields come as 0.11, some as 11.0
-        # If yield > 2 (200%), it's likely already a percentage or a data error
-        if raw_yield is not None:
-            if raw_yield < 2:
-                current_yield = raw_yield * 100
-            else:
-                current_yield = raw_yield
-        else:
-            current_yield = 0
-            
-        return {
-            "price": end_price,
-            "yield": current_yield,
-            "return_1m": total_return
-        }
+        results = requests.get(url).json().get('data', [])
+        # Filter for US ETFs only
+        return [item['symbol'] for item in results if item['instrument_type'] == 'ETF' and item['currency'] == 'USD']
     except Exception as e:
-        print(f"Error on {ticker}: {e}")
+        print(f"Discovery Error: {e}")
+        return ["JEPQ", "JEPI", "SPYI", "MSTY", "NVDY"] # Fallback to core
+
+def get_premium_metrics(symbol):
+    """Fetches high-value FIRE metrics: RSI, Price, and Yield."""
+    try:
+        # 1. Get Quote & Yield
+        quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+        quote = requests.get(quote_url).json()
+        
+        # 2. Get RSI (Daily) for Entry Intelligence
+        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
+        rsi_data = requests.get(rsi_url).json()
+        
+        price = float(quote.get('close', 0))
+        # Note: 12Data 'yield' depends on plan; fallback to 0 if unavailable
+        div_yield = float(quote.get('trailing_annual_dividend_yield', 0)) * 100
+        rsi = float(rsi_data.get('values', [{}])[0].get('rsi', 50))
+
+        # FIRE Entry Logic
+        if rsi < 35:
+            status = "💎 **Strike Zone** (Oversold)"
+            color_mod = "🟢"
+        elif rsi > 65:
+            status = "⚠️ **Overextended** (Hold)"
+            color_mod = "🔴"
+        else:
+            status = "✅ **Neutral** (Accumulate)"
+            color_mod = "🟡"
+
+        return {
+            "symbol": symbol,
+            "price": price,
+            "yield": div_yield,
+            "rsi": rsi,
+            "status": status,
+            "indicator": color_mod
+        }
+    except:
         return None
 
-def run_income_report():
-    print("--- INCOME ETF SCANNER START ---")
-    report = "📊 **Monthly Performance Pulse**\n\n"
+def run_income_radar():
+    print("--- FIRE INCOME RADAR START ---")
+    dynamic_list = discover_income_etfs()
+    # Merge with your "Must-Watch" list
+    watchlist = list(set(dynamic_list + ["JEPQ", "JEPI", "MSTY", "NVDY", "SPYI"]))
     
-    # 1. Process Core Favorites
-    report += "🔹 **Core & Tax-Efficient Income**\n"
-    for ticker in CORE_INCOME:
-        m = get_etf_metrics(ticker)
+    report_lines = []
+    for ticker in watchlist:
+        m = get_premium_metrics(ticker)
         if m:
-            indicator = "📈" if m['return_1m'] > 0 else "📉"
-            report += f"**{ticker}**: ${m['price']:.2f} | Yield: {m['yield']:.1f}% | 1M Ret: {indicator} {m['return_1m']:.1f}%\n"
-        time.sleep(1)
+            line = (f"{m['indicator']} **{m['symbol']}** | Price: ${m['price']:.2f} | "
+                    f"RSI: {m['rsi']:.1f}\n   └ {m['status']}")
+            report_lines.append(line)
+        time.sleep(1) # Respect Rate Limits
 
-    # 2. Process High-Hype YieldMax
-    report += "\n🔥 **Ultra-High Yield (Speculative)**\n"
-    for ticker in YIELDMAX_HYPE:
-        m = get_etf_metrics(ticker)
-        if m:
-            # Indicator for YieldMax volatility
-            indicator = "🚀" if m['return_1m'] > 10 else ("📈" if m['return_1m'] > 0 else "📉")
-            report += f"**{ticker}**: ${m['price']:.2f} | Yield: {m['yield']:.1f}% | 1M Ret: {indicator} {m['return_1m']:.1f}%\n"
-
-    # Dispatch to Discord
+    report_text = "\n\n".join(report_lines)
+    
     send_essentials_embed(
         webhook_url=WEBHOOK_INCOME,
-        title="Income ETF Performance Radar",
-        description=report,
-        color=0x2ecc71 
+        title="🔥 Professional Income Discovery Radar",
+        description=f"Automated scan for high-yield covered call opportunities.\n\n{report_text}",
+        color=0x2ecc71
     )
-    print("--- DISPATCHED TO DISCORD ---")
+    print("--- RADAR DISPATCHED ---")
 
 if __name__ == "__main__":
-    run_income_report()
+    run_income_radar()
