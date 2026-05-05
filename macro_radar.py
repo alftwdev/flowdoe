@@ -7,19 +7,20 @@ from datetime import datetime  # Corrected import for your usage
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_FILE = os.path.join(BASE_DIR, 'macro_history.csv')
 
-def save_to_history(vix_price, regime):
-    """Saves daily data to the CSV using the absolute path."""
+def save_to_history(vix_price, regime, spy_price): # Add spy_price here
     file_exists = os.path.isfile(HISTORY_FILE)
     try:
         with open(HISTORY_FILE, mode='a', newline='') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(['Date', 'VIX', 'Regime'])
+                # Add spy_price to the header
+                writer.writerow(['Date', 'VIX', 'Regime', 'spy_price']) 
             
             writer.writerow([
                 datetime.now().strftime('%Y-%m-%d'),
                 vix_price,
-                regime
+                regime,
+                spy_price # Log the price
             ])
         print(f"✅ History logged to: {HISTORY_FILE}")
     except Exception as e:
