@@ -2,146 +2,132 @@ import datetime
 import sys
 import os
 import requests
-import time
+import pandas as pd
+import smtplib
 import urllib3
-import re
+from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
-from essentials_tools import send_essentials_embed
 
-# --- 0. CONFIG ---
-load_dotenv() 
+try:
+    from essentials_tools import send_essentials_embed
+    HAS_ESSENTIALS = True
+except ImportError:
+    HAS_ESSENTIALS = False
+
+# --- 1. INITIALIZATION ---
+load_dotenv()
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
-PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+WORK_EMAIL = os.getenv("WORK_EMAIL")
 WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
-TD_API_KEY = os.getenv("TD_API_KEY") # Ensure this matches your .env
+PUSHOVER_USER = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 set_identity(f"Alwin Almazan {SENDER_EMAIL}")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+HISTORY_FILE = os.path.join(BASE_PATH, "macro_history.csv")
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
-# --- 1. THE VENTURE MONITOR ---
-
-def get_venture_market_status(ticker):
-    """Venture Tier: Pulls real-time quote + technical context for whale detection."""
-    url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TD_API_KEY}"
+def get_venture_data(ticker):
+    """Accurate Venture Tier forensics. Internalizes volume averages for protection."""
+    url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+    fallback_avg = 1700000 if ticker == "CLM" else 950000 
+    
     try:
-        data = requests.get(url, timeout=10).json()
-        if data.get("status") == "error": return None
-        
-        return {
-            "price": float(data['close']),
-            "change_pct": float(data['percent_change']),
-            "volume": int(data['volume']),
-            "avg_volume": int(data['average_volume']),
-            "is_dumping": int(data['volume']) > (int(data['average_volume']) * 1.5) and float(data['percent_change']) < -2.0
-        }
-    except: return None
-
-def get_official_nav(ticker):
-    """Morningstar Scraping with a hard-coded safety fallback."""
-    url = f"https://www.morningstar.com/cefs/xase/{ticker.lower()}/quote"
-    try:
-        resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-        match = re.search(r'"lastActualNav":(\d+\.\d+)', resp.text)
-        if match: return float(match.group(1))
+        resp = requests.get(url, timeout=12).json()
+        if resp.get("status") == "ok":
+            return {
+                "price": float(resp['close']),
+                "vol": int(resp.get('volume', 0)),
+                "avg_vol": int(resp.get('average_volume', fallback_avg)),
+                "change": float(resp.get('percent_change', 0))
+            }
+        b_resp = requests.get(f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TWELVE_DATA_KEY}", timeout=10).json()
+        if "price" in b_resp:
+            return {"price": float(b_resp['price']), "vol": 0, "avg_vol": fallback_avg, "change": 0}
     except: pass
-    return 6.43 if ticker == "CLM" else 6.23
+    return None
 
-# --- 2. SENTRY LOGIC ---
-
-def run_sentry():
-    print(f"--- 🛡️ SENTRY CHECK: {datetime.datetime.now()} ---")
-    
-    # Timing Logic
-    current_hour_utc = datetime.datetime.now(datetime.timezone.utc).hour
-    is_pulse_hour = (current_hour_utc == 18) # 08:00 HST
+def run_sentry_check():
+    now = datetime.datetime.now()
     is_test = "test" in sys.argv
+    is_pulse_time = (now.hour == 8 and now.minute < 15)
     
-    emergency_triggered = False
+    print(f"\n--- SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    
     reports = []
+    sec_detected = False
+    vol_spike = False
+    high_premium = False
 
     for ticker in ["CLM", "CRF"]:
-        # A. SEC Filing (The RO Edge)
+        print(f"PROCESS: Analyzing {ticker} SEC Filings...")
         try:
             comp = Company(ticker)
             filings = comp.get_filings(form=["N-2", "424B3"])
-            sec_hit = False
             if filings is not None and not filings.empty:
-                f_id = filings.latest().accession_number
+                acc = filings.latest().accession_number
                 if not os.path.exists(LOG_FILE): open(LOG_FILE, 'w').close()
                 with open(LOG_FILE, "r") as f:
-                    if f_id not in f.read():
-                        sec_hit = True
-                        with open(LOG_FILE, "a") as f_app: f_app.write(f"{f_id}\n")
-        except: sec_hit = False
+                    if acc not in f.read():
+                        sec_detected = True
+                        with open(LOG_FILE, "a") as fw: fw.write(f"{acc}\n")
+        except: pass
 
-        # B. Venture Market Data
-        mkt = get_venture_market_status(ticker)
-        nav = get_official_nav(ticker)
-        
-        if mkt and nav:
-            premium = ((mkt['price'] - nav) / nav) * 100
+        print(f"PROCESS: Fetching {ticker} Venture Market Data...")
+        mkt = get_venture_data(ticker)
+        nav_path = os.path.join(BASE_PATH, f"{ticker}_anchor.txt")
+        try:
+            with open(nav_path, "r") as f: nav = float(f.read().strip())
+        except: nav = 6.43 if ticker == "CLM" else 6.23
+
+        if mkt:
+            price = mkt['price']
+            premium = ((price - nav) / nav) * 100
             
-            # TRIGGER DEFINITIONS
-            is_whale_dump = mkt['is_dumping']
-            is_high_premium = premium > 25.0
-            
-            status = "✅ STABLE"
-            if sec_hit: 
-                status, emergency_triggered = "🚨 SELL SIGNAL: N-2 FILED", True
-            elif is_whale_dump: 
-                status, emergency_triggered = "🚨 WHALE DUMP DETECTED", True
-            elif is_high_premium: 
-                status, emergency_triggered = "⚠️ HIGH PREMIUM WARNING", True
+            status = "STABLE"
+            # Ensure volume is greater than 0 before checking for a spike to avoid false alerts at night
+            if mkt['vol'] > 0 and mkt['vol'] > (mkt['avg_vol'] * 1.4) and mkt['change'] < -2.5:
+                vol_spike, status = True, "🚨 VOLATILITY DUMP"
+            elif premium > 25:
+                high_premium, status = True, "🚨 HIGH PREMIUM"
+            elif premium > 21:
+                status = "⚠️ CAUTION"
 
-            # Format Report
-            report = (
-                f"**{ticker}**: {status}\n"
-                f"└ Price: ${mkt['price']:.2f} | NAV: ${nav:.2f} ({premium:.1f}% Prem)\n"
-                f"└ Vol: {mkt['volume']:,} (Avg: {mkt['avg_volume']:,})"
+            reports.append(
+                f"**{ticker}: {status}**\n"
+                f"└ Price: ${price:.2f} | NAV: ${nav:.2f} ({premium:.1f}% Prem)\n"
+                f"└ Vol: {mkt['vol']:,}"
             )
-            reports.append(report)
+            print(f"   [RESULT] {ticker}: {status} (${price})")
 
-    # --- 3. SMART NOTIFICATION DISPATCH ---
-    if reports:
-        full_msg = "\n\n".join(reports)
+    if sec_detected: action_line = "🚨 SELL NOW - RO/SEC FILING DETECTED"
+    elif vol_spike: action_line = "🚨 SELL NOW - VOLUME SPIKE DETECTED"
+    elif high_premium: action_line = "⚠️ High premium is approaching"
+    else: action_line = "✅ No RO/SEC filing detected"
+
+    if reports and (is_test or sec_detected or vol_spike or is_pulse_time):
+        full_msg = f"**Daily Cornerstone Pulse**\nStatus: {action_line}\n\n" + "\n".join(reports)
         
-        # Scenario A: Emergency (Pushover + Discord immediately)
-        if emergency_triggered:
-            # Discord
-            send_essentials_embed(
-                webhook_url=WEBHOOK_CORNERSTONE,
-                title="🚨 CORNERSTONE EMERGENCY ALERT",
-                description=full_msg,
-                color=0xe74c3c
-            )
-            # Pushover
-            requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
-                "title": "🚨 CLM/CRF SELL ALERT", "message": full_msg.replace("**", ""),
-                "priority": 1, "sound": "emergency", "retry": 60, "expire": 3600
-            })
-            print("🚨 Emergency Alert Dispatched.")
+        if HAS_ESSENTIALS:
+            print("ACTION: Dispatching to Discord...")
+            send_essentials_embed(os.getenv("WEBHOOK_CORNERSTONE_RO"), "🛠️ Heartbeat" if is_test else "🛡️ Sentry Pulse", full_msg, 0xe74c3c if (sec_detected or vol_spike) else 0x2ecc71)
+        
+        if is_test or sec_detected or vol_spike or is_pulse_time:
+            print("ACTION: Dispatching to Pushover & Email...")
+            requests.post("https://api.pushover.net/1/messages.json", data={"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, "title": "Sentry Alert", "message": full_msg.replace("**", ""), "priority": 1 if (sec_detected or vol_spike) else 0})
+            try:
+                msg = EmailMessage()
+                msg.set_content(full_msg.replace("**", "")); msg['Subject'] = "Sentry Tactical Update"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL if WORK_EMAIL else SENDER_EMAIL}"
+                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                    smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
+            except: pass
 
-        # Scenario B: Daily Pulse (Every day at 0800 HST)
-        elif is_pulse_hour or is_test:
-            send_essentials_embed(
-                webhook_url=WEBHOOK_CORNERSTONE,
-                title="💎 Daily Cornerstone Pulse (0800 HST)",
-                description="Monitoring for RO Filings and Institutional Dumps.\n\n" + full_msg,
-                color=0x3498db
-            )
-            # Personal Pushover (No sound, low priority)
-            requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
-                "title": "🤖 Daily Pulse: CLM/CRF", "message": full_msg.replace("**", ""),
-                "priority": 0
-            })
-            print("📅 Daily Pulse Dispatched.")
+    print(f"--- SENTRY FINISHED: {datetime.datetime.now().strftime('%H:%M:%S')} ---\n")
 
 if __name__ == "__main__":
-    run_sentry()
+    run_sentry_check()
