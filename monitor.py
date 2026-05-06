@@ -9,7 +9,6 @@ from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
 
-# Try to import essential tools for Discord
 try:
     from essentials_tools import send_essentials_embed
     HAS_ESSENTIALS = True
@@ -17,7 +16,7 @@ except ImportError:
     HAS_ESSENTIALS = False
 
 # --- 1. INITIALIZATION ---
-# Using absolute path for PythonAnywhere reliability
+# Forces the script to look in its own directory for the .env file
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_PATH, ".env"))
 
@@ -105,24 +104,32 @@ def run_sentry_check():
     elif high_premium: action_line = "⚠️ High premium is approaching"
     else: action_line = "✅ No RO/SEC filing detected"
 
-    # CRITICAL LOGIC: Send if Test, SEC, Vol Spike, OR Daily Pulse window
-    should_send = is_test or sec_detected or vol_spike or is_pulse_time
-    
-    if reports and should_send:
+    # CRITICAL FIX: Ensure dispatch only happens if variables are present
+    if reports and (is_test or sec_detected or vol_spike or is_pulse_time):
         full_msg = f"**Daily Cornerstone Pulse**\nStatus: {action_line}\n\n" + "\n".join(reports)
         
-        if HAS_ESSENTIALS:
+        if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
             print("ACTION: Dispatching to Discord...")
             send_essentials_embed(WEBHOOK_CORNERSTONE, "🛠️ Heartbeat" if is_test else "🛡️ Sentry Pulse", full_msg, 0xe74c3c if (sec_detected or vol_spike) else 0x2ecc71)
-        
-        print("ACTION: Dispatching to Pushover & Email...")
-        requests.post("https://api.pushover.net/1/messages.json", data={"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, "title": "Sentry Alert", "message": full_msg.replace("**", ""), "priority": 1 if (sec_detected or vol_spike) else 0})
-        try:
-            msg = EmailMessage()
-            msg.set_content(full_msg.replace("**", "")); msg['Subject'] = "Sentry Tactical Update"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL}"
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-                smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
-        except: print("   ⚠️ Email dispatch failed.")
+        else:
+            print("   ⚠️ Skipping Discord: Webhook missing or essentials_tools not found.")
+
+        if PUSHOVER_TOKEN and PUSHOVER_USER:
+            print("ACTION: Dispatching to Pushover...")
+            requests.post("https://api.pushover.net/1/messages.json", data={"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, "title": "Sentry Alert", "message": full_msg.replace("**", ""), "priority": 1 if (sec_detected or vol_spike) else 0})
+        else:
+            print("   ⚠️ Skipping Pushover: Keys missing.")
+
+        if SENDER_EMAIL and EMAIL_APP_PASSWORD:
+            print("ACTION: Dispatching to Email...")
+            try:
+                msg = EmailMessage()
+                msg.set_content(full_msg.replace("**", "")); msg['Subject'] = "Sentry Tactical Update"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL}"
+                with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                    smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
+            except: print("   ⚠️ Email failed.")
+        else:
+            print("   ⚠️ Skipping Email: Credentials missing.")
 
     print(f"--- SENTRY FINISHED: {datetime.datetime.now().strftime('%H:%M:%S')} ---\n")
 
