@@ -48,7 +48,7 @@ def generate_weekly_recap():
         df = pd.read_csv(HISTORY_FILE)
         
         # FIX: Ensure column names match macro_radar.py output[cite: 7]
-        # Current columns: Date, VIX, Regime, SPY_Price
+        # Current columns: Date, VIX, Regime, spy_price
         df['Date'] = pd.to_datetime(df['Date'])
         
         # DYNAMIC FIX: Create 'week_id' since it isn't stored in the CSV[cite: 10]
@@ -62,13 +62,13 @@ def generate_weekly_recap():
             return
 
         # Handle SPY Performance[cite: 10]
-        # Use SPY_Price instead of spy_price
-        if 'SPY_Price' in week_data.columns:
-            start_spy = week_data['SPY_Price'].iloc[0]
-            end_spy = week_data['SPY_Price'].iloc[-1]
+        # Use spy_price instead of SPY_Price
+        if 'spy_price' in week_data.columns:
+            start_spy = week_data['spy_price'].iloc[0]
+            end_spy = week_data['spy_price'].iloc[-1]
             spy_perf = ((end_spy - start_spy) / start_spy) * 100
         else:
-            print("⚠️ 'SPY_Price' not in CSV. Performance summary will be neutral.")
+            print("⚠️ 'spy_price' not in CSV. Performance summary will be neutral.")
             spy_perf = 0.0
 
         # Determine Regime Trend (Mode)
