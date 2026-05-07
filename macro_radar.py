@@ -1,74 +1,131 @@
 import os
 import csv
 import requests
+import pytz
 from datetime import datetime
 from dotenv import load_dotenv
 
-load_dotenv()
+# Import the shared dispatch tool
+try:
+    from essentials_tools import send_essentials_embed
+    HAS_ESSENTIALS = True
+except ImportError:
+    HAS_ESSENTIALS = False
 
-# --- CONFIGURATION ---
-TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+# --- 1. INITIALIZATION & PATHING ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HISTORY_FILE = os.path.join(BASE_DIR, 'macro_history.csv')
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
+HISTORY_FILE = os.path.join(BASE_DIR, "macro_history.csv")
 
 def fetch_td_data(url):
     try:
         response = requests.get(url, timeout=15)
         data = response.json()
-        if data.get("status") == "error":
-            return None
-        return data
+        return data if data.get("status") != "error" else None
     except Exception as e:
         print(f"❌ Connection Error: {e}")
         return None
 
-def get_market_data(symbol):
-    """Fetches Price, EMA200, and Volume for Whale detection."""
-    quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
-    ema_url = f"https://api.twelvedata.com/ema?symbol={symbol}&interval=1day&time_period=200&apikey={TD_API_KEY}"
+def get_market_regime():
+    """Analyzes the 3 pillars of market health."""
+    # 1. Trend Pillar (SPY vs EMA200)
+    spy_quote = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=SPY&apikey={TD_API_KEY}")
+    spy_ema = fetch_td_data(f"https://api.twelvedata.com/ema?symbol=SPY&interval=1day&time_period=200&apikey={TD_API_KEY}")
     
-    q = fetch_td_data(quote_url)
-    e = fetch_td_data(ema_url)
+    # 2. Volatility Pillar (VIX)
+    vix_data = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=VIX&apikey={TD_API_KEY}")
     
-    if q and e:
-        try:
-            return {
-                "price": float(q['close']),
-                "ema": float(e['values'][0]['ema']),
-                "vol": int(q['volume']),
-                "avg_vol": int(q['average_volume'])
-            }
-        except (KeyError, IndexError): pass
-    return None
+    # 3. Breadth Pillar (Tech vs Defensive comparison)
+    # Venture Tier allows us to batch check or check multiple quickly
+    tech = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=XLK&apikey={TD_API_KEY}")
+    defensive = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=XLP&apikey={TD_API_KEY}")
 
-def save_to_history(vix, spy_price, regime):
+    try:
+        spy_p = float(spy_quote['close'])
+        ema_p = float(spy_ema['values'][0]['ema'])
+        vix_p = float(vix_data['close']) if vix_data else 20.0
+        
+        # Logic: If Tech is outperforming Staples, it's Risk-On
+        tech_chg = float(tech['percent_change']) if tech else 0
+        def_chg = float(defensive['percent_change']) if defensive else 0
+        breadth = "Aggressive" if tech_chg > def_chg else "Defensive"
+
+        # Determination
+        if spy_p > ema_p and vix_p < 20:
+            regime = "BULLISH"
+            color = 0x2ecc71 # Green
+        elif spy_p < ema_p or vix_p > 25:
+            regime = "BEARISH"
+            color = 0xe74c3c # Red
+        else:
+            regime = "NEUTRAL"
+            color = 0xf1c40f # Yellow
+
+        return {
+            "regime": regime,
+            "spy": spy_p,
+            "vix": vix_p,
+            "breadth": breadth,
+            "color": color
+        }
+    except:
+        return None
+
+def save_to_history(data):
+    """Feeds the CSV for the Weekly Digest to pull from."""
     file_exists = os.path.isfile(HISTORY_FILE)
+    tz_honolulu = pytz.timezone('Pacific/Honolulu')
+    date_str = datetime.now(tz_honolulu).strftime('%Y-%m-%d')
+    
     with open(HISTORY_FILE, mode='a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['Date', 'VIX', 'Regime', 'spy_price']) 
-        writer.writerow([datetime.now().strftime('%Y-%m-%d'), vix, regime, spy_price])
+            writer.writerow(['Date', 'VIX', 'Regime', 'spy_price', 'Breadth'])
+        writer.writerow([date_str, data['vix'], data['regime'], data['spy'], data['breadth']])
 
-def run_macro_check():
-    print(f"--- 🛰️ VENTURE MACRO RADAR: {datetime.now()} ---")
+def run_macro_radar():
+    tz_honolulu = pytz.timezone('Pacific/Honolulu')
+    now = datetime.now(tz_honolulu)
     
-    spy = get_market_data("SPY")
-    if not spy: return
-
-    # Fixed VIX Symbol for Twelve Data
-    vix_data = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=VIX&apikey={TD_API_KEY}")
-    if not vix_data:
-        vix_data = fetch_td_data(f"https://api.twelvedata.com/quote?symbol=VIX:CBOE&apikey={TD_API_KEY}")
+    print(f"--- 🛰️ MACRO RADAR START: {now.strftime('%Y-%m-%d %H:%M:%S')} (HST) ---")
     
-    vix_price = float(vix_data['close']) if vix_data else 20.0
+    data = get_market_regime()
+    if not data:
+        print("❌ Error: Could not fetch complete market data.")
+        return
 
-    # Whale Alert Logic: Vol > 3x Average
-    if spy['vol'] > (spy['avg_vol'] * 3):
-        print("🚨 WHALE ALERT: Massive SPY Volume detected.")
+    # Save to CSV for the Weekly Digest engine
+    save_to_history(data)
 
-    regime = "Risk-On" if (vix_price < 20 and spy['price'] > spy['ema']) else "Risk-Off"
-    save_to_history(vix_price, spy['price'], regime)
-    print(f"✅ Market Status: {regime}")
+    # --- THE "ESSENTIALS" DISCORD BAIT ---
+    if HAS_ESSENTIALS and WEBHOOK_MARKET:
+        title = "🏛️ The Essentials: Market Macro Radar"
+        description = (
+            f"**Current Outlook: {data['regime']}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"### **The Key Metrics**\n"
+            f"└ **S&P 500**: `${data['spy']:,.2f}`\n"
+            f"└ **VIX (Fear Index)**: `{data['vix']:.2f}`\n"
+            f"└ **Market Breadth**: `{data['breadth']}`\n\n"
+            f"### **Analysis**\n"
+            f"The market is currently in a **{data['regime'].lower()}** phase. "
+            f"Capital protection is {'prioritized' if data['regime'] == 'BEARISH' else 'balanced with growth'}. "
+            f"Our Sentry systems are monitoring the tape for institutional footprints.\n\n"
+            f"*Upgrade to Premium to access the real-time SEC Shield and Whale Dump alerts.*"
+        )
+        
+        send_essentials_embed(
+            webhook_url=WEBHOOK_MARKET,
+            title=title,
+            description=description,
+            color=data['color']
+        )
+        print("ACTION: Dispatching Market Analysis to Discord...")
+
+    print(f"--- MACRO RADAR FINISHED ---")
 
 if __name__ == "__main__":
-    run_macro_check()
+    run_macro_radar()
