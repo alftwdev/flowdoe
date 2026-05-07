@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import smtplib
 import urllib3
+import pytz  # Added: Standard for timezone handling
 from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
@@ -16,7 +17,6 @@ except ImportError:
     HAS_ESSENTIALS = False
 
 # --- 1. INITIALIZATION ---
-# Forces the script to look in its own directory for the .env file
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_PATH, ".env"))
 
@@ -36,6 +36,7 @@ LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
 def get_venture_data(ticker):
     url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+    # Venture Tier specific average volume baselines
     fallback_avg = 1700000 if ticker == "CLM" else 950000 
     try:
         resp = requests.get(url, timeout=12).json()
@@ -46,6 +47,7 @@ def get_venture_data(ticker):
                 "avg_vol": int(resp.get('average_volume', fallback_avg)),
                 "change": float(resp.get('percent_change', 0))
             }
+        # Secondary fallback if quote endpoint is throttled
         b_resp = requests.get(f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TWELVE_DATA_KEY}", timeout=10).json()
         if "price" in b_resp:
             return {"price": float(b_resp['price']), "vol": 0, "avg_vol": fallback_avg, "change": 0}
@@ -53,11 +55,16 @@ def get_venture_data(ticker):
     return None
 
 def run_sentry_check():
-    now = datetime.datetime.now()
+    # --- TIMEZONE ALIGNMENT ---
+    # This ensures the script's 'clock' is always set to Honolulu
+    tz_honolulu = pytz.timezone('Pacific/Honolulu')
+    now = datetime.datetime.now(tz_honolulu)
+    
     is_test = "test" in sys.argv
+    # The Pulse fires between 08:00 and 08:14 HST
     is_pulse_time = (now.hour == 8 and now.minute < 15)
     
-    print(f"--- SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} ---")
+    print(f"--- SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} (HST) ---")
     
     reports = []
     sec_detected = False
@@ -80,6 +87,8 @@ def run_sentry_check():
 
         print(f"PROCESS: Fetching {ticker} Venture Market Data...")
         mkt = get_venture_data(ticker)
+        
+        # Pull NAV Anchor
         nav_path = os.path.join(BASE_PATH, f"{ticker}_anchor.txt")
         try:
             with open(nav_path, "r") as f: nav = float(f.read().strip())
@@ -89,6 +98,8 @@ def run_sentry_check():
             price = mkt['price']
             premium = ((price - nav) / nav) * 100
             status = "STABLE"
+            
+            # Venture Logic: Whale Dump Detection
             if mkt['vol'] > 0 and mkt['vol'] > (mkt['avg_vol'] * 1.4) and mkt['change'] < -2.5:
                 vol_spike, status = True, "🚨 VOLATILITY DUMP"
             elif premium > 25:
@@ -99,26 +110,29 @@ def run_sentry_check():
             reports.append(f"**{ticker}: {status}**\n└ Price: ${price:.2f} | NAV: ${nav:.2f} ({premium:.1f}% Prem)\n└ Vol: {mkt['vol']:,}")
             print(f"   [RESULT] {ticker}: {status} (${price})")
 
+    # Determine Action Line
     if sec_detected: action_line = "🚨 SELL NOW - RO/SEC FILING DETECTED"
     elif vol_spike: action_line = "🚨 SELL NOW - VOLUME SPIKE DETECTED"
     elif high_premium: action_line = "⚠️ High premium is approaching"
     else: action_line = "✅ No RO/SEC filing detected"
 
-    # CRITICAL FIX: Ensure dispatch only happens if variables are present
+    # Dispatch logic
     if reports and (is_test or sec_detected or vol_spike or is_pulse_time):
         full_msg = f"**Daily Cornerstone Pulse**\nStatus: {action_line}\n\n" + "\n".join(reports)
         
         if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
             print("ACTION: Dispatching to Discord...")
             send_essentials_embed(WEBHOOK_CORNERSTONE, "🛠️ Heartbeat" if is_test else "🛡️ Sentry Pulse", full_msg, 0xe74c3c if (sec_detected or vol_spike) else 0x2ecc71)
-        else:
-            print("   ⚠️ Skipping Discord: Webhook missing or essentials_tools not found.")
 
         if PUSHOVER_TOKEN and PUSHOVER_USER:
             print("ACTION: Dispatching to Pushover...")
-            requests.post("https://api.pushover.net/1/messages.json", data={"token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, "title": "Sentry Alert", "message": full_msg.replace("**", ""), "priority": 1 if (sec_detected or vol_spike) else 0})
-        else:
-            print("   ⚠️ Skipping Pushover: Keys missing.")
+            requests.post("https://api.pushover.net/1/messages.json", data={
+                "token": PUSHOVER_TOKEN, 
+                "user": PUSHOVER_USER, 
+                "title": "Sentry Alert", 
+                "message": full_msg.replace("**", ""), 
+                "priority": 1 if (sec_detected or vol_spike) else 0
+            })
 
         if SENDER_EMAIL and EMAIL_APP_PASSWORD:
             print("ACTION: Dispatching to Email...")
@@ -128,10 +142,8 @@ def run_sentry_check():
                 with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                     smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
             except: print("   ⚠️ Email failed.")
-        else:
-            print("   ⚠️ Skipping Email: Credentials missing.")
 
-    print(f"--- SENTRY FINISHED: {datetime.datetime.now().strftime('%H:%M:%S')} ---\n")
+    print(f"--- SENTRY FINISHED: {datetime.datetime.now(tz_honolulu).strftime('%H:%M:%S')} ---\n")
 
 if __name__ == "__main__":
     run_sentry_check()
