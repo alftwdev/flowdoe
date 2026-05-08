@@ -3,122 +3,120 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from essentials_tools import send_essentials_embed
 
-# Import the broadcast tool from your local essentials_tools.py
-try:
-    from essentials_tools import send_essentials_embed
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
-
-# --- 1. CONFIG & SANITIZATION ---
+# --- 1. CONFIG & PATHING ---
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_PATH, ".env"))
 
-# .strip() is critical here to remove hidden characters/newlines from .env
-TD_API_KEY = str(os.getenv("TD_API_KEY")).strip()
-WEBHOOK_URL = str(os.getenv("WEBHOOK_THETA_GANG") or os.getenv("WEBHOOK_THETAGANG")).strip()
+TD_API_KEY = str(os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TD_API_KEY")).strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_THETA_GANG")
 HISTORY_FILE = os.path.join(BASE_PATH, "macro_history.csv")
 
 def get_market_regime():
-    """Bridges data from macro_radar.py history file."""
+    """Reads the 'Brain' (macro_history.csv) to determine defensive vs aggressive posture."""
     try:
         if os.path.exists(HISTORY_FILE):
-            df = pd.read_csv(HISTORY_FILE, on_bad_lines='skip')
-            df.columns = [c.strip() for c in df.columns]
-            if 'Regime' in df.columns:
-                # Returns the most recent regime entry
-                return df.iloc[-1]['Regime'].upper().strip()
+            df = pd.read_csv(HISTORY_FILE)
+            return df.iloc[-1]['Regime'].upper().strip()
     except Exception as e:
-        print(f"⚠️ [FILE ERROR] Could not read macro_history.csv: {e}")
+        print(f"   [!] History Read Error: {e}")
     return "NEUTRAL"
 
-def get_theta_intel(symbol, regime):
-    """Calculates strikes using 20-day Standard Deviation."""
+def get_dynamic_movers():
+    """Venture Tier: Scans for the top 10 most active stocks today."""
     try:
-        # 1. Fetch Quote (Price)
-        q_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
-        q_resp = requests.get(q_url, timeout=15)
+        url = f"https://api.twelvedata.com/market_movers/stocks?direction=all&apikey={TD_API_KEY}"
+        data = requests.get(url, timeout=15).json()
+        if data.get("status") == "error": return []
+        return [item['symbol'] for item in data['values'][:10]]
+    except:
+        return []
+
+def get_theta_intel(symbol, regime):
+    """Calculates an A+ setup using RSI, StdDev, and Regime alignment."""
+    try:
+        # Fetch Quote, RSI, and Standard Deviation (Expected Move)
+        quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
+        std_url = f"https://api.twelvedata.com/stddev?symbol={symbol}&interval=1day&time_period=20&apikey={TD_API_KEY}"
         
-        # 2. Fetch StDev (Volatility)
-        s_url = f"https://api.twelvedata.com/stdev?symbol={symbol}&interval=1day&time_period=20&apikey={TD_API_KEY}"
-        s_resp = requests.get(s_url, timeout=15)
+        q = requests.get(quote_url).json()
+        r = requests.get(rsi_url).json()
+        s = requests.get(std_url).json()
 
-        # JSON SAFETY CHECK: Capture raw text if parsing fails
-        try:
-            quote_data = q_resp.json()
-            sd_data = s_resp.json()
-        except Exception:
-            print(f"   [API ERROR] Non-JSON Response: {q_resp.text[:100]}")
-            return None
+        if "error" in [q.get("status"), r.get("status"), s.get("status")]: return None
 
-        # CHECK FOR API ERRORS (e.g., Invalid Key, Rate Limit)
-        if 'close' not in quote_data:
-            msg = quote_data.get('message', 'Unknown API Error')
-            print(f"   [DATA ERROR] {symbol}: {msg}")
-            return None
-
-        price = float(quote_data['close'])
-        stdev = float(sd_data['values'][0]['stdev'])
+        price = float(q['close'])
+        rsi = float(r['values'][0]['rsi'])
+        std = float(s['values'][0]['stddev'])
         
-        # --- THETA GANG LOGIC: REGIME-BASED BUFFER ---
-        # Current Context detected: RISK-OFF
-        if "OFF" in regime or "BEAR" in regime:
-            strike = price - (stdev * 2.25)  # Defensive (2.25 Sigma)
-            label, color = "🛡️ DEFENSIVE (Risk-Off)", 0xe67e22 # Orange
-        elif "ON" in regime or "BULL" in regime:
-            strike = price - (stdev * 0.85)  # Aggressive (0.85 Sigma)
-            label, color = "⚡ AGGRESSIVE (Risk-On)", 0x2ecc71 # Green
-        else:
-            strike = price - (stdev * 1.5)   # Balanced (1.5 Sigma)
-            label, color = "⚖️ BALANCED", 0x3498db # Blue
+        # Calculate Strike based on 1 Standard Deviation (68% probability)
+        # If Bullish/Neutral: Sell Puts below (Price - Std)
+        # If Bearish: Sell Calls above (Price + Std)
+        
+        is_setup = False
+        action = ""
+        strike = 0
+        color = 0x2ecc71 # Green
+
+        if regime in ["BULLISH", "RISK-ON", "NEUTRAL"]:
+            if rsi < 45: # Oversold / Value area
+                is_setup = True
+                action = "SELL PUT (CASH SECURED)"
+                strike = price - (std * 1.5) # Aggressive safety margin
+                color = 0x27ae60
+        else: # BEARISH / RISK-OFF
+            if rsi > 55: # Overbought / Resistance
+                is_setup = True
+                action = "SELL CALL (CREDIT SPREAD)"
+                strike = price + (std * 1.5)
+                color = 0xe74c3c
+
+        if not is_setup: return None
 
         return {
             "symbol": symbol,
             "price": price,
             "strike": strike,
-            "label": label,
-            "color": color
+            "rsi": rsi,
+            "action": action,
+            "color": color,
+            "name": q.get("name", symbol)
         }
-    except Exception as e:
-        print(f"   [SYSTEM ERROR] {symbol}: {e}")
+    except:
         return None
 
 def run_theta_gang():
-    print(f"--- 🎡 THETA GANG START (HST) ---")
-    
-    if not TD_API_KEY or TD_API_KEY == "None":
-        print("❌ CRITICAL: TD_API_KEY is missing from .env")
-        return
-
+    print(f"--- 🎡 THETA GANG: DYNAMIC HUNTER START ---")
     regime = get_market_regime()
-    print(f"   [SYNC] Market Context: {regime}")
+    print(f"   [BRAIN] Current Regime: {regime}")
 
-    # Your core high-yield watchlist
-    tickers = ["MSTY", "NVDY", "TSLY", "IWM", "NVDA", "TSLA", "TQQQ", "CONY"]
-    
-    for symbol in tickers:
-        print(f"   [SCAN] {symbol}...", end=" ", flush=True)
+    # Combine Priority Assets + Dynamic Movers
+    watchlist = ["MSTY", "NVDY", "TSLY", "IWM"] + get_dynamic_movers()
+    # Remove duplicates
+    watchlist = list(dict.fromkeys(watchlist))
+
+    signals_found = 0
+    for symbol in watchlist:
+        print(f"   [SCAN] Analyzing {symbol}...")
         intel = get_theta_intel(symbol, regime)
         
-        if intel and HAS_ESSENTIALS:
+        if intel:
+            signals_found += 1
             msg = (
-                f"**Income Alert: ${intel['symbol']}**\n"
-                f"└ Price: `${intel['price']:.2f}`\n"
-                f"└ **Target Put Strike**: `${intel['strike']:.2f}`\n"
-                f"└ **Strategy**: {intel['label']}\n\n"
-                f"*Market Intel: Strike adjusted for {regime} regime.*"
+                f"### 🏛️ Elite Theta Setup: ${intel['symbol']}\n"
+                f"**Posturing**: `{intel['action']}`\n\n"
+                f"**Tactical Intel**:\n"
+                f"└ Current Price: `${intel['price']:.2f}`\n"
+                f"└ **Expected Move Strike**: `${intel['strike']:.2f}`\n"
+                f"└ Relative Strength (RSI): `{intel['rsi']:.1f}`\n\n"
+                f"**Rockefeller Mandate**: *Strike calculated at 1.5σ (Sigma) deviation. High probability of expiry OTM based on {regime} regime.*"
             )
-            # Sends the broadcast to Discord
-            send_essentials_embed(WEBHOOK_URL, "🏛️ Essentials: Theta Intel", msg, intel['color'])
-            print("✅ Sent.")
-        else:
-            print("❌ Skipped.")
-        
-        # Rate limiting for Venture Tier (keeps you under the per-minute limit)
-        time.sleep(2) 
+            send_essentials_embed(WEBHOOK_URL, f"Theta Intel: {intel['name']}", msg, intel['color'])
+            time.sleep(2)
 
-    print(f"--- THETA GANG FINISHED ---")
+    print(f"--- 🎡 THETA GANG: {signals_found} SIGNALS DISPATCHED ---")
 
 if __name__ == "__main__":
     run_theta_gang()
