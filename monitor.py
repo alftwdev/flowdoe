@@ -5,77 +5,113 @@ import requests
 import pandas as pd
 import smtplib
 import urllib3
-import pytz  # Added: Standard for timezone handling
+import pytz
 from email.message import EmailMessage
 from edgar import Company, set_identity
 from dotenv import load_dotenv
+
+# --- PRE-FLIGHT DIAGNOSTICS ---
+print("Checking environment...")
 
 try:
     from essentials_tools import send_essentials_embed
     HAS_ESSENTIALS = True
 except ImportError:
+    print("⚠️  Warning: essentials_tools.py not found. Discord disabled.")
     HAS_ESSENTIALS = False
 
 # --- 1. INITIALIZATION ---
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_PATH, ".env"))
+ENV_PATH = os.path.join(BASE_PATH, ".env")
 
+if not os.path.exists(ENV_PATH):
+    print(f"❌ CRITICAL ERROR: .env file not found at {ENV_PATH}")
+    sys.exit(1)
+
+load_dotenv(ENV_PATH)
+
+# Safe retrieval of environment variables
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 WORK_EMAIL = os.getenv("WORK_EMAIL")
 WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
-TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_API_KEY")
+TD_KEY_RAW = os.getenv("TWELVE_DATA_API_KEY")
+TWELVE_DATA_KEY = str(TD_KEY_RAW).strip() if TD_KEY_RAW else None
 
-set_identity(f"Alwin Almazan {SENDER_EMAIL}")
+if not TWELVE_DATA_KEY:
+    print("❌ CRITICAL ERROR: TWELVE_DATA_API_KEY is missing from .env")
+    sys.exit(1)
+
+# SEC Identity - Strict Formatting
+if SENDER_EMAIL:
+    set_identity(f"Alwin Almazan {SENDER_EMAIL}")
+else:
+    print("⚠️  Warning: SENDER_EMAIL missing. EDGAR scans might fail.")
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-HISTORY_FILE = os.path.join(BASE_PATH, "macro_history.csv")
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
 def get_venture_data(ticker):
+    """Fetches market data with fallback logic."""
     url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
-    # Venture Tier specific average volume baselines
     fallback_avg = 1700000 if ticker == "CLM" else 950000 
+    
     try:
-        resp = requests.get(url, timeout=12).json()
-        if resp.get("status") == "ok":
-            return {
-                "price": float(resp['close']),
-                "vol": int(resp.get('volume', 0)),
-                "avg_vol": int(resp.get('average_volume', fallback_avg)),
-                "change": float(resp.get('percent_change', 0))
-            }
-        # Secondary fallback if quote endpoint is throttled
-        b_resp = requests.get(f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TWELVE_DATA_KEY}", timeout=10).json()
-        if "price" in b_resp:
-            return {"price": float(b_resp['price']), "vol": 0, "avg_vol": fallback_avg, "change": 0}
+        response = requests.get(url, timeout=12)
+        resp = response.json()
+        
+        if resp.get("status") != "ok":
+            print(f"    ❌ API Error for {ticker}: {resp.get('message', 'Unknown Error')}")
+            return get_price_only_fallback(ticker, fallback_avg)
+            
+        vol = int(resp.get('volume', 0))
+        if vol == 0:
+            ts_url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval=1min&outputsize=1&apikey={TWELVE_DATA_KEY}"
+            ts_res = requests.get(ts_url).json()
+            if 'values' in ts_res:
+                vol = int(ts_res['values'][0]['volume'])
+        
+        return {
+            "price": float(resp['close']),
+            "vol": vol,
+            "avg_vol": int(resp.get('average_volume', fallback_avg)),
+            "change": float(resp.get('percent_change', 0))
+        }
+    except Exception as e:
+        print(f"    ⚠️ Connection Error for {ticker}: {e}")
+    return None
+
+def get_price_only_fallback(ticker, fallback_avg):
+    try:
+        url = f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+        resp = requests.get(url, timeout=10).json()
+        if "price" in resp:
+            return {"price": float(resp['price']), "vol": 0, "avg_vol": fallback_avg, "change": 0}
     except: pass
     return None
 
 def run_sentry_check():
-    # --- TIMEZONE ALIGNMENT ---
-    # This ensures the script's 'clock' is always set to Honolulu
     tz_honolulu = pytz.timezone('Pacific/Honolulu')
     now = datetime.datetime.now(tz_honolulu)
     
     is_test = "test" in sys.argv
-    # The Pulse fires between 08:00 and 08:14 HST
     is_pulse_time = (now.hour == 8 and now.minute < 15)
     
-    print(f"--- SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} (HST) ---")
+    print(f"--- 🛡️ SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} (HST) ---")
     
     reports = []
     sec_detected = False
     vol_spike = False
     high_premium = False
+    overall_status = "STABLE"
 
     for ticker in ["CLM", "CRF"]:
-        print(f"PROCESS: Analyzing {ticker} SEC Filings...")
+        print(f"PROCESS: Scanning EDGAR for {ticker}...")
         try:
             comp = Company(ticker)
-            filings = comp.get_filings(form=["N-2", "424B3"])
+            filings = comp.get_filings(form=["N-2", "424B3", "N-2/A"])
             if filings is not None and not filings.empty:
                 acc = filings.latest().accession_number
                 if not os.path.exists(LOG_FILE): open(LOG_FILE, 'w').close()
@@ -83,12 +119,12 @@ def run_sentry_check():
                     if acc not in f.read():
                         sec_detected = True
                         with open(LOG_FILE, "a") as fw: fw.write(f"{acc}\n")
-        except: pass
+                        print(f"🚨 NEW FILING DETECTED: {acc}")
+        except Exception as e: print(f"    ⚠️ SEC Error: {e}")
 
-        print(f"PROCESS: Fetching {ticker} Venture Market Data...")
+        print(f"PROCESS: Fetching {ticker} Tape...")
         mkt = get_venture_data(ticker)
         
-        # Pull NAV Anchor
         nav_path = os.path.join(BASE_PATH, f"{ticker}_anchor.txt")
         try:
             with open(nav_path, "r") as f: nav = float(f.read().strip())
@@ -97,53 +133,46 @@ def run_sentry_check():
         if mkt:
             price = mkt['price']
             premium = ((price - nav) / nav) * 100
-            status = "STABLE"
+            current_status = "STABLE"
             
-            # Venture Logic: Whale Dump Detection
-            if mkt['vol'] > 0 and mkt['vol'] > (mkt['avg_vol'] * 1.4) and mkt['change'] < -2.5:
-                vol_spike, status = True, "🚨 VOLATILITY DUMP"
+            if mkt['vol'] > (mkt['avg_vol'] * 1.4) and mkt['change'] < -2.5:
+                vol_spike, current_status, overall_status = True, "🚨 VOLATILITY DUMP", "CRITICAL"
             elif premium > 25:
-                high_premium, status = True, "🚨 HIGH PREMIUM"
+                high_premium, current_status, overall_status = True, "🚨 HIGH PREMIUM", "WARNING"
             elif premium > 21:
-                status = "⚠️ CAUTION"
+                current_status = "⚠️ CAUTION"
+                if overall_status == "STABLE": overall_status = "CAUTION"
 
-            reports.append(f"**{ticker}: {status}**\n└ Price: ${price:.2f} | NAV: ${nav:.2f} ({premium:.1f}% Prem)\n└ Vol: {mkt['vol']:,}")
-            print(f"   [RESULT] {ticker}: {status} (${price})")
+            reports.append(f"**{ticker}: {current_status}**\n└ Price: ${price:.2f} | NAV: ${nav:.2f} ({premium:.1f}% Prem)\n└ Vol: {mkt['vol']:,}")
+        else:
+            reports.append(f"**{ticker}: DATA ERROR**\n└ Failed to retrieve real-time tape.")
 
-    # Determine Action Line
-    if sec_detected: action_line = "🚨 SELL NOW - RO/SEC FILING DETECTED"
-    elif vol_spike: action_line = "🚨 SELL NOW - VOLUME SPIKE DETECTED"
-    elif high_premium: action_line = "⚠️ High premium is approaching"
-    else: action_line = "✅ No RO/SEC filing detected"
-
-    # Dispatch logic
-    if reports and (is_test or sec_detected or vol_spike or is_pulse_time):
+    # Decision Engine
+    if is_test or sec_detected or vol_spike or is_pulse_time:
+        action_line = "🚨 SELL NOW" if (sec_detected or vol_spike) else "✅ No RO/SEC detected"
+        color = 0xe74c3c if (sec_detected or vol_spike) else 0x2ecc71
         full_msg = f"**Daily Cornerstone Pulse**\nStatus: {action_line}\n\n" + "\n".join(reports)
         
         if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
-            print("ACTION: Dispatching to Discord...")
-            send_essentials_embed(WEBHOOK_CORNERSTONE, "🛠️ Heartbeat" if is_test else "🛡️ Sentry Pulse", full_msg, 0xe74c3c if (sec_detected or vol_spike) else 0x2ecc71)
+            send_essentials_embed(WEBHOOK_CORNERSTONE, "🛠️ Heartbeat" if is_test else "🛡️ Sentry Signal", full_msg, color)
 
         if PUSHOVER_TOKEN and PUSHOVER_USER:
-            print("ACTION: Dispatching to Pushover...")
             requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": PUSHOVER_TOKEN, 
-                "user": PUSHOVER_USER, 
-                "title": "Sentry Alert", 
-                "message": full_msg.replace("**", ""), 
-                "priority": 1 if (sec_detected or vol_spike) else 0
+                "token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, 
+                "title": f"Sentry: {overall_status}", "message": full_msg.replace("**", ""), "priority": 1 if color == 0xe74c3c else 0
             })
 
         if SENDER_EMAIL and EMAIL_APP_PASSWORD:
-            print("ACTION: Dispatching to Email...")
             try:
                 msg = EmailMessage()
-                msg.set_content(full_msg.replace("**", "")); msg['Subject'] = "Sentry Tactical Update"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL}"
+                msg.set_content(full_msg.replace("**", ""))
+                msg['Subject'] = f"Sentry Update: {overall_status}"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL}"
                 with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                     smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
-            except: print("   ⚠️ Email failed.")
+                print("   ✅ Dispatch Successful.")
+            except Exception as e: print(f"    ⚠️ Email failed: {e}")
 
-    print(f"--- SENTRY FINISHED: {datetime.datetime.now(tz_honolulu).strftime('%H:%M:%S')} ---\n")
+    print(f"--- 🛡️ SENTRY FINISHED: {datetime.datetime.now(tz_honolulu).strftime('%H:%M:%S')} ---")
 
 if __name__ == "__main__":
     run_sentry_check()
