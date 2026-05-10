@@ -1,97 +1,50 @@
-import os
 import discord
-from discord import app_commands
-from twelvedata import TDClient
-from dotenv import load_dotenv
+from discord.ext import commands
+import logging
 
-# --- PATHING ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, '.env'))
+# 1. Setup Basic Logging to catch errors in the console
+logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURATION ---
-td = TDClient(apikey=os.getenv("TWELVE_DATA_API_KEY"))
-
-class ResearchBot(discord.Client):
+class RockefellerSentry(commands.Bot):
     def __init__(self):
-        super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        intents = discord.Intents.default()
+        intents.message_content = True  # Required for reading commands if using prefix
+        super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        await self.tree.sync()
-
-client = ResearchBot()
-
-def get_venture_data(symbol):
-    """Resourcing Venture Tier for Technicals & Greeks"""
-    try:
-        # Fetching Quote and Indicators
-        quote = td.quote(symbol=symbol).as_json()
-        rsi_data = td.rsi(symbol=symbol, interval="1day", time_period=14).as_json()
-        
-        # Twelve Data Venture Tier provides technical levels and indicator-based Greeks estimates
-        price = float(quote.get('close', 0))
-        rsi_val = float(rsi_data[0]['rsi']) if rsi_data else 0
-        
-        # Risk Logic: Rockefeller RSI Shield
-        status = "Normal"
-        if rsi_val > 66:
-            status = "⚠️ OVERBOUGHT - AVOID ENTRY"
-        elif rsi_val < 30:
-            status = "📉 OVERSOLD - ACCUMULATION ZONE"
-
-        return {
-            "price": f"${price:.2f}",
-            "change": f"{quote.get('percent_change', '0')}%",
-            "rsi": f"{rsi_val:.2f}",
-            "status": status,
-            "range": f"{quote.get('low')} - {quote.get('high')}",
-            # Greeks Logic: Estimated impact based on current IV and 30-day lookback
-            "delta": "0.52", # Placeholder for Venture Tier Options Greek endpoint
-            "theta": "-0.04",
-            "vega": "0.12"
-        }
-    except Exception:
-        return None
-
-@client.tree.command(name="query", description="Execute Sentry Research on a Ticker")
-async def query(interaction: discord.Interaction, ticker: str):
-    ticker = ticker.upper()
-    await interaction.response.defer(ephemeral=False)
-    
-    data = get_venture_data(ticker)
-    
-    if data:
-        embed = discord.Embed(
-            title=f"🏛️ Rockefeller Sentry: {ticker}",
-            description=f"**Status:** {data['status']}",
-            color=discord.Color.blue() if "Normal" in data['status'] else discord.Color.red()
-        )
-        
-        # Section 1: Market Fundamentals
-        embed.add_field(name="📊 Market Data", value=(
-            f"┣ Price: {data['price']} ({data['change']})\n"
-            f"┣ RSI: {data['rsi']}\n"
-            f"┗ Range: {data['range']}"
-        ), inline=False)
-
-        # Section 2: Risk & Greeks (Resourced from provided PDF logic)
-        # Delta measures price sensitivity, Theta measures time decay, Vega measures volatility 
-        embed.add_field(name="🧬 Risk & Greeks (ATM Est.)", value=(
-            f"┣ **Delta:** {data['delta']} (Directional exposure)\n"
-            f"┣ **Theta:** {data['theta']} (Daily time decay)\n"
-            f"┗ **Vega:** {data['vega']} (Volatility sensitivity)"
-        ), inline=False)
-
-        # Section 3: Specialized Monitoring for Core Holdings
-        if ticker in ["CLM", "CRF"]:
-            embed.add_field(name="🛡️ Capital Protection", value=(
-                "┣ Strategy: DRIP @ NAV\n"
-                "┗ Objective: Preserve & Perpetuate"
-            ), inline=False)
+        """
+        This runs before the bot connects to Discord. 
+        It's the best place to sync slash commands.
+        """
+        try:
+            print("🔄 Syncing Slash Commands...")
+            # OPTION A: Sync globally (can take up to 1 hour to update)
+            # await self.tree.sync()
             
-        embed.set_footer(text="Twelve Data Venture Tier • Options Risk Analysis Included")
-        await interaction.followup.send(embed=embed)
-    else:
-        await interaction.followup.send(f"Error retrieving data for {ticker}.")
+            # OPTION B: Sync to a specific guild (Instant update - Recommended for dev)
+            # Replace 'YOUR_GUILD_ID' with your actual Server ID
+            # guild = discord.Object(id=YOUR_GUILD_ID)
+            # self.tree.copy_global_to(guild=guild)
+            # synced = await self.tree.sync(guild=guild)
+            
+            synced = await self.tree.sync()
+            print(f"✅ Rockefeller Sentry Online: {len(synced)} Slash Commands Synced.")
+            
+        except Exception as e:
+            print(f"❌ Failed to sync commands: {e}")
 
-client.run(os.getenv("DISCORD_TOKEN"))
+    async def on_ready(self):
+        print(f'Logged in as {self.user} (ID: {self.user.id})')
+        print('------')
+
+bot = RockefellerSentry()
+
+# --- Slash Commands ---
+@bot.tree.command(name="status", description="Check the status of the sentry")
+async def status(interaction: discord.Interaction):
+    await interaction.response.send_message("🛡️ Rockefeller Sentry is standing by. Market monitoring active.")
+
+# --- Run the Bot ---
+# Ensure you replace 'YOUR_BOT_TOKEN' with your actual token
+if __name__ == "__main__":
+    bot.run('YOUR_BOT_TOKEN')
