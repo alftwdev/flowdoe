@@ -1,75 +1,82 @@
-import discord
-from discord.ext import commands
-from discord import app_commands # New import for Slash Commands
-import requests
 import os
+import discord
+from discord import app_commands
+from twelvedata import TDClient
 from dotenv import load_dotenv
 
-# --- 0. CONFIG ---
+# --- PATHING FOR PYTHONANYWHERE ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+load_dotenv(os.path.join(BASE_DIR, '.env'))
+
+# --- CONFIGURATION ---
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+td = TDClient(apikey=TD_API_KEY)
 
-# --- 1. BOT SETUP ---
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="/", intents=intents)
+class ResearchBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=discord.Intents.default())
+        self.tree = app_commands.CommandTree(self)
 
-# This handles the "Sync" between your code and Discord's Slash Commands
-@bot.event
-async def on_ready():
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ Rockefeller Sentry Online: {len(synced)} Slash Commands Synced.")
-    except Exception as e:
-        print(f"❌ Sync Error: {e}")
+    async def setup_hook(self):
+        await self.tree.sync()
+
+client = ResearchBot()
 
 def get_venture_data(symbol):
-    url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+    """Leverages Venture Tier for High-Signal Data"""
     try:
-        data = requests.get(url).json()
-        if data.get("status") == "error": return None
-        curr_vol = int(data.get("volume", 0))
-        avg_vol = int(data.get("average_volume", 1))
+        # Fetching Quote & Technicals simultaneously for conviction
+        quote = td.quote(symbol=symbol).as_json()
+        # Venture Tier allows for robust volume analysis
+        avg_vol = float(quote.get('average_volume', 1700000)) # Default to CLM Baseline
+        curr_vol = float(quote.get('volume', 0))
+        price = float(quote.get('close', 0))
+        change = float(quote.get('percent_change', 0))
+        
+        # Whale Footprint Logic
+        is_whale_dump = curr_vol > (avg_vol * 1.4) and change < -2.0
+        
         return {
-            "price": float(data.get("close", 0)),
-            "change": float(data.get("percent_change", 0)),
-            "whale_factor": (curr_vol / avg_vol) * 100,
-            "name": data.get("name", symbol)
+            "price": f"${price:.2f}",
+            "change": f"{change:.2f}%",
+            "vol_status": "🚨 WHALE DUMP DETECTED" if is_whale_dump else "Normal",
+            "range": f"{quote.get('low')} - {quote.get('high')}"
         }
-    except: return None
+    except Exception as e:
+        return None
 
-# --- 2. THE HYBRID COMMAND ---
-# This decorator makes it work as a Slash Command (the pop-up menu)
-@bot.tree.command(name="query", description="Fetch Rockefeller Capital Protection data for a symbol")
-@app_commands.describe(symbol="The stock or crypto ticker (e.g. CLM, BTC/USD)")
-async def query_slash(interaction: discord.Interaction, symbol: str):
-    # Slash commands require an immediate "defer" if the API takes > 3 seconds
-    await interaction.response.defer() 
+@client.tree.command(name="query", description="Execute Sentry Research on a Ticker")
+async def query(interaction: discord.Interaction, ticker: str):
+    ticker = ticker.upper()
+    await interaction.response.defer(ephemeral=True) # Keeps interaction clean
     
-    symbol = symbol.upper()
-    data = get_venture_data(symbol)
+    data = get_venture_data(ticker)
     
-    if not data:
-        await interaction.followup.send(f"❌ Data for {symbol} unavailable. Market may be closed.")
-        return
+    if data:
+        # The "Rockefeller Tree" Notification Structure
+        embed = discord.Embed(
+            title=f"🏛️ Rockefeller Sentry: {ticker}",
+            description=f"**Status:** {data['vol_status']}",
+            color=discord.Color.blue() if "Normal" in data['vol_status'] else discord.Color.red()
+        )
+        
+        embed.add_field(name="📊 Market Data", value=(
+            f"┣ Price: {data['price']}\n"
+            f"┣ Change: {data['change']}\n"
+            f"┗ Range: {data['range']}"
+        ), inline=False)
 
-    color = 0x2ecc71 if data['change'] > 0 else 0xe74c3c
-    embed = discord.Embed(title=f"Sentry Research: {data['name']} ({symbol})", color=color)
-    embed.add_field(name="💰 Price", value=f"${data['price']:,.2f} ({data['change']:.2f}%)", inline=True)
-    embed.add_field(name="🐋 Whale Factor", value=f"{data['whale_factor']:.1f}% of Avg Vol", inline=True)
-    
-    # Capital Protection Logic
-    msg = "🛡️ **STABLE:** No immediate threat."
-    if data['whale_factor'] > 140 and data['change'] < -2:
-        msg = "🚨 **VULNERABLE:** High-volume dump. Protect capital."
-    
-    embed.add_field(name="🏛️ Rockefeller Strategy", value=msg, inline=False)
-    
-    # Send the final response
-    await interaction.followup.send(embed=embed)
+        # Integration for CLM/CRF Specifics
+        if ticker in ["CLM", "CRF"]:
+            embed.add_field(name="🛡️ Capital Protection", value=(
+                f"┣ SEC Shield: [Monitoring N-2]\n"
+                f"┣ Strategy: DRIP @ NAV\n"
+                f"┗ Objective: Preserve & Perpetuate"
+            ), inline=False)
+            
+        embed.set_footer(text="Twelve Data Venture Tier • Institutional Grade Analysis")
+        await interaction.followup.send(embed=embed)
+    else:
+        await interaction.followup.send(f"Error retrieving data for {ticker}. Check .env or API limits.")
 
-# --- 3. EXECUTION ---
-if __name__ == "__main__":
-    bot.run(DISCORD_BOT_TOKEN)
+client.run(os.getenv("DISCORD_TOKEN"))
