@@ -10,61 +10,53 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 WEBHOOK_URL = os.getenv("WEBHOOK_CHILLVIBES")
 
-# VIBE CATEGORIES (Mixing Live Streams for 24/7 continuity)
-VIBE_MATRIX = {
-    "MORNING": { # 05:00 - 09:00 HST
-        "name": "Sunrise Lo-Fi & Coffee",
-        "url": "https://www.youtube.com/live/jfKfPfyJRdk", # Lofi Girl Live
-        "color": 0xff9f43 
-    },
-    "MARKET_HOURS": { # 09:00 - 16:00 HST
-        "name": "High-Focus Boom Bap / 90s Underground",
-        "url": "https://youtu.be/xcKvPfQqFFM", 
-        "color": 0x2ecc71
-    },
-    "EVENING": { # 16:00 - 21:00 HST
-        "name": "Sunset R&B / West Coast After Dark",
-        "url": "https://youtu.be/r0tZUS50T7A",
-        "color": 0x9b59b6
-    },
-    "NIGHT_OWL": { # 21:00 - 05:00 HST
-        "name": "Deep Space / Midnight Study",
-        "url": "https://www.youtube.com/live/S_MOd40zlYU",
-        "color": 0x34495e
-    }
-}
+# Your Personal Gold Standard Playlist
+# Appending shuffle parameters to ensure a fresh start each time
+PERSONAL_PLAYLIST_URL = "https://youtube.com/playlist?list=PLKTJFoK2VZXPI8D7OxbapTj4id4JeynP7&si=v983o-N0Wxrct7Uk&index=1&shuffle=1"
 
-def get_current_vibe():
+def get_session_context():
+    """Determines the branding based on Honolulu local time."""
     tz_honolulu = pytz.timezone('Pacific/Honolulu')
     hour = datetime.now(tz_honolulu).hour
     
-    if 5 <= hour < 9: return VIBE_MATRIX["MORNING"]
-    if 9 <= hour < 16: return VIBE_MATRIX["MARKET_HOURS"]
-    if 16 <= hour < 21: return VIBE_MATRIX["EVENING"]
-    return VIBE_MATRIX["NIGHT_OWL"]
+    if 5 <= hour < 9:
+        return {"name": "Sunrise Session", "color": 0xff9f43} # Orange
+    if 9 <= hour < 16:
+        return {"name": "Market Hours Focus", "color": 0x2ecc71} # Green
+    if 16 <= hour < 21:
+        return {"name": "Sunset R&B / Chill", "color": 0x9b59b6} # Purple
+    return {"name": "Late Night Flow", "color": 0x34495e} # Dark Blue
 
 def post_vibe_update():
     if not WEBHOOK_URL:
+        print("❌ Error: WEBHOOK_CHILLVIBES not found in .env")
         return
 
-    vibe = get_current_vibe()
+    context = get_session_context()
     tz_honolulu = pytz.timezone('Pacific/Honolulu')
     time_str = datetime.now(tz_honolulu).strftime('%I:%M %p HST')
 
     message = {
         "embeds": [{
-            "title": f"☕ The Essentials: {vibe['name']}",
+            "title": f"☕ The Essentials: {context['name']}",
             "description": (
-                f"**Current Session**: Active\n"
-                f"Maintain your flow state. The music is currently synced for your local time.\n\n"
-                f"📺 **[Click to Open 24/7 Stream]({vibe['url']})**"
+                "**Current Session**: Your Personal Vault\n"
+                "Maintain your flow state. The playlist below is synced for your curated focus music.\n\n"
+                f"📺 **[Click to Launch Shuffled Playlist]({PERSONAL_PLAYLIST_URL})**"
             ),
-            "color": vibe['color'],
-            "footer": {"text": f"Sentry Flow • Updated at {time_str}"}
+            "color": context['color'],
+            "footer": {"text": f"Sentry Flow • Sync: {time_str}"}
         }]
     }
 
-    requests.post(WEBHOOK_URL, json=message)
+    try:
+        response = requests.post(WEBHOOK_URL, json=message)
+        if response.status_code in [200, 204]:
+            print(f"✅ Successfully posted {context['name']} to Discord.")
+        else:
+            print(f"❌ Discord error: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Request Error: {e}")
 
 if __name__ == "__main__":
     post_vibe_update()
