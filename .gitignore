@@ -1,5 +1,7 @@
 # Security: Sensitive Keys
 .env
+macro_history.csv
+sent_filings.txt
 
 # Python: Ignore compiled files and caches
 __pycache__/
