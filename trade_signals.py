@@ -2,6 +2,7 @@ import os
 import time
 import requests
 import datetime
+import json
 import pandas as pd
 import pytz
 import sys
@@ -19,107 +20,84 @@ load_dotenv(os.path.join(BASE_PATH, ".env"))
 
 TD_API_KEY = str(os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TD_API_KEY")).strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_TRADE_SIGNALS")
-HISTORY_FILE = os.path.join(BASE_PATH, "macro_history.csv")
+REGIME_LEDGER = os.path.join(BASE_PATH, "market_regime.json")
+
+# Strategy Constants
+WATCHLIST = ["NVDA", "AAPL", "TSLA", "MSFT", "AMZN", "GOOGL", "AMD", "META", "XLC"]
+
+def get_ecosystem_data():
+    """Reads cross-script data to gain top-tier conviction."""
+    try:
+        with open(REGIME_LEDGER, "r") as f:
+            data = json.load(f)
+            # Default to conservative 50 if ledger is missing/corrupt during high vol
+            return data.get("regime", "NEUTRAL"), data.get("rsi_shield_limit", 66), data.get("vix_status", "STABLE")
+    except:
+        return "NEUTRAL", 66, "STABLE"
 
 def is_market_open():
-    """Checks if the NYSE is currently open (9:30 AM - 4:00 PM ET)."""
     tz_et = pytz.timezone('US/Eastern')
     now_et = datetime.datetime.now(tz_et)
-    if now_et.weekday() > 4: return False # Weekend
+    if now_et.weekday() > 4: return False
     market_open = now_et.replace(hour=9, minute=30, second=0)
     market_close = now_et.replace(hour=16, minute=0, second=0)
     return market_open <= now_et <= market_close
 
-def get_market_regime():
+def fetch_signals_data(symbol):
+    """Venture Tier: Pulls Price, RSI, and VWAP for A+ setup detection."""
     try:
-        if os.path.exists(HISTORY_FILE):
-            df = pd.read_csv(HISTORY_FILE, on_bad_lines='skip')
-            return df.iloc[-1]['Regime'].upper().strip()
-    except:
-        return "NEUTRAL"
-    return "NEUTRAL"
-
-def get_dynamic_hunters():
-    """Venture Tier: Scans for real-time momentum movers."""
-    url = f"https://api.twelvedata.com/market_movers/stocks?direction=all&apikey={TD_API_KEY}"
-    core_watchlist = ["NVDA", "TSLA", "TQQQ", "AMD", "AAPL", "MSFT", "IWM"]
-    try:
-        resp = requests.get(url, timeout=10).json()
-        discovered = [item['symbol'] for item in resp.get('values', []) if item['symbol'].isalpha()]
-        return list(dict.fromkeys(core_watchlist + discovered))[:15]
-    except:
-        return core_watchlist
-
-def get_advanced_intel(symbol):
-    """Real-time data fetch for A+ Setup Verification."""
-    try:
-        # Standard Venture Tier real-time endpoints
-        base = "https://api.twelvedata.com"
-        q = requests.get(f"{base}/quote?symbol={symbol}&apikey={TD_API_KEY}").json()
-        r = requests.get(f"{base}/rsi?symbol={symbol}&interval=15min&time_period=14&apikey={TD_API_KEY}").json()
-        v = requests.get(f"{base}/vwap?symbol={symbol}&interval=15min&apikey={TD_API_KEY}").json()
-        a = requests.get(f"{base}/atr?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}").json()
-
-        return {
-            "price": float(q['close']),
-            "rsi": float(r['values'][0]['rsi']),
-            "vwap": float(v['values'][0]['vwap']),
-            "atr": float(a['values'][0]['atr']),
-            "change": float(q['percent_change']),
-            "name": q.get("name", symbol)
+        # Combined request for technicals
+        url = f"https://api.twelvedata.com/complex_data?apikey={TD_API_KEY}"
+        payload = {
+            "symbols": [symbol],
+            "intervals": ["15min"],
+            "methods": ["quote", "rsi", "vwap"],
+            "outputsize": 1
         }
+        r = requests.post(url, json=payload).json()
+        
+        res = r['data'][0]
+        price = float(res['res']['quote']['close'])
+        rsi = float(res['res']['rsi']['values'][0]['rsi'])
+        vwap = float(res['res']['vwap']['values'][0]['vwap'])
+        name = res['res']['quote']['name']
+        
+        return {"price": price, "rsi": rsi, "vwap": vwap, "name": name}
     except:
         return None
 
-def execute_hunter_loop():
-    print(f"--- 🏛️ SENTRY ACTIVE: CONTINUOUS MARKET MONITORING ---")
-    
-    # Track symbols we already alerted on to avoid 'spamming' the same move
+def run_trade_signals():
+    print(f"--- 🏛️ A+ SIGNAL HUNTER START: {datetime.datetime.now().strftime('%H:%M')} ---")
     alerted_today = []
-
+    
     while True:
-        # 1. Market Hours Check
-        if not is_market_open() and "test" not in sys.argv:
-            print("休 Market Closed. Sleeping for 15 minutes...")
-            time.sleep(900)
-            alerted_today = [] # Reset alerts for next day
+        if not is_market_open():
+            print("   [INFO] Market Closed. Sleeping...")
+            time.sleep(600)
             continue
 
-        regime = get_market_regime()
-        tickers = get_dynamic_hunters()
+        # CROSS-SCRIPT COMMUNICATION
+        regime, rsi_limit, vix_status = get_ecosystem_data()
         
-        for symbol in tickers:
-            if symbol in alerted_today and "test" not in sys.argv:
-                continue
-
-            intel = get_advanced_intel(symbol)
+        for symbol in WATCHLIST:
+            if symbol in alerted_today: continue
+            
+            intel = fetch_signals_data(symbol)
             if not intel: continue
 
-            price, rsi, vwap, atr = intel['price'], intel['rsi'], intel['vwap'], intel['atr']
+            # A+ CONVICTION LOGIC
             setup_found = False
-            execution = {}
-
-            # 🟢 THE A+ BULLISH SETUP (The "Stars Aligned" Long)
-            if regime in ["BULLISH", "RISK-ON", "NEUTRAL"] and rsi < 32 and price > vwap:
-                setup_found = True
-                strike = round(price - (atr * 1.5), 0)
-                execution = {
-                    "action": "BUY CALL / SELL PUT",
-                    "type": "Bullish Confluence",
-                    "strike": f"${strike}",
-                    "color": 0x2ecc71
-                }
-
-            # 🔴 THE A+ BEARISH SETUP (The "Stars Aligned" Short)
-            elif regime in ["BEARISH", "RISK-OFF"] and rsi > 68 and price < vwap:
-                setup_found = True
-                strike = round(price + (atr * 1.5), 0)
-                execution = {
-                    "action": "BUY PUT / SELL CALL",
-                    "type": "Bearish Rejection",
-                    "strike": f"${strike}",
-                    "color": 0xe74c3c
-                }
+            # Bullish Reclaim: Price > VWAP AND RSI < Limit (Dynamic Shield)
+            if intel['rsi'] < rsi_limit and intel['price'] > intel['vwap']:
+                if regime in ["BULLISH", "NEUTRAL"]:
+                    setup_found = True
+                    strike = round(intel['price'] * 0.90, 2) # 1.5-2 Sigma estimate
+                    execution = {
+                        "action": "SELL PUT / BUY CALL",
+                        "type": "Bullish Reclaim",
+                        "strike": f"${strike} (Bottom Shield)",
+                        "color": 0x2ecc71
+                    }
 
             if setup_found:
                 alerted_today.append(symbol)
@@ -129,19 +107,15 @@ def execute_hunter_loop():
                     f"**Setup**: `{execution['type']}`\n\n"
                     f"**Execution Parameters**:\n"
                     f"└ Target Strike: **{execution['strike']}**\n"
-                    f"└ Recommended DTE: **7-14 Days**\n"
-                    f"└ **Market Regime**: `{regime}`\n\n"
-                    f"**Institutional Note**: *Stars have aligned. Price has reclaimed VWAP while in a deep value RSI zone. "
-                    f"Standard Deviation (1.5σ) strike provides optimal safety.* \n\n"
-                    f"⚠️ *Personal use only. Not financial advice.*"
+                    f"└ **Market Regime**: `{regime}`\n"
+                    f"└ **RSI Shield**: `{rsi_limit}` ({vix_status})\n\n"
+                    f"**Institutional Note**: *Stars have aligned. Price has reclaimed VWAP while in the {vix_status} safety zone.*"
                 )
                 if HAS_ESSENTIALS:
                     send_essentials_embed(WEBHOOK_URL, f"A+ Setup: {intel['name']}", msg, execution['color'])
                     print(f"🎯 Broadcast Sent: {symbol}")
 
-        # Scan every 5 minutes during market hours
-        print(f"   [SCAN COMPLETE] {datetime.datetime.now().strftime('%H:%M:%S')} - No new A+ setups found. Monitoring...")
-        time.sleep(300)
+        time.sleep(300) # 5-minute cycle
 
 if __name__ == "__main__":
-    execute_hunter_loop()
+    run_trade_signals()
