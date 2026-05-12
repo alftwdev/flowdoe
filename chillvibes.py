@@ -9,7 +9,7 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
 # The public link you provided with a shuffle-friendly format
-PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLpZ37z2E9S-S_Z_O-Ym9mY6S_5R_6kRzC"
+PLAYLIST_URL = "https://youtube.com/playlist?list=PLKTJFoK2VZXPI8D7OxbapTj4id4JeynP7&si=IgrSqQ21PcjvoscG"
 # Instruction for the user to ensure the experience is ambient
 SHUFFLE_INSTRUCTION = "🎧 **Ambient Session Active**: Click the link above and hit the 'Shuffle' button to start the vibe."
 
