@@ -1,52 +1,60 @@
 import discord
 from discord.ext import commands
 import os
-import random
 from dotenv import load_dotenv
 
 # --- 1. CONFIGURATION ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# The public link you provided with a shuffle-friendly format
+# NEW CORRECTED PLAYLIST LINK
 PLAYLIST_URL = "https://youtube.com/playlist?list=PLKTJFoK2VZXPI8D7OxbapTj4id4JeynP7&si=IgrSqQ21PcjvoscG"
-# Instruction for the user to ensure the experience is ambient
 SHUFFLE_INSTRUCTION = "🎧 **Ambient Session Active**: Click the link above and hit the 'Shuffle' button to start the vibe."
 
 class ChillVibes(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.voice_states = True  # Required to see when users join the VC
+        intents.voice_states = True  # CRITICAL: Detects VC joins
         intents.messages = True
         super().__init__(command_prefix="!", intents=intents)
 
-    async def setup_hook(self):
-        print("🌊 Chill-Vibes Engine: Synchronizing...")
-
     async def on_ready(self):
-        print(f"✅ Vibe Sentry Online: {self.user.name}")
+        print(f"✅ Rockefeller Ambient Intelligence Online: {self.user.name}")
 
-    # --- 2. AUTOMATIC PLAYLIST DISPATCH ---
+    # --- 2. THE VIBE SENTRY LOGIC ---
     async def on_voice_state_update(self, member, before, after):
-        # Trigger only when a user joins a channel (after.channel exists, before.channel did not)
+        # 1. Safety Check: Only trigger if the user was NOT in a VC and now IS in one.
         if before.channel is None and after.channel is not None:
-            # Check if it's the 'chill-vibes' or 'open chat' channel specifically
-            if "chill" in after.channel.name.lower() or "open chat" in after.channel.name.lower():
+            
+            # 2. Targeted Channels: Ensure this only fires in relevant 'chill' or 'open' rooms.
+            target_keywords = ["chill", "open", "lounge", "ambient"]
+            if any(word in after.channel.name.lower() for word in target_keywords):
                 
-                # We send the message to the text-channel associated with the Voice Channel
-                # In modern Discord, every VC has a 'chat' button
+                # 3. Prevent Bot Self-Triggering
+                if member.bot:
+                    return
+
                 try:
+                    # Constructing the Elite Embed
                     embed = discord.Embed(
                         title="🏛️ Rockefeller Ambient Intelligence",
-                        description=f"Welcome to the session, {member.display_name}.\n\n[Click here for the Global Playlist]({PLAYLIST_URL})\n\n{SHUFFLE_INSTRUCTION}",
-                        color=0x3498db # Relaxing Blue
+                        description=(
+                            f"Welcome to the session, **{member.display_name}**.\n\n"
+                            f"**[Click here for the Global Playlist]({PLAYLIST_URL})**\n\n"
+                            f"{SHUFFLE_INSTRUCTION}"
+                        ),
+                        color=0x2c3e50 # Deep Midnight Blue for ambient feel
                     )
-                    embed.set_thumbnail(url="https://i.imgur.com/8E8E8E8.png") # Optional: Your logo
                     
+                    # Optional Footer for branding consistency
+                    embed.set_footer(text="Rockefeller Strategic Intelligence | Ecosystem Verified")
+                    
+                    # Post to the Voice Channel's internal text chat
                     await after.channel.send(embed=embed)
-                    print(f"🎵 Playlist dispatched to {member.display_name} in {after.channel.name}")
+                    print(f"🎵 Vibe Dispatch: {member.display_name} joined {after.channel.name}")
+                    
                 except Exception as e:
-                    print(f"❌ Could not send vibe link: {e}")
+                    print(f"❌ Vibe Dispatch Error: {e}")
 
 bot = ChillVibes()
 
