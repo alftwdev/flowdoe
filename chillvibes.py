@@ -1,62 +1,54 @@
-import requests
+import discord
+from discord.ext import commands
 import os
-import pytz
-from datetime import datetime
+import random
 from dotenv import load_dotenv
 
-# --- 0. CONFIG ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+# --- 1. CONFIGURATION ---
+load_dotenv()
+TOKEN = os.getenv('DISCORD_TOKEN')
 
-WEBHOOK_URL = os.getenv("WEBHOOK_CHILLVIBES")
+# The public link you provided with a shuffle-friendly format
+PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLpZ37z2E9S-S_Z_O-Ym9mY6S_5R_6kRzC"
+# Instruction for the user to ensure the experience is ambient
+SHUFFLE_INSTRUCTION = "🎧 **Ambient Session Active**: Click the link above and hit the 'Shuffle' button to start the vibe."
 
-# Your Personal Gold Standard Playlist
-# Appending shuffle parameters to ensure a fresh start each time
-PERSONAL_PLAYLIST_URL = "https://youtube.com/playlist?list=PLKTJFoK2VZXPI8D7OxbapTj4id4JeynP7&si=v983o-N0Wxrct7Uk&index=1&shuffle=1"
+class ChillVibes(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.voice_states = True  # Required to see when users join the VC
+        intents.messages = True
+        super().__init__(command_prefix="!", intents=intents)
 
-def get_session_context():
-    """Determines the branding based on Honolulu local time."""
-    tz_honolulu = pytz.timezone('Pacific/Honolulu')
-    hour = datetime.now(tz_honolulu).hour
-    
-    if 5 <= hour < 9:
-        return {"name": "Sunrise Session", "color": 0xff9f43} # Orange
-    if 9 <= hour < 16:
-        return {"name": "Market Hours Focus", "color": 0x2ecc71} # Green
-    if 16 <= hour < 21:
-        return {"name": "Sunset R&B / Chill", "color": 0x9b59b6} # Purple
-    return {"name": "Late Night Flow", "color": 0x34495e} # Dark Blue
+    async def setup_hook(self):
+        print("🌊 Chill-Vibes Engine: Synchronizing...")
 
-def post_vibe_update():
-    if not WEBHOOK_URL:
-        print("❌ Error: WEBHOOK_CHILLVIBES not found in .env")
-        return
+    async def on_ready(self):
+        print(f"✅ Vibe Sentry Online: {self.user.name}")
 
-    context = get_session_context()
-    tz_honolulu = pytz.timezone('Pacific/Honolulu')
-    time_str = datetime.now(tz_honolulu).strftime('%I:%M %p HST')
+    # --- 2. AUTOMATIC PLAYLIST DISPATCH ---
+    async def on_voice_state_update(self, member, before, after):
+        # Trigger only when a user joins a channel (after.channel exists, before.channel did not)
+        if before.channel is None and after.channel is not None:
+            # Check if it's the 'chill-vibes' or 'open chat' channel specifically
+            if "chill" in after.channel.name.lower() or "open chat" in after.channel.name.lower():
+                
+                # We send the message to the text-channel associated with the Voice Channel
+                # In modern Discord, every VC has a 'chat' button
+                try:
+                    embed = discord.Embed(
+                        title="🏛️ Rockefeller Ambient Intelligence",
+                        description=f"Welcome to the session, {member.display_name}.\n\n[Click here for the Global Playlist]({PLAYLIST_URL})\n\n{SHUFFLE_INSTRUCTION}",
+                        color=0x3498db # Relaxing Blue
+                    )
+                    embed.set_thumbnail(url="https://i.imgur.com/8E8E8E8.png") # Optional: Your logo
+                    
+                    await after.channel.send(embed=embed)
+                    print(f"🎵 Playlist dispatched to {member.display_name} in {after.channel.name}")
+                except Exception as e:
+                    print(f"❌ Could not send vibe link: {e}")
 
-    message = {
-        "embeds": [{
-            "title": f"☕ The Essentials: {context['name']}",
-            "description": (
-                "**Current Session**: Your Personal Vault\n"
-                "Maintain your flow state. The playlist below is synced for your curated focus music.\n\n"
-                f"📺 **[Click to Launch Shuffled Playlist]({PERSONAL_PLAYLIST_URL})**"
-            ),
-            "color": context['color'],
-            "footer": {"text": f"Sentry Flow • Sync: {time_str}"}
-        }]
-    }
-
-    try:
-        response = requests.post(WEBHOOK_URL, json=message)
-        if response.status_code in [200, 204]:
-            print(f"✅ Successfully posted {context['name']} to Discord.")
-        else:
-            print(f"❌ Discord error: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Request Error: {e}")
+bot = ChillVibes()
 
 if __name__ == "__main__":
-    post_vibe_update()
+    bot.run(TOKEN)

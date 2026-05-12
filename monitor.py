@@ -44,7 +44,7 @@ if not TWELVE_DATA_KEY:
     print("❌ CRITICAL ERROR: TWELVE_DATA_API_KEY is missing from .env")
     sys.exit(1)
 
-# SEC Identity - Strict Formatting
+# SEC Identity
 if SENDER_EMAIL:
     set_identity(f"Alwin Almazan {SENDER_EMAIL}")
 else:
@@ -54,30 +54,36 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 LOG_FILE = os.path.join(BASE_PATH, "sent_filings.txt")
 
 def get_venture_data(ticker):
-    """Fetches market data with fallback logic."""
-    url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+    """Fetches market data with specialized daily volume tracking."""
+    # Use 1day interval time_series to get accurate cumulative volume for CEFs
+    ts_url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval=1day&outputsize=1&apikey={TWELVE_DATA_KEY}"
+    quote_url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+    
     fallback_avg = 1700000 if ticker == "CLM" else 950000 
     
     try:
-        response = requests.get(url, timeout=12)
-        resp = response.json()
+        # Fetching price/average volume from Quote
+        q_resp = requests.get(quote_url, timeout=12).json()
         
-        if resp.get("status") != "ok":
-            print(f"    ❌ API Error for {ticker}: {resp.get('message', 'Unknown Error')}")
+        # Fetching actual daily cumulative volume from Time Series
+        ts_resp = requests.get(ts_url, timeout=12).json()
+        
+        if q_resp.get("status") != "ok":
             return get_price_only_fallback(ticker, fallback_avg)
             
-        vol = int(resp.get('volume', 0))
-        if vol == 0:
-            ts_url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval=1min&outputsize=1&apikey={TWELVE_DATA_KEY}"
-            ts_res = requests.get(ts_url).json()
-            if 'values' in ts_res:
-                vol = int(ts_res['values'][0]['volume'])
+        # Extract daily volume from time_series if available, else use quote
+        daily_vol = 0
+        if 'values' in ts_resp and len(ts_resp['values']) > 0:
+            daily_vol = int(ts_resp['values'][0].get('volume', 0))
+        
+        if daily_vol == 0:
+            daily_vol = int(q_resp.get('volume', 0))
         
         return {
-            "price": float(resp['close']),
-            "vol": vol,
-            "avg_vol": int(resp.get('average_volume', fallback_avg)),
-            "change": float(resp.get('percent_change', 0))
+            "price": float(q_resp['close']),
+            "vol": daily_vol,
+            "avg_vol": int(q_resp.get('average_volume', fallback_avg)),
+            "change": float(q_resp.get('percent_change', 0))
         }
     except Exception as e:
         print(f"    ⚠️ Connection Error for {ticker}: {e}")
@@ -97,6 +103,7 @@ def run_sentry_check():
     now = datetime.datetime.now(tz_honolulu)
     
     is_test = "test" in sys.argv
+    # The 8:00 AM HST window for daily pulse
     is_pulse_time = (now.hour == 8 and now.minute < 15)
     
     print(f"--- 🛡️ SENTRY START: {now.strftime('%Y-%m-%d %H:%M:%S')} (HST) ---")
@@ -104,7 +111,6 @@ def run_sentry_check():
     reports = []
     sec_detected = False
     vol_spike = False
-    high_premium = False
     overall_status = "STABLE"
 
     for ticker in ["CLM", "CRF"]:
@@ -135,10 +141,11 @@ def run_sentry_check():
             premium = ((price - nav) / nav) * 100
             current_status = "STABLE"
             
+            # Volatility Detection Logic
             if mkt['vol'] > (mkt['avg_vol'] * 1.4) and mkt['change'] < -2.5:
                 vol_spike, current_status, overall_status = True, "🚨 VOLATILITY DUMP", "CRITICAL"
             elif premium > 25:
-                high_premium, current_status, overall_status = True, "🚨 HIGH PREMIUM", "WARNING"
+                current_status, overall_status = "🚨 HIGH PREMIUM", "WARNING"
             elif premium > 21:
                 current_status = "⚠️ CAUTION"
                 if overall_status == "STABLE": overall_status = "CAUTION"
@@ -169,10 +176,10 @@ def run_sentry_check():
                 msg['Subject'] = f"Sentry Update: {overall_status}"; msg['From'] = SENDER_EMAIL; msg['To'] = f"{SENDER_EMAIL}, {WORK_EMAIL}"
                 with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                     smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD); smtp.send_message(msg)
-                print("   ✅ Dispatch Successful.")
+                print("    ✅ Dispatch Successful.")
             except Exception as e: print(f"    ⚠️ Email failed: {e}")
 
-    print(f"--- 🛡️ SENTRY FINISHED: {datetime.datetime.now(tz_honolulu).strftime('%H:%M:%S')} ---")
+    print(f"--- 🛡️ SENTRY FINISHED ---")
 
 if __name__ == "__main__":
     run_sentry_check()
