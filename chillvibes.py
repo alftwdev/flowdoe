@@ -7,35 +7,33 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# NEW CORRECTED PLAYLIST LINK
+# FINAL CORRECTED PLAYLIST
 PLAYLIST_URL = "https://youtube.com/playlist?list=PLKTJFoK2VZXPI8D7OxbapTj4id4JeynP7&si=IgrSqQ21PcjvoscG"
-SHUFFLE_INSTRUCTION = "🎧 **Ambient Session Active**: Click the link above and hit the 'Shuffle' button to start the vibe."
+SHUFFLE_INSTRUCTION = "🎧 **Ambient Session Active**: Open the chat and hit 'Shuffle' on the playlist to begin."
 
 class ChillVibes(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.voice_states = True  # CRITICAL: Detects VC joins
+        intents.voice_states = True # Required for detecting joins
         intents.messages = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def on_ready(self):
         print(f"✅ Rockefeller Ambient Intelligence Online: {self.user.name}")
 
-    # --- 2. THE VIBE SENTRY LOGIC ---
+    # --- 2. THE REFINED JOIN-ONLY TRIGGER ---
     async def on_voice_state_update(self, member, before, after):
-        # 1. Safety Check: Only trigger if the user was NOT in a VC and now IS in one.
+        # STAGE 1: Check if the user is actually NEW to a voice channel
+        # If 'before.channel' is None, they just clicked the "Join" button.
         if before.channel is None and after.channel is not None:
             
-            # 2. Targeted Channels: Ensure this only fires in relevant 'chill' or 'open' rooms.
+            # STAGE 2: Filter for your specific "Ambient" or "Open Chat" channels
             target_keywords = ["chill", "open", "lounge", "ambient"]
             if any(word in after.channel.name.lower() for word in target_keywords):
                 
-                # 3. Prevent Bot Self-Triggering
-                if member.bot:
-                    return
+                if member.bot: return
 
                 try:
-                    # Constructing the Elite Embed
                     embed = discord.Embed(
                         title="🏛️ Rockefeller Ambient Intelligence",
                         description=(
@@ -43,18 +41,16 @@ class ChillVibes(commands.Bot):
                             f"**[Click here for the Global Playlist]({PLAYLIST_URL})**\n\n"
                             f"{SHUFFLE_INSTRUCTION}"
                         ),
-                        color=0x2c3e50 # Deep Midnight Blue for ambient feel
+                        color=0x2c3e50 # Midnight Blue
                     )
-                    
-                    # Optional Footer for branding consistency
                     embed.set_footer(text="Rockefeller Strategic Intelligence | Ecosystem Verified")
                     
-                    # Post to the Voice Channel's internal text chat
+                    # Sends specifically to the Voice Channel's text-chat
                     await after.channel.send(embed=embed)
-                    print(f"🎵 Vibe Dispatch: {member.display_name} joined {after.channel.name}")
+                    print(f"🎵 Join Triggered: {member.display_name} entered {after.channel.name}")
                     
                 except Exception as e:
-                    print(f"❌ Vibe Dispatch Error: {e}")
+                    print(f"❌ Dispatch Error: {e}")
 
 bot = ChillVibes()
 
