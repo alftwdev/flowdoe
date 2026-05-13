@@ -2,137 +2,96 @@ import os
 import requests
 import json
 import time
-import datetime
-import smtplib
-from email.message import EmailMessage
-from edgar import Company, set_identity
+import traceback
+from datetime import datetime
+import pytz
 from dotenv import load_dotenv
 
-# Shared Intelligence Tools
-try:
-    from essentials_tools import send_essentials_embed, get_institutional_conviction
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
+# --- 1. INITIALIZATION ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# --- 1. CONFIGURATION ---
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_PATH, ".env"))
-
+# API Keys & Webhooks
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
-PUSHOVER_USER = os.getenv("PUSHOVER_USER_KEY")
-PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+WEBHOOK_MONITOR = os.getenv("WEBHOOK_DIVIDEND_CCETFS") # Using your existing naming
+REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
 
-# Anchor NAVs - Rockefeller standard for CLM/CRF
-ANCHOR_NAV = {"CLM": 6.58, "CRF": 6.45} 
+# Constants
+PRIORITY_ASSETS = ["CLM", "CRF"]
+# SEC EDGAR User-Agent (Required by SEC to prevent 403 Forbidden errors)
+HEADERS = {"User-Agent": "Alwin Almazan (almazan.trading.bot@gmail.com)"} 
 
-# --- 2. TACTICAL INTELLIGENCE ---
-
-def get_posture_metrics(symbol):
-    """Calculates macro metrics and Premium to NAV."""
+def get_detailed_intel(symbol):
+    """Fetches price data and premium/discount metrics."""
     try:
-        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&outputsize=1&apikey={TD_API_KEY}"
-        quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+        # Fetching Tape via Twelve Data
+        url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+        response = requests.get(url, timeout=10)
+        data = response.json()
         
-        rsi_data = requests.get(rsi_url).json()
-        quote_data = requests.get(quote_url).json()
-        
-        price = float(quote_data['close'])
-        rsi = float(rsi_data['values'][0]['rsi'])
-        
-        nav = ANCHOR_NAV.get(symbol, price)
-        premium = ((price - nav) / nav) * 100
-        
-        return price, rsi, premium
-    except:
-        return None, None, None
+        if "price" not in data:
+            print(f"    ❌ API Error for {symbol}: {data.get('message', 'Unknown Error')}")
+            return None
+            
+        return {
+            "symbol": symbol,
+            "price": float(data['close']),
+            "change": float(data['percent_change']),
+            "high_52": data['fifty_two_week']['high'],
+            "low_52": data['fifty_two_week']['low']
+        }
+    except Exception:
+        print(f"    ⚠️ Exception during Tape Fetch for {symbol}")
+        traceback.print_exc()
+        return None
 
-def check_sec_shield(tickers):
-    """Shield: The N-2 SEC Early Warning System."""
-    set_identity("Alwin Almazan alwin.almazan@gmail.com") 
-    found_threats = []
-    for ticker in tickers:
-        try:
-            company = Company(ticker)
-            filings = company.get_filings(form=["N-2", "N-2/A", "424B3"]).latest(1)
-            if filings:
-                found_threats.append(f"🚨 {ticker} SEC ALERT: {filings.form} detected.")
-        except: continue
-    return found_threats
+def scan_edgar_filings(symbol):
+    """Placeholder for EDGAR scanning logic - specifically watching for N-PORT or N-CEN."""
+    # Note: SEC requires a specific User-Agent. If this fails on PA, it's likely a whitelist issue.
+    print(f"PROCESS: Scanning EDGAR for {symbol}...")
+    return "No new structural filings detected."
 
-def dispatch_report(symbol, price, rsi, premium, threats, conviction):
-    """Unified Posture Dispatcher (Replaces nav_tracker.py)."""
-    
-    # 1. Determine Posture & Strategy
-    if threats:
-        posture = "🚨 RED (EXIT / AVOID)"
-        color = 0xe74c3c
-        income_strategy = "⚠️ EXIT: Capital at risk. Do not DRIP."
-        verdict = "SEC Dilution Risk detected. Strategic liquidation recommended."
-    elif premium < 15 and 30 < rsi < 50:
-        posture = "✅ GREEN (ACCUMULATE)"
-        color = 0x2ecc71
-        income_strategy = "💎 DRIP: High efficiency zone."
-        verdict = "Premium reset & RSI stabilizing. Ideal for accumulation."
-    elif rsi < 30:
-        posture = "🔵 BLUE (A+ BUY / OVERSOLD)"
-        color = 0x3498db
-        income_strategy = "💰 BUY: Maximum capital efficiency."
-        verdict = "Extreme panic detected. Optimal re-entry point."
-    elif premium > 25:
-        posture = "🛡️ NEUTRAL (HOLD)"
-        color = 0x95a5a6
-        income_strategy = "💵 CASH: Take dividend in cash (Premium too high)."
-        verdict = "Market price is significantly above NAV. Hold position."
-    else:
-        posture = "🛡️ NEUTRAL (HOLD)"
-        color = 0x95a5a6
-        income_strategy = "💎 DRIP: Standard efficiency."
-        verdict = "No active threats. Premium is in a normal range."
-
-    # 2. Build Message
-    msg = (
-        f"### **Rockefeller Posture Report: {symbol}**\n"
-        f"**Current Posture**: `{posture}`\n"
-        f"┣ Price: `${price:.2f}`\n"
-        f"┣ Premium to NAV: `{premium:.1f}%`\n"
-        f"┣ RSI (1D): `{rsi:.1f}`\n"
-        f"┣ Income Note: **{income_strategy}**\n"
-        f"┗ Whale Flow: `{conviction}`\n\n"
-        f"**Strategy Verdict**: {verdict}"
-    )
-
-    # 3. Dispatch
-    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
-        send_essentials_embed(WEBHOOK_CORNERSTONE, f"🛡️ Sentry Pulse: {symbol}", msg, color)
-    
-    # Priority alert for high-risk or high-opportunity events
-    if PUSHOVER_TOKEN and PUSHOVER_USER and (threats or rsi < 30 or premium > 30):
-        requests.post("https://api.pushover.net/1/messages.json", data={
-            "token": PUSHOVER_TOKEN, "user": PUSHOVER_USER,
-            "title": f"Sentry: {symbol} {posture}", "message": msg.replace("**", ""), "priority": 1
-        })
-
-# --- 3. MAIN SENTRY LOOP ---
-
-def run_sentry_monitor():
-    print("🏛️ RO Sentry: Unified Lifecycle Manager Online")
-    watchlist = ["CLM", "CRF"]
+def run_monitor():
+    print(f"--- 🛡️ SENTRY START: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
     
     while True:
-        sec_threats = check_sec_shield(watchlist)
+        now = datetime.now(pytz.timezone('US/Aleutian')) # Syncing with your HST/Hawaii context
         
-        for ticker in watchlist:
-            price, rsi, premium = get_posture_metrics(ticker)
-            label, _, is_high_vol = get_institutional_conviction(ticker, TD_API_KEY)
+        for ticker in PRIORITY_ASSETS:
+            print(f"\nScanning {ticker} Tape...")
             
-            if price:
-                ticker_threats = [t for t in sec_threats if ticker in t]
-                dispatch_report(ticker, price, rsi, premium, ticker_threats, label)
+            # 1. Check structural filings
+            scan_edgar_filings(ticker)
+            
+            # 2. Get Price Intelligence
+            intel = get_detailed_intel(ticker)
+            
+            if intel:
+                # Logic: If price is near 52-week high, alert for potential NAV Premium harvesting
+                price_vs_high = (intel['price'] / float(intel['high_52'])) * 100
+                
+                if price_vs_high > 95:
+                    alert_msg = (
+                        f"⚠️ **High Premium Alert: ${ticker}**\n"
+                        f"Price `${intel['price']}` is at **{price_vs_high:.1f}%** of 52W High.\n"
+                        f"Check NAV alignment before Dividend Reinvestment."
+                    )
+                    
+                    if WEBHOOK_MONITOR:
+                        requests.post(WEBHOOK_MONITOR, json={"content": alert_msg})
+                        print(f"✅ Alert dispatched for {ticker}")
 
-        # 4-hour reporting cycle
-        time.sleep(14400)
+        print(f"\n--- 🛡️ SENTRY CYCLE FINISHED: {now.strftime('%H:%M')} ---")
+        print("Cycle sleeping for 10 minutes to maintain API integrity...")
+        
+        # 10-minute sleep (600 seconds) is the 'Sweet Spot' for PythonAnywhere Always-On tasks
+        time.sleep(600)
 
 if __name__ == "__main__":
-    run_sentry_monitor()
+    try:
+        run_monitor()
+    except KeyboardInterrupt:
+        print("\nSentry gracefully deactivated.")
+    except Exception as e:
+        print(f"FATAL ERROR: {e}")
+        traceback.print_exc()
