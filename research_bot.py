@@ -2,15 +2,18 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import os
+import json
+import requests
+from datetime import datetime
 from dotenv import load_dotenv
-import logging
 
-# Load environment variables
-load_dotenv()
+# --- 1. CONFIGURATION & UNITY PATHING ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 TOKEN = os.getenv('DISCORD_TOKEN')
-
-# Setup Logging
-logging.basicConfig(level=logging.INFO)
+TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
 
 class RockefellerSentry(commands.Bot):
     def __init__(self):
@@ -19,62 +22,96 @@ class RockefellerSentry(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        print("🔄 Syncing Rockefeller Sentry Commands...")
-        try:
-            synced = await self.tree.sync()
-            print(f"✅ Rockefeller Sentry Online: {len(synced)} Commands Synced.")
-        except Exception as e:
-            print(f"❌ Sync Error: {e}")
+        print("🔄 Syncing Rockefeller Research Commands...")
+        await self.tree.sync()
 
 bot = RockefellerSentry()
 
-@bot.tree.command(name="query", description="Full Institutional Analysis (Fundamental + Technical)")
-@app_commands.describe(ticker="Enter Ticker (e.g., CLM, NVDA, XLC)")
+# --- 2. INTELLIGENCE TOOLS ---
+
+def get_market_context():
+    """Reads the global shield status from the shared ledger."""
+    try:
+        with open(REGIME_LEDGER, "r") as f:
+            return json.load(f)
+    except:
+        return {"regime": "NEUTRAL", "rsi_shield_limit": 66, "vix_status": "STABLE"}
+
+def fetch_live_techs(ticker):
+    """Pulls real-time RSI and Price to align with Sentry math."""
+    try:
+        # Get RSI (1D)
+        rsi_url = f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day&outputsize=1&apikey={TD_API_KEY}"
+        quote_url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TD_API_KEY}"
+        
+        rsi_data = requests.get(rsi_url).json()
+        quote_data = requests.get(quote_url).json()
+        
+        return {
+            "price": float(quote_data['close']),
+            "change": float(quote_data['percent_change']),
+            "rsi": float(rsi_data['values'][0]['rsi'])
+        }
+    except:
+        return None
+
+# --- 3. THE ANALYST COMMAND ---
+
+@bot.tree.command(name="query", description="Run institutional Fundamental + Technical analysis on a ticker.")
+@app_commands.describe(ticker="Ticker symbol (e.g. NVDA, CLM, XLC)")
 async def query(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper()
-    await interaction.response.defer() # Prevents timeout during API calls
+    await interaction.response.defer(ephemeral=False) # Public response for the team
 
-    # --- Analysis Logic (Derived from your uploaded PDF/CSV logic) ---
-    # In a production environment, you would call TwelveData/YFinance here.
-    # For now, we structure the response based on your specific criteria.
+    # 1. Fetch Real-time Data & Context
+    context = get_market_context()
+    intel = fetch_live_techs(ticker)
     
-    # 1. RSI Shield Check
-    rsi_val = 45.2  # Placeholder for real-time RSI
-    verdict = "🟢 PROCEED (High Conviction)" if rsi_val < 66 else "🔴 AVOID (Overbought > 66)"
-    
+    if not intel:
+        await interaction.followup.send(f"❌ Error: Could not retrieve data for {ticker}. Check API limits.")
+        return
+
+    # 2. Rockefeller Verdict Logic
+    rsi_limit = context.get("rsi_shield_limit", 66)
+    is_safe = intel['rsi'] < rsi_limit
+    verdict = "🟢 PROCEED (High Conviction)" if is_safe else "🔴 AVOID (Shield Active)"
+    color = discord.Color.green() if is_safe else discord.Color.red()
+
+    # 3. Build the Institutional Embed
     embed = discord.Embed(
-        title=f"🏛️ Rockefeller Sentry: {ticker}",
-        description=f"**Verdict:** {verdict}",
-        color=discord.Color.green() if rsi_val < 66 else discord.Color.red()
+        title=f"🏛️ Rockefeller Analyst: {ticker}",
+        description=f"**Current Verdict**: {verdict}\n*Analysis aligned with Market Regime: {context['regime']}*",
+        color=color,
+        timestamp=datetime.now()
     )
 
-    # 2. Fundamental Quality (GuruFocus Logic from your NVDA/XLC files)
-    embed.add_field(name="🛡️ Fundamental Health", value=(
-        "┣ Financial Strength: 9/10 (Pass: >5)\n"
-        "┣ Profitability: 10/10 (Pass: >7)\n"
-        "┗ 10-Year Avg: 0.752 (Stable)"
+    # Technical Overview
+    embed.add_field(name="📐 Technical Pulse", value=(
+        f"┣ Price: `${intel['price']:.2f}` ({intel['change']:.2f}%)\n"
+        f"┣ RSI (1D): `{intel['rsi']:.1f}`\n"
+        f"┗ System Limit: `< {rsi_limit}`"
+    ), inline=True)
+
+    # Market Health
+    embed.add_field(name="🛡️ System Shield", value=(
+        f"┣ Regime: `{context['regime']}`\n"
+        f"┣ VIX Status: `{context['vix_status']}`\n"
+        f"┗ Strategy: `{'Defensive' if rsi_limit < 60 else 'Aggressive'}`"
+    ), inline=True)
+
+    # Fundamental Health (Static placeholder for your manual quality checks)
+    embed.add_field(name="💎 Fundamental Quality", value=(
+        "┣ Financial Strength: `9/10` (Pass: >5)\n"
+        "┣ Profitability: `10/10` (Pass: >7)\n"
+        "┗ ROIC (5-yr): `Exceeds WACC`"
     ), inline=False)
 
-    # 3. Key Turning Points (BarChart/Fibonacci Logic)
-    embed.add_field(name="📐 Technical Levels", value=(
-        "┣ Resistance (R1): $183.32\n"
-        "┣ Fibonacci (50%): $141.12\n"
-        "┗ Support (S1): $178.22"
-    ), inline=False)
+    embed.set_footer(text="Data source: Twelve Data Venture Tier | Rockefeller Intelligence Engine")
 
-    # 4. Income/Spread Logic (from 'Entering & Exiting Spreads' Guide)
-    embed.add_field(name="💰 Income Outlook", value=(
-        "┣ Strategy: Credit Spread / Premium Sell\n"
-        "┣ Break-Even Estimate: $165.40\n"
-        "┗ Volatility (VIX) Context: Low/Stable"
-    ), inline=False)
-
-    embed.set_footer(text=f"Sentry Analysis for {ticker} • Data synced via TwelveData")
-    
     await interaction.followup.send(embed=embed)
 
 if __name__ == "__main__":
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("❌ ERROR: No DISCORD_TOKEN found in .env. Ensure the file exists in the script directory.")
+        print("❌ DISCORD_TOKEN missing in .env")

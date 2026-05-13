@@ -28,35 +28,26 @@ def generate_morning_brief():
             regime = data.get("regime", "NEUTRAL")
             vix_status = data.get("vix_status", "STABLE")
             rsi_limit = data.get("rsi_shield_limit", 66)
-            # CHECK SYSTEM OVERRIDE (SEC/WHALE THREATS)
-            system_override = data.get("system_override", False)
-            threat_count = len(data.get("active_threats", []))
     except:
-        regime, vix_status, rsi_limit, system_override, threat_count = "NEUTRAL", "UNKNOWN", 66, False, 0
+        regime, vix_status, rsi_limit = "NEUTRAL", "UNKNOWN", 66
 
     # 2. Determine Rockefeller Tone
-    if system_override:
-        color = 0xe74c3c # Red for lockdown
-        lockdown_alert = f"🚨 **SYSTEM LOCKDOWN**: {threat_count} Active Threats Detected!"
-    else:
-        color = 0x2ecc71 if regime == "BULLISH" else 0xf1c40f
-        lockdown_alert = "✅ **SYSTEM CLEAR**: All Shields Nominal."
+    color = 0x2ecc71 if regime == "BULLISH" else 0xe74c3c if regime == "BEARISH" else 0xf1c40f
     
     # 3. Build Brief
     title = "🌅 Rockefeller Morning Intelligence"
     description = (
         f"### **Daily Battle Plan: {now.strftime('%b %d, %Y')}**\n"
-        f"Status: {lockdown_alert}\n\n"
         f"The market is opening with a **{regime}** posture.\n\n"
         f"**Risk Parameters**:\n"
         f"┣ **Volatility**: `{vix_status}`\n"
         f"┣ **RSI Shield**: `Active at < {rsi_limit}`\n"
-        f"┗ **Conviction**: {'High' if not system_override and vix_status == 'STABLE' else 'Measured'}\n\n"
+        f"┗ **Conviction**: {'High' if vix_status == 'STABLE' else 'Measured'}\n\n"
         "**Tactical Objectives**:\n"
-        "1. Check #trade-signals for 'Shield: OFF' entry alerts.\n"
-        "2. Sentry is monitoring CLM/CRF for dilution filings.\n"
-        "3. Protect capital; ignore sub-optimal setups.\n\n"
-        f"*Status: Engine firing. Sentry scripts are always-on (HST).*"
+        "1. Monitor #trade-signals for VWAP reclaims.\n"
+        "2. Income focused in #dividend-ccetfs.\n"
+        "3. Protect capital at all costs.\n\n"
+        f"*Status: Engine firing. Sentry scripts are always-on.*"
     )
 
     if HAS_ESSENTIALS and WEBHOOK_MARKET:
