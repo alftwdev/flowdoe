@@ -3,15 +3,13 @@ import requests
 import json
 import pytz
 import sys
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-# Requirement: pip install Pillow
-try:
-    from PIL import Image, ImageDraw, ImageFont
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
+# --- 1. ECOSYSTEM INITIALIZATION ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 try:
     from essentials_tools import send_essentials_embed
@@ -19,174 +17,139 @@ try:
 except ImportError:
     HAS_ESSENTIALS = False
 
-# --- 1. CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
+# Environment Variables
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS")
-REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
 
-# Assets that bypass the yield filter
-CORE_WATCHLIST = ["CLM", "CRF", "MSTY", "NVDY", "CONY", "JEPI", "JEPQ", "SCHD", "TLTW", "QQQY"]
-MIN_YIELD_THRESHOLD = 4.5  # Only analyze assets with >4.5% yield
+# Technical Thresholds for "Popular/Trending" Assets
+MIN_YIELD = 4.0
+MIN_VOLUME = 500000 # Only report on liquid, high-volume assets
+MAX_DISPATCH = 8    # Maximum signals per alert to prevent spam
 
-# --- 2. INTELLIGENCE TOOLS ---
+# --- 2. THE DYNAMIC INTELLIGENCE ENGINE ---
 
-def get_market_context():
+def get_risk_rating(yield_val, volume):
+    """Surgical Risk Assessment based on yield extremity and liquidity."""
+    if yield_val > 50: return "⚠️ ULTRA-HIGH (Yield Trap)"
+    if yield_val > 18: return "⚖️ ELEVATED (High Income)"
+    if volume < 100000: return "🔍 LOW LIQUIDITY (Caution)"
+    return "✅ STABLE (Institutional)"
+
+def run_dynamic_income_scan(mode="DAILY"):
+    """
+    Scans the entire market via Twelve Data for trending high-yield setups.
+    Does NOT use a hardcoded watchlist.
+    """
+    print(f"    [INCOME] Initiating Dynamic Market Scan ({mode})...")
+    
+    # We scan a 14-day window to find the most relevant upcoming "Main Events"
+    start_date = datetime.now().strftime('%Y-%m-%d')
+    end_date = (datetime.now() + timedelta(days=14)).strftime('%Y-%m-%d')
+    
+    # Twelve Data Venture: Dividend Calendar endpoint
+    url = f"https://api.twelvedata.com/dividends_calendar?start_date={start_date}&end_date={end_date}&apikey={TD_API_KEY}"
+    
     try:
-        with open(REGIME_LEDGER, "r") as f:
-            return json.load(f)
-    except:
-        return {"regime": "NEUTRAL", "rsi_shield_limit": 66}
+        r = requests.get(url, timeout=20)
+        events = r.json()
+        if not isinstance(events, list):
+            events = events.get("rows", [])
 
-def get_ticker_intel(symbol):
-    """Fetches deep-dive stats for the Daily Brief."""
-    try:
-        # Combined endpoints for efficiency
-        quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
-        stats_url = f"https://api.twelvedata.com/statistics?symbol={symbol}&apikey={TD_API_KEY}"
-        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&outputsize=1&apikey={TD_API_KEY}"
+        print(f"    [SENTRY] Analyzing {len(events)} market events for quality...")
         
-        q_res = requests.get(quote_url).json()
-        s_res = requests.get(stats_url).json()
-        r_res = requests.get(rsi_url).json()
+        processed_candidates = []
         
-        stats = s_res.get("statistics", {}).get("dividends_and_splits", {})
-        
-        return {
-            "price": float(q_res.get("close", 0)),
-            "yield": float(stats.get("dividend_yield", 0)),
-            "rsi": float(r_res['values'][0]['rsi']) if 'values' in r_res else 50,
-            "payout": stats.get("payout_ratio", "N/A")
-        }
-    except:
-        return None
+        for e in events:
+            if len(processed_candidates) >= MAX_DISPATCH: break
+            
+            ticker = e['symbol']
+            
+            # Fetch real-time market data to check Volume and Price
+            quote_res = requests.get(f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TD_API_KEY}").json()
+            
+            try:
+                price = float(quote_res.get('close', 0))
+                vol = int(quote_res.get('volume', 0))
+                div_amt = float(e.get('amount', 0))
+                
+                # Dynamic Yield Calculation (Estimated Annual)
+                # We assume monthly for high-yielders > $0.20/mo, quarterly otherwise
+                freq = 12 if div_amt > 0.15 else 4 
+                annual_yield = (div_amt * freq / price) * 100 if price > 0 else 0
+                
+                # THE FILTER: Must be high volume AND meet yield threshold
+                if annual_yield >= MIN_YIELD and vol >= MIN_VOLUME:
+                    risk = get_risk_rating(annual_yield, vol)
+                    processed_candidates.append({
+                        "symbol": ticker,
+                        "price": price,
+                        "yield": round(annual_yield, 2),
+                        "amount": div_amt,
+                        "ex_date": e['ex_dividend_date'],
+                        "pay_date": e.get('payment_date', 'TBD'),
+                        "risk": risk,
+                        "vol": vol
+                    })
+                    print(f"    [+] High-Signal Match: {ticker} ({annual_yield:.1f}% Yield)")
+            except:
+                continue
 
-def get_risk_rating(intel, context):
-    """Rockefeller Risk Assessment Logic."""
-    limit = context.get("rsi_shield_limit", 66)
-    rsi = intel['rsi']
-    if rsi > 70: return "🔴 AVOID"
-    if rsi < 42: return "🟢 SAFE"
-    if rsi < limit: return "🟡 DCA"
-    return "🟠 SHIELD"
+        # 3. DISPATCH LOGIC
+        if mode == "WEEKLY":
+            title = "📅 Weekly Institutional Income Outlook"
+            header = "Top-Tier Dividend Opportunities (Next 14 Days)"
+            color = 0x2980b9
+        else:
+            title = f"💰 Daily Income Scan: {datetime.now().strftime('%b %d')}"
+            header = "Tactical High-Volume Dividend Pulse"
+            color = 0x27ae60
 
-def generate_income_card(data):
-    """Generates a professional data-card image to prevent scraping."""
-    if not HAS_PIL: return None
-    
-    # Theme: Rockefeller Dark
-    img = Image.new('RGB', (800, 500), color=(10, 10, 12))
-    d = ImageDraw.Draw(img)
-    
-    # Header Bar
-    d.rectangle([0, 0, 800, 70], fill=(20, 20, 25))
-    d.text((30, 20), "ROCKEFELLER STRATEGIC INTELLIGENCE: DAILY INCOME", fill=(212, 175, 55)) # Gold
-    
-    y = 100
-    for item in data:
-        # Row Logic
-        d.text((30, y), f"{item['symbol']}", fill=(255, 255, 255))
-        d.text((150, y), f"Price: ${item['price']:.2f}", fill=(200, 200, 200))
-        d.text((320, y), f"Yield: {item['yield']}%", fill=(200, 200, 200))
-        d.text((500, y), f"Risk: {item['risk']}", fill=(255, 255, 255))
-        
-        y += 60
-        d.line([30, y-20, 770, y-20], fill=(40, 40, 45))
-        
-    img_path = os.path.join(BASE_DIR, "income_snapshot.png")
-    img.save(img_path)
-    return img_path
+        if not processed_candidates:
+            desc = "### **System Stable: Market Quiet**\nNo trending high-volume dividend events met the institutional threshold today."
+        else:
+            desc = f"### **{header}**\n"
+            # Sort by Yield (Highest first)
+            processed_candidates.sort(key=lambda x: x['yield'], reverse=True)
+            
+            for p in processed_candidates:
+                desc += (
+                    f"**{p['symbol']}** | Price: `${p['price']}`\n"
+                    f"┣ Yield: `{p['yield']}%` | Risk: `{p['risk']}`\n"
+                    f"┣ Ex-Date: `{p['ex_date']}` | Amt: `${p['amount']}`\n"
+                    f"┗ Vol: `{p['vol']:,}` | Pay: `{p['pay_date']}`\n\n"
+                )
 
-# --- 3. DISPATCH ENGINES ---
+        print(f"    [BROADCAST] Dispatching to Discord...")
+        if HAS_ESSENTIALS and WEBHOOK_INCOME:
+            send_essentials_embed(WEBHOOK_INCOME, title, desc, color)
 
-def run_weekly_outlook():
-    """Calendar-view scan for the week ahead (No redundant Mon/Tue tags)."""
-    print("📡 Scanning Weekly Outlook...")
-    today = datetime.now().date()
-    url = f"https://api.twelvedata.com/dividends_calendar?start_date={today.isoformat()}&end_date={(today + timedelta(days=6)).isoformat()}&apikey={TD_API_KEY}"
-    res = requests.get(url).json()
-    events = res if isinstance(res, list) else res.get("calendar", [])
+    except Exception as e:
+        print(f"    [CRITICAL ERROR] Scan Failed: {e}")
 
-    if not events: return
+# --- 3. SCHEDULER ---
 
-    # Group by Date
-    outlook = {}
-    for e in events:
-        date = e['ex_date']
-        if date not in outlook: outlook[date] = []
-        outlook[date].append(e)
+def run_scheduler():
+    tz_est = pytz.timezone('US/Eastern')
+    print(f"--- 🏛️ DYNAMIC INCOME PATROL ACTIVE ---")
 
-    desc = "### **High-Yield Roadmap**\n"
-    for date_str, items in sorted(outlook.items())[:5]:
-        pretty_date = datetime.strptime(date_str, '%Y-%m-%d').strftime('%A, %b %d')
-        desc += f"**{pretty_date}**\n"
-        for item in sorted(items, key=lambda x: x['symbol'] not in CORE_WATCHLIST)[:4]:
-            marker = "⭐" if item['symbol'] in CORE_WATCHLIST else "┣"
-            desc += f"{marker} `{item['symbol']}` | **${item['amount']}**\n"
-        desc += "\n"
-
-    if HAS_ESSENTIALS:
-        send_essentials_embed(WEBHOOK_INCOME, "🏛️ Rockefeller Income: Weekly Outlook", desc, 0x3498db)
-        print("✅ Weekly Outlook Posted.")
-
-def run_daily_pulse():
-    """The 'Deep Dive' analyzing today's best specific opportunities."""
-    print("💎 Compiling Daily Brief (Silent Quality Filter)...")
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    context = get_market_context()
-    
-    url = f"https://api.twelvedata.com/dividends_calendar?start_date={today_str}&end_date={today_str}&apikey={TD_API_KEY}"
-    res = requests.get(url).json()
-    events = res if isinstance(res, list) else res.get("calendar", [])
-
-    processed_data = []
-    for e in events:
-        symbol = e['symbol']
-        intel = get_ticker_intel(symbol)
-        
-        # QUALITY GATE: Yield check + Watchlist check
-        if intel and (intel['yield'] >= MIN_YIELD_THRESHOLD or symbol in CORE_WATCHLIST):
-            intel['symbol'] = symbol
-            intel['risk'] = get_risk_rating(intel, context)
-            intel['div_amt'] = e['amount']
-            processed_data.append(intel)
-            print(f"   + Analysis Complete: {symbol}")
-        
-        if len(processed_data) >= 6: break
-
-    if not processed_data:
-        print("   No high-quality events detected today.")
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        run_dynamic_income_scan(mode="WEEKLY")
+        time.sleep(2)
+        run_dynamic_income_scan(mode="DAILY")
         return
 
-    # Option: Image or Text. Image is better for data protection.
-    img_path = generate_income_card(processed_data)
-    
-    desc = "### **Daily Institutional Analysis**\nBelow are today's top dividend payers filtered for quality and risk.\n\n"
-    for p in processed_data:
-        desc += f"**{p['symbol']}** | Yield: `{p['yield']}%` | Risk: `{p['risk']}`\n"
-
-    if HAS_ESSENTIALS:
-        send_essentials_embed(
-            WEBHOOK_INCOME, 
-            f"💰 Daily Pulse: {datetime.now().strftime('%b %d')}", 
-            desc, 
-            0x27ae60,
-            file_path=img_path
-        )
-        print("✅ Daily Pulse Posted.")
+    while True:
+        now_est = datetime.now(tz_est)
+        if now_est.hour == 8 and now_est.minute == 0:
+            if now_est.weekday() == 0:
+                run_dynamic_income_scan(mode="WEEKLY")
+                time.sleep(10)
+                run_dynamic_income_scan(mode="DAILY")
+            else:
+                run_dynamic_income_scan(mode="DAILY")
+            time.sleep(65)
+        
+        time.sleep(30)
 
 if __name__ == "__main__":
-    # Test logic
-    if "test" in sys.argv:
-        run_weekly_outlook()
-        run_daily_pulse()
-    else:
-        # Standard Cron-based logic (set for 08:00 AM HST)
-        tz_h = pytz.timezone('Pacific/Honolulu')
-        now = datetime.now(tz_h)
-        if now.weekday() == 0 and now.hour == 8 and now.minute < 10:
-            run_weekly_outlook()
-        if now.hour == 8 and 15 <= now.minute < 25:
-            run_daily_pulse()
+    run_scheduler()

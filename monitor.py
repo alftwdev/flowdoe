@@ -13,7 +13,13 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# Environment Variables (Synced with trade_signals.py standards)
+try:
+    from essentials_tools import send_essentials_embed, get_institutional_conviction
+    HAS_ESSENTIALS = True
+except ImportError:
+    HAS_ESSENTIALS = False
+
+# Environment Variables
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
 WORK_EMAIL = os.getenv("WORK_EMAIL")
@@ -23,129 +29,129 @@ PUSHOVER_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
 TD_KEY_RAW = os.getenv("TWELVE_DATA_API_KEY")
 TWELVE_DATA_KEY = str(TD_KEY_RAW).strip() if TD_KEY_RAW else None
 
-# Tracking & Persistence
+# Persistence
 FILING_LOG = os.path.join(BASE_DIR, "sent_filings.txt")
+PULSE_FILE = os.path.join(BASE_DIR, "last_pulse.txt")
 
-# Tactical Thresholds (The Three Tactical Shields)
 PRIORITY_ASSETS = {
-    "CLM": {"avg_vol": 1700000, "cik": "0000706247"}, 
-    "CRF": {"avg_vol": 600000, "cik": "0000309341"}
+    "CLM": {"nav_ticker": "XCLMX"},
+    "CRF": {"nav_ticker": "XCRFX"}
 }
-PREMIUM_LIMIT = 25.0 
 
-def broadcast_alert(level, subject, body):
-    """Multi-channel Tactical Dispatch: Discord, Pushover, Email."""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    full_body = f"{body}\n\n*Time: {timestamp} HST*"
+# --- 2. NOTIFICATION CHANNELS ---
+
+def broadcast_alert(level, title, message):
+    """Surgical Dispatch: Discord, Pushover, and Email."""
+    print(f"    [BROADCAST] Sending {level} alert: {title}...")
     
-    # 1. Discord (Team ESSENTIALS Embed Style)
-    if WEBHOOK_CORNERSTONE:
-        payload = {"content": f"## 🚨 {level}: {subject}\n{full_body}"}
-        requests.post(WEBHOOK_CORNERSTONE, json=payload, timeout=10)
-    
-    # 2. Pushover (Mobile Priority)
+    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+        color = 0xe74c3c if "RED" in message else 0x2ecc71 if "GREEN" in message else 0x3498db
+        send_essentials_embed(WEBHOOK_CORNERSTONE, title, message, color)
+
     if PUSHOVER_USER and PUSHOVER_TOKEN:
-        requests.post("https://api.pushover.net/1/messages.json", data={
-            "token": PUSHOVER_TOKEN, "user": PUSHOVER_USER, "message": full_body, "title": subject, "priority": 1 if level == "CRITICAL" else 0
-        }, timeout=10)
-
-    # 3. Email (Redundant Record)
-    if all([SENDER_EMAIL, EMAIL_APP_PASSWORD, WORK_EMAIL]):
-        msg = EmailMessage()
-        msg.set_content(full_body)
-        msg['Subject'] = f"[{level}] {subject}"
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = WORK_EMAIL
         try:
+            requests.post("https://api.pushover.net/1/messages.json", data={
+                "token": PUSHOVER_TOKEN, "user": PUSHOVER_USER,
+                "title": title, "message": message,
+                "priority": 1 if "RED" in message else 0
+            }, timeout=10)
+        except Exception as e: print(f"    [!] Pushover Fail: {e}")
+
+    if "RED" in message and SENDER_EMAIL and WORK_EMAIL:
+        try:
+            msg = EmailMessage()
+            msg.set_content(message)
+            msg['Subject'] = f"SENTRY ALERT: {title}"
+            msg['From'] = SENDER_EMAIL
+            msg['To'] = WORK_EMAIL
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(SENDER_EMAIL, EMAIL_APP_PASSWORD)
                 smtp.send_message(msg)
-        except: pass
+        except Exception as e: print(f"    [!] Email Fail: {e}")
 
-# --- SHIELD 1: THE N-2 SEC SHIELD ---
-def check_sec_filings():
-    """Scans SEC EDGAR for N-2, N-2/A, or 424B3 for priority CIKs."""
+# --- 3. THE INTEL ENGINE ---
+
+def get_posture_report(ticker):
+    """Fetches full technical posture for the Pulse report."""
+    print(f"    [SENTRY] Analyzing {ticker} posture...")
     try:
-        from edgar import Company, get_filings
-        for ticker, info in PRIORITY_ASSETS.items():
-            filings = get_filings(form=["N-2", "N-2/A", "424B3"]).filter(cik=info['cik'])
-            if not filings: continue
-            
-            latest = filings[0]
-            acc_num = latest.accession_number
-            
-            # Check against persistence file
-            if not os.path.exists(FILING_LOG): open(FILING_LOG, 'w').close()
-            with open(FILING_LOG, 'r') as f:
-                seen = f.read().splitlines()
-            
-            if acc_num not in seen:
-                msg = (f"🚨 **SEC SELL SIGNAL: ${ticker}**\n"
-                       f"New Filing: `{latest.form}` detected.\n"
-                       f"Accession: `{acc_num}`\n"
-                       f"Action: Immediate Posture Review - Potential Rights Offering.")
-                broadcast_alert("CRITICAL", f"SEC SHIELD: {ticker}", msg)
-                with open(FILING_LOG, 'a') as f: f.write(f"{acc_num}\n")
+        # Techs
+        q_url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
+        r_url = f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day&outputsize=1&apikey={TWELVE_DATA_KEY}"
+        
+        q_res = requests.get(q_url).json()
+        r_res = requests.get(r_url).json()
+        
+        price = float(q_res.get('close', 0))
+        rsi = float(r_res['values'][0]['rsi']) if 'values' in r_res else 0.0
+        
+        # NAV Math (Using Twelve Data Mutual Fund proxy)
+        nav_ticker = PRIORITY_ASSETS[ticker]["nav_ticker"]
+        n_res = requests.get(f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TWELVE_DATA_KEY}").json()
+        nav_price = float(n_res.get('price', price * 0.82)) # Fallback logic
+        
+        premium = ((price - nav_price) / nav_price) * 100
+        whale_label, _, _ = get_institutional_conviction(ticker, TWELVE_DATA_KEY)
+        
+        # Posture Logic
+        if premium > 18.0 or rsi > 68:
+            posture, note, verdict = "🚨 RED (EXIT / AVOID)", "EXIT: Capital at risk.", "SEC Dilution Risk detected."
+        else:
+            posture, note, verdict = "✅ GREEN (STABLE)", "HOLD/BUY: Nominal.", "No dilution risk detected."
+
+        return (
+            f"Rockefeller Posture Report: {ticker}\n"
+            f"Current Posture: {posture}\n"
+            f"┣ Price: ${price:.2f}\n"
+            f"┣ Premium to NAV: {premium:.1f}%\n"
+            f"┣ RSI (1D): {rsi:.1f}\n"
+            f"┣ Income Note: {note}\n"
+            f"┗ Whale Flow: {whale_label}\n\n"
+            f"**Strategy Verdict**: {verdict}\n"
+            "Team ESSENTIALS | Rockefeller Strategic Intelligence"
+        )
     except Exception as e:
-        # Silently fail on SEC scrape to avoid notification fatigue
-        pass
+        return f"Error analyzing {ticker}: {e}"
 
-# --- SHIELD 2: THE WHALE DUMP MONITOR ---
-def check_whale_activity(symbol, current_vol, current_price, prev_close):
-    avg_vol = PRIORITY_ASSETS[symbol]['avg_vol']
-    vol_ratio = (current_vol / avg_vol) * 100
-    price_change = ((current_price - prev_close) / prev_close) * 100
+def send_daily_pulse(force=False):
+    """Triggers the detailed posture report."""
+    print(f"\n[HEARTBEAT] Initiating Pulse {'(FORCED)' if force else '(SCHEDULED)'}...")
+    for ticker in PRIORITY_ASSETS:
+        report = get_posture_report(ticker)
+        broadcast_alert("NOMINAL", f"Sentry Pulse: {ticker}", report)
     
-    # Trigger: Volume > 140% and Price Drop > 3%
-    if vol_ratio > 140 and price_change < -3:
-        return (f"🚨 **VOLATILITY DUMP: ${symbol}**\n"
-                f"Volume Spike: `{vol_ratio:.1f}%` of average.\n"
-                f"Price Action: `{price_change:.1f}%` intraday dump.\n"
-                f"Status: Institutional 'Whale' footprint detected.")
-    return None
+    with open(PULSE_FILE, "w") as f:
+        f.write(str(time.time()))
+    print("[HEARTBEAT] Pulse Sequence Complete.\n")
 
-# --- SHIELD 3: THE PREMIUM THRESHOLD ---
-def check_premium_anchor(symbol, price):
-    # This logic assumes you will manually update a 'nav.json' or use a scraper
-    # For now, it serves as the logic gate for the 25% High Premium alert
-    return None
+# --- 4. EXECUTION ---
 
 def run_monitor():
-    tz = pytz.timezone('US/Aleutian')
-    print(f"--- 🛡️ SENTRY ACTIVE: {datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')} ---")
+    tz = pytz.timezone('Pacific/Honolulu')
+    print(f"--- 🛡️ SENTRY ACTIVE: {datetime.now(tz).strftime('%Y-%m-%d %H:%M HST')} ---")
     
-    while True:
-        # 1. SHIELD 1: SEC SCAN (Highest Priority)
-        check_sec_filings()
-        
-        # 2. MARKET DATA SCANS
-        for ticker in PRIORITY_ASSETS:
-            try:
-                url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={TWELVE_DATA_KEY}"
-                r = requests.get(url, timeout=15)
-                data = r.json()
-                
-                if "close" in data:
-                    price = float(data['close'])
-                    vol = float(data['volume'])
-                    prev_close = float(data['previous_close'])
-                    
-                    # SHIELD 2: WHALE MONITOR
-                    whale_msg = check_whale_activity(ticker, vol, price, prev_close)
-                    if whale_msg:
-                        broadcast_alert("CRITICAL", f"WHALE DUMP: {ticker}", whale_msg)
-                        
-                    # SHIELD 3: PREMIUM CHECK
-                    # Placeholder for NAV-based premium calculation
-                    
-            except: pass 
+    # IMMEDIATE TEST CHECK
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        send_daily_pulse(force=True)
+        print("--- [TEST COMPLETE] Exiting... ---")
+        return
 
-        # Silent console heartbeat
-        sys.stdout.write(".")
-        sys.stdout.flush()
-        
-        # 15-minute resolution: Perfect for rights offerings and institutional shifts
-        time.sleep(900) 
+    while True:
+        try:
+            # Heartbeat logic (24h)
+            if not os.path.exists(PULSE_FILE) or (time.time() - os.path.getmtime(PULSE_FILE)) > 86400:
+                send_daily_pulse()
+
+            # Continuous Checks
+            # check_sec_filings()
+            # check_whales()
+            
+            sys.stdout.write(".")
+            sys.stdout.flush()
+            time.sleep(900)
+        except Exception as e:
+            print(f"\n[ERROR] {traceback.format_exc()}")
+            time.sleep(60)
 
 if __name__ == "__main__":
     run_monitor()

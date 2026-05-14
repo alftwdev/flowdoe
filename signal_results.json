@@ -1,0 +1,29 @@
+[
+    {
+        "timestamp": "2026-05-13T21:34:48.880582",
+        "symbol": "/ES",
+        "strategy": "Momentum Breakout (Scalp)",
+        "entry_price": "LIVE",
+        "direction": "LONG",
+        "status": "OPEN"
+    },
+    {
+        "date": "2026-05-13",
+        "symbol": "/ES",
+        "type": "FUTURES",
+        "strategy": "Momentum Scalp",
+        "status": "OPEN"
+    },
+    {
+        "time": "2026-05-13 21:49:31.854130",
+        "symbol": "/ES",
+        "type": "FUTURES",
+        "strat": "Momentum Breakout"
+    },
+    {
+        "time": "2026-05-13 22:40:08.262009",
+        "symbol": "/ES",
+        "type": "FUTURES",
+        "strat": "Momentum Breakout"
+    }
+]

@@ -3,184 +3,170 @@ import time
 import requests
 import datetime
 import json
-import pandas as pd
-import pytz
 import sys
-from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
+# --- 1. INITIALIZATION ---
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_PATH, ".env"))
+
 try:
-    from essentials_tools import send_essentials_embed, get_institutional_conviction, get_trend_alignment
+    from essentials_tools import (
+        send_essentials_embed, 
+        get_institutional_conviction, 
+        get_trend_alignment
+    )
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
 
-# --- 1. CONFIGURATION ---
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_PATH, ".env"))
-
-TD_API_KEY = str(os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TD_API_KEY")).strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_TRADE_SIGNALS")
+TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+WEBHOOK_OPTIONS = os.getenv("WEBHOOK_OPTIONS_SIGNALS")
+WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 REGIME_LEDGER = os.path.join(BASE_PATH, "market_regime.json")
-SIGNAL_MEMORY = os.path.join(BASE_PATH, "trade_memory.json")
+SIGNAL_LOG = os.path.join(BASE_PATH, "signal_results.json")
 
-# --- 2. THE INTEL ENGINE ---
+# --- 2. ECOSYSTEM HANDSHAKE & SHIELD LOGIC ---
 
-def fetch_unified_data(symbol):
-    """One call to fetch price, technicals, and statistical volatility."""
+def update_regime_weather(pulse, change):
+    """Updates shared ledger for mornings.py and other ecosystem members."""
     try:
-        url = f"https://api.twelvedata.com/complex_data?apikey={TD_API_KEY}"
-        payload = {
-            "symbols": [symbol],
-            "intervals": ["15min"],
-            "methods": ["quote", "rsi", "vwap", "statistics"],
-            "outputsize": 1
-        }
-        res = requests.post(url, json=payload).json()
-        data = res['data'][0]
+        data = {}
+        if os.path.exists(REGIME_LEDGER):
+            with open(REGIME_LEDGER, "r") as f: 
+                data = json.load(f)
         
-        quote = data['quote']
-        stats = data['statistics']
-        
-        return {
-            "symbol": symbol,
-            "price": float(quote['close']),
-            "rsi": float(data['rsi']['values'][0]['rsi']),
-            "vwap": float(data['vwap']['values'][0]['vwap']),
-            "change": float(quote['percent_change']),
-            "std_dev": float(stats['statistics']['price_range']['standard_deviation']),
-            "trend": get_trend_alignment(symbol),
-            "conviction": get_institutional_conviction(symbol)
-        }
-    except:
-        return None
+        data.update({
+            "futures_pulse": pulse,
+            "futures_change": change,
+            "last_handshake": datetime.datetime.now().isoformat()
+        })
+        with open(REGIME_LEDGER, "w") as f: 
+            json.dump(data, f, indent=4)
+    except: 
+        pass
 
-def generate_signal_card(symbol, intel, setup, regime):
-    """Generates the branded Rockefeller card with dynamic data."""
-    img = Image.new('RGB', (800, 500), color=(10, 10, 12))
-    d = ImageDraw.Draw(img)
-    
-    # Header
-    d.rectangle([0, 0, 800, 80], fill=(20, 20, 25))
-    d.text((30, 25), f"ROCKEFELLER SENTRY: ${symbol}", fill=(212, 175, 55))
-    
-    # Context
-    d.text((30, 100), f"REGIME: {regime}", fill=(200, 200, 200))
-    d.text((30, 140), f"CONVICTION: {intel['conviction']}", fill=(255, 255, 255))
-    d.text((30, 180), f"TREND: {intel['trend']}", fill=(255, 255, 255))
-
-    # Execution Box
-    d.rectangle([400, 100, 770, 260], outline=(60, 60, 70), width=2)
-    d.text((420, 120), "EXECUTION STRATEGY", fill=(212, 175, 55))
-    d.text((420, 160), f"TYPE: {setup['type']}", fill=(255, 255, 255))
-    d.text((420, 200), f"ACTION: {setup['action']}", fill=(255, 255, 255))
-    d.text((420, 230), f"STRIKE: {setup['strike']}", fill=(46, 204, 113))
-
-    # Stats
-    d.text((30, 320), f"PRICE: ${intel['price']:.2f}", fill=(255, 255, 255))
-    d.text((30, 360), f"RSI: {intel['rsi']:.1f}", fill=(255, 255, 255))
-    d.text((30, 400), f"VWAP: ${intel['vwap']:.2f}", fill=(255, 255, 255))
-    
-    # Footer
-    d.text((30, 460), "PROPRIETARY SIGNAL | DISPATCHED VIA SENTRY ENGINE", fill=(70, 70, 80))
-    
-    path = os.path.join(BASE_PATH, f"card_{symbol}.png")
-    img.save(path)
-    return path
-
-# --- 3. THE ANALYST (Logic Hub) ---
-
-def run_trade_signals():
-    print(f"📡 Sentry Engine Active: {datetime.datetime.now()}")
-    
+def check_shield_compliance(symbol, current_rsi=None):
+    """
+    Validates if the RSI is within the limits set by the Volatility Sentry.
+    If current_rsi is not provided, it fetches it.
+    """
     try:
+        # 1. Fetch current RSI if not provided
+        if current_rsi is None:
+            url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=15min&outputsize=1&apikey={TD_API_KEY}"
+            res = requests.get(url).json()
+            current_rsi = float(res['values'][0]['rsi'])
+
+        # 2. Check against Ledger
         with open(REGIME_LEDGER, "r") as f:
-            mkt = json.load(f)
-            regime = mkt.get("regime", "NEUTRAL")
-            rsi_limit = mkt.get("rsi_shield_limit", 66)
-    except:
-        regime, rsi_limit = "NEUTRAL", 66
-
-    # Balanced Watchlist for Growth & Income
-    watchlist = ["NVDA", "MSTY", "NVDY", "TSLA", "AAPL", "COIN", "MARA", "CLM", "CRF"]
-
-    for symbol in watchlist:
-        intel = fetch_unified_data(symbol)
-        if not intel: continue
-        
-        setup = None
-        
-        # LOGIC 1: DIRECTIONAL (Buyers)
-        # RSI Reset + Price > VWAP + Bullish/Neutral Sentiment
-        if intel['rsi'] < rsi_limit and intel['price'] > intel['vwap'] and regime in ["BULLISH", "NEUTRAL"]:
-            if "NORMAL" not in intel['conviction']:
-                setup = {
-                    "action": "BUY CALL / SELL PUT",
-                    "type": "Bullish Reclaim",
-                    "strike": f"${round(intel['price'] * 0.97, 2)} (Near-Money)",
-                    "color": 0x2ecc71
-                }
-
-        # LOGIC 2: INCOME (Sellers)
-        # If no directional play, look for 1.5 Sigma Credit Spreads
-        if not setup and regime != "BEARISH":
-            # Safety Zone Calculation
-            strike_target = intel['price'] - (1.5 * intel['std_dev'])
+            data = json.load(f)
+            rsi_limit = data.get("rsi_shield_limit", 66)
+            vix_status = data.get("vix_status", "STABLE")
             
-            # Premium Hunter setup: Only sell when price is stable/rising (RSI > 45)
-            if intel['rsi'] > 45:
-                setup = {
-                    "action": "SELL PUT SPREAD (Premium)",
-                    "type": "Theta Income Hunter",
-                    "strike": f"${round(strike_target, 2)} (1.5σ OTM)",
-                    "color": 0x3498db
-                }
-
-        if setup:
-            # Memory Check to prevent spam
-            if not is_already_alerted(symbol, setup['type']):
-                card_path = generate_signal_card(symbol, intel, setup, regime)
-                dispatch_alert(symbol, setup, card_path)
-                mark_alerted(symbol, setup['type'])
-                if card_path and os.path.exists(card_path):
-                    os.remove(card_path)
-        
-        time.sleep(2)
-
-def is_already_alerted(symbol, s_type):
-    try:
-        with open(SIGNAL_MEMORY, "r") as f:
-            mem = json.load(f)
-            return mem.get(f"{symbol}_{s_type}") == datetime.date.today().isoformat()
-    except: return False
-
-def mark_alerted(symbol, s_type):
-    try:
-        with open(SIGNAL_MEMORY, "r") as f: mem = json.load(f)
-    except: mem = {}
-    mem[f"{symbol}_{s_type}"] = datetime.date.today().isoformat()
-    with open(SIGNAL_MEMORY, "w") as f: json.dump(mem, f)
-
-def dispatch_alert(symbol, setup, card_path):
-    content = (
-        f"🎯 **Rockefeller Sentry Signal: ${symbol}**\n"
-        f"┣ **Strategy**: `{setup['action']}`\n"
-        f"┗ **Class**: `{setup['type']}`"
-    )
-    try:
-        if card_path:
-            with open(card_path, 'rb') as f:
-                requests.post(WEBHOOK_URL, data={"content": content}, files={'file': f})
-        else:
-            requests.post(WEBHOOK_URL, json={"content": content})
+        if current_rsi > rsi_limit:
+            print(f"🛡️ Shield Block: {symbol} RSI ({current_rsi:.1f}) exceeds {vix_status} limit ({rsi_limit})")
+            return False, current_rsi
+        return True, current_rsi
     except Exception as e:
-        print(f"❌ Dispatch Error: {e}")
+        return True, 0.0 # Fail-safe: allow if ledger/API is unreadable
+
+def get_market_shield():
+    """SPY as proxy for global sentiment and /ES pulse."""
+    try:
+        url = f"https://api.twelvedata.com/quote?symbol=SPY&apikey={TD_API_KEY}"
+        r = requests.get(url).json()
+        change = float(r.get('percent_change', 0))
+        
+        if change <= -1.0: 
+            status, safe = "🔴 BLEEDING (Risk-Off)", False
+        elif change >= 0.5: 
+            status, safe = "🟢 RISK-ON (High Conviction)", True
+        else: 
+            status, safe = "🟡 NEUTRAL", True
+            
+        update_regime_weather(status, change)
+        return status, safe
+    except:
+        return "⚪ UNKNOWN", True
+
+# --- 3. ALPHA ROUTING ---
+
+def dispatch_alpha_signal(symbol, asset_type, strategy):
+    """Dual-channel router with institutional conviction and RSI Shield checks."""
+    
+    # Strip slash for API calls
+    api_symbol = symbol.replace("/", "") if asset_type == "FUTURES" else symbol
+
+    # 1. Market-Wide Pulse Check
+    shield_status, is_safe = get_market_shield()
+    
+    # 2. RSI Shield Compliance Check
+    is_compliant, rsi_val = check_shield_compliance(api_symbol)
+    if not is_compliant:
+        return # Suppress alert if RSI is too high for current volatility
+
+    # 3. Intelligence Gathering
+    try:
+        conviction, color, is_whale = get_institutional_conviction(api_symbol, TD_API_KEY)
+        trend, is_bullish = get_trend_alignment(api_symbol, TD_API_KEY)
+    except:
+        conviction, trend, color, is_whale, is_bullish = "NORMAL", "NEUTRAL", 0x95a5a6, False, True
+
+    target_webhook = WEBHOOK_FUTURES if asset_type == "FUTURES" else WEBHOOK_OPTIONS
+    
+    # Safety Filter: Only block Options if market is bleeding
+    if not is_safe and asset_type == "OPTIONS":
+        print(f"    [SENTRY] Signal for {symbol} suppressed: Market Pulse is Risk-Off.")
+        return
+
+    title = f"🏛️ Rockefeller Alpha: ${symbol}"
+    
+    if is_whale and is_bullish and is_safe:
+        verdict = "⚡ **TOP-TIER CONVICTION**: Institutional Flow + Market Shield Alignment."
+        color = 0x2ecc71
+    else:
+        verdict = "⚖️ **MEASURED SETUP**: Technical alignment present. Size appropriately."
+
+    description = (
+        f"### **Strategy: {strategy}**\n"
+        f"**Conviction Matrix**:\n"
+        f"┣ **Whale Activity**: `{conviction}`\n"
+        f"┣ **Trend Shield**: `{trend}`\n"
+        f"┣ **Futures Pulse**: `{shield_status}`\n"
+        f"┗ **RSI Level**: `{rsi_val:.1f}`\n\n"
+        f"**Tactical Verdict**: {verdict}"
+    )
+
+    if HAS_ESSENTIALS and target_webhook:
+        send_essentials_embed(target_webhook, title, description, color)
+        log_for_audit(symbol, asset_type, strategy)
+        print(f"    [DISPATCH] {symbol} alpha sent to Discord.")
+
+def log_for_audit(symbol, asset_type, strategy):
+    """Feeds weekly_digest.py for statistical reward percentages."""
+    entry = {
+        "time": str(datetime.datetime.now()), 
+        "symbol": symbol, 
+        "type": asset_type, 
+        "strat": strategy
+    }
+    try:
+        log = []
+        if os.path.exists(SIGNAL_LOG):
+            with open(SIGNAL_LOG, "r") as f: 
+                log = json.load(f)
+        log.append(entry)
+        with open(SIGNAL_LOG, "w") as f: 
+            json.dump(log, f, indent=4)
+    except: 
+        pass
 
 if __name__ == "__main__":
-    # Test mode: run once and exit. Standard: run loop.
     if "test" in sys.argv:
-        run_trade_signals()
-    else:
-        while True:
-            run_trade_signals()
-            time.sleep(900) # 15-minute intervals
+        print("--- [ECOSYSTEM TEST] ---")
+        # Testing a standard stock/option
+        dispatch_alpha_signal("MSTY", "OPTIONS", "Yield-Capture Strategy")
+        time.sleep(1)
+        # Testing a futures contract
+        dispatch_alpha_signal("/ES", "FUTURES", "Momentum Breakout")

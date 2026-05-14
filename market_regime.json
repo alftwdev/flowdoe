@@ -1,1 +1,9 @@
-{"last_update": "2026-05-10T20:07:50.586191", "regime": "BULLISH", "rsi_shield": "CAUTION", "vix_status": "STABLE"}
+{
+    "last_update": "2026-05-13T21:37:36.225029",
+    "regime": "BULLISH",
+    "rsi_shield": "CAUTION",
+    "vix_status": "STABLE",
+    "futures_pulse": "\ud83d\udfe2 RISK-ON (High Conviction)",
+    "futures_change": 0.5594848,
+    "last_handshake": "2026-05-13T22:40:07.119996"
+}

@@ -1,96 +1,66 @@
 import os
-import requests
 import json
 import time
-import datetime
+import websocket
 from dotenv import load_dotenv
 
-try:
-    from essentials_tools import send_essentials_embed
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
-
-# --- 1. CONFIGURATION ---
+# --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
+# Use the Twelve Data WebSocket URL for Futures/Indices
+WS_URL = f"wss://ws.twelvedata.com/v1/quotes?apikey={TD_API_KEY}"
 
-def update_global_risk(vix_price, pcr_val):
-    """
-    The Central Logic: Writes to the shared ledger.
-    Every other bot checks this before firing an alert.
-    """
-    try:
-        with open(REGIME_LEDGER, "r") as f:
-            data = json.load(f)
-    except:
-        data = {}
+class RockefellerSentry:
+    def __init__(self):
+        self.vix_last = 0
+        self.skew_alert = False
 
-    # Define Risk Thresholds
-    if vix_price > 25:
-        risk_level = "STORM"
-        rsi_limit = 45 # Extreme caution
-    elif vix_price > 19:
-        risk_level = "ELEVATED"
-        rsi_limit = 55 # Tightened shield
-    else:
-        risk_level = "STABLE"
-        rsi_limit = 66 # Full offensive mode
+    def on_message(self, ws, message):
+        data = json.loads(message)
+        if data.get("event") == "price":
+            # Extract real-time volatility proxy (e.g., VIX or /ES movement)
+            price = float(data.get("price", 0))
+            self.process_volatility_shift(price)
 
-    data.update({
-        "vix_status": risk_level,
-        "rsi_shield_limit": rsi_limit,
-        "vix_price": round(vix_price, 2),
-        "last_vol_update": datetime.datetime.now().isoformat()
-    })
-
-    with open(REGIME_LEDGER, "w") as f:
-        json.dump(data, f)
-        
-    return risk_level, rsi_limit
-
-def run_volatility_sentry():
-    print("🛡️ Rockefeller Volatility Sentry: Active")
-    
-    last_broadcast_risk = None
-    
-    while True:
+    def process_volatility_shift(self, current_vix):
+        """Dynamic Risk Adjustment based on Natenberg's Volatility Surface."""
         try:
-            # 1. Fetch VIX Data
-            vix_url = f"https://api.twelvedata.com/quote?symbol=VIX&apikey={TD_API_KEY}"
-            r = requests.get(vix_url, timeout=15).json()
-            vix_p = float(r['close'])
-            
-            # 2. Update Ecosystem Ledger
-            risk, limit = update_global_risk(vix_p, 0.85)
-            
-            # 3. Broadcast Major Shifts
-            if risk != last_broadcast_risk:
-                print(f"⚠️ Market Risk Shift: {risk} (RSI Shield: {limit})")
-                
-                if HAS_ESSENTIALS and WEBHOOK_MARKET:
-                    color = 0xe74c3c if risk == "STORM" else 0xf1c40f if risk == "ELEVATED" else 0x2ecc71
-                    title = "🛡️ Global Volatility Shift"
-                    desc = (
-                        f"### **Market Condition: {risk}**\n"
-                        f"The Rockefeller Shield has adjusted parameters to preserve capital.\n\n"
-                        f"┣ **VIX Index**: `{vix_p:.2f}`\n"
-                        f"┣ **RSI Shield**: `Set to < {limit}`\n"
-                        f"┗ **Posturing**: {'Defensive' if risk != 'STABLE' else 'Offensive'}"
-                    )
-                    send_essentials_embed(WEBHOOK_MARKET, title, desc, color)
-                
-                last_broadcast_risk = risk
+            with open(REGIME_LEDGER, "r") as f:
+                ledger = json.load(f)
+        except: ledger = {}
 
-        except Exception as e:
-            print(f"❌ Volatility Scan Error: {e}")
+        # 1. DEFINE NATENBERG REGIMES
+        if current_vix > 30:
+            status, rsi_limit = "CRITICAL (System Lockdown)", 40
+        elif current_vix > 20:
+            status, rsi_limit = "ELEVATED (Defensive Scalp)", 52
+        else:
+            status, rsi_limit = "STABLE (Full Offensive)", 68
 
-        # Sync every 10 minutes (Venture Tier efficient)
-        time.sleep(600)
+        # 2. UPDATE ECOSYSTEM LEDGER
+        ledger.update({
+            "vix_status": status,
+            "rsi_shield_limit": rsi_limit,
+            "realized_vol_pulse": "STREAMING",
+            "last_handshake": time.strftime('%Y-%m-%dT%H:%M:%S')
+        })
+
+        with open(REGIME_LEDGER, "w") as f:
+            json.dump(ledger, f, indent=4)
+
+    def start_sentry(self):
+        """Initialize the Twelve Data WebSocket."""
+        print("🛡️ Rockefeller Sentry: Activating WebSocket Stream...")
+        ws = websocket.WebSocketApp(
+            WS_URL,
+            on_message=self.on_message,
+            on_open=lambda ws: ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "VIX"}}))
+        )
+        ws.run_forever()
 
 if __name__ == "__main__":
-    run_volatility_sentry()
+    sentry = RockefellerSentry()
+    sentry.start_sentry()
