@@ -22,4 +22,5 @@ ENV/
 
 .aider*
 
+# Ignore all manual backup folders
 back ups*/
