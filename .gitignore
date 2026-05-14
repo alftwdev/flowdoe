@@ -1,3 +1,9 @@
+# Rockefeller Ecosystem - Ignore Dynamic Ledgers
+market_regime.json
+last_alert.json
+last_pulse.txt
+signal_results.json
+
 # Security: Sensitive Keys
 .env
 macro_history.csv
@@ -15,3 +21,5 @@ ENV/
 .DS_Store
 
 .aider*
+
+back ups*/
