@@ -144,3 +144,39 @@ if __name__ == "__main__":
     for future in futures_watchlist:
         analyze_and_dispatch(future, "FUTURES")
         time.sleep(1)
+
+    # --- ADDED TO trade_signals.py ---
+
+def broadcast_market_flowstate(current_rsi, vix_status, regime):
+    """
+    Explains the 'Why' behind the silence. 
+    Fires at 09:35 AM EST to Options and Futures channels.
+    """
+    rsi_limit = 66
+    
+    # Identify the 'Gatekeeper'
+    if current_rsi > rsi_limit:
+        reason = (f"The **RSI Shield** is currently the primary gatekeeper. With RSI at `{current_rsi:.1f}`, "
+                  f"the engine considers the risk-to-reward ratio unfavorable. We are avoiding 'buying the top'.")
+    elif vix_status != "STABLE":
+        reason = (f"The **Volatility Muzzle** is active. Due to `{vix_status}` conditions, "
+                  f"signals are suppressed to protect capital from erratic swings.")
+    else:
+        reason = "Market conditions are nominal. The Sentry is scanning for Institutional Whale Flow."
+
+    for channel_name, webhook in [("Options", WEBHOOK_OPTIONS), ("Futures", WEBHOOK_FUTURES)]:
+        embed = {
+            "title": f"🏛️ {channel_name} Flowstate Update",
+            "description": (
+                f"**System Status**: `SCANNING / NO ENTRIES`\n\n"
+                f"**Market Context**:\n"
+                f"┣ **Regime**: `{regime}`\n"
+                f"┣ **Sentry RSI**: `{current_rsi:.1f}` (Limit: {rsi_limit})\n"
+                f"┗ **Volatility**: `{vix_status}`\n\n"
+                f"**The Why**: {reason}\n\n"
+                f"*The Shield is protecting capital while the engine monitors for high-conviction pullbacks.*"
+            ),
+            "color": 0x3498db,
+            "footer": {"text": f"Rockefeller Strategic Intelligence • {datetime.now().strftime('%H:%M HST')}"}
+        }
+        requests.post(webhook, json={"embeds": [embed]})    

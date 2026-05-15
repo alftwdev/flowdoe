@@ -61,6 +61,36 @@ def fetch_crypto_intelligence():
             
         except Exception as e:
             print(f"⚠️ Crypto Radar Error for {symbol}: {e}")
+           
+ # --- ADDED TO macro_radar.py ---
+
+def broadcast_flowstate_pulse():
+    """Fires at 09:35 AM EST to confirm system status regardless of triggers."""
+    now = datetime.now()
+    # Check for 09:35 AM EST (which is 03:35 AM HST for you)
+    if now.hour == 3 and now.minute == 35:
+        targets = ["BTC/USD", "ETH/USD"]
+        for symbol in targets:
+            pulse = fetch_crypto_pulse(symbol) # Uses our Option A logic
+            if not pulse: continue
+            
+            embed = {
+                "title": f"🏛️ {symbol.split('/')[0]} Flowstate Update",
+                "description": (
+                    f"**Status**: `SCANNING / STABLE`\n\n"
+                    f"**Current Context**:\n"
+                    f"┣ **Price**: `${pulse['price']:,.2f}`\n"
+                    f"┣ **24h Change**: `{pulse['change']}%`\n"
+                    f"┗ **Shield Status**: `ACTIVE`\n\n"
+                    f"**Sentry Note**: BTC/ETH are being monitored for high-conviction entries. "
+                    f"The engine is currently in 'Silent Standby' awaiting a regime shift."
+                ),
+                "color": 0x3498db, # Professional Blue for Flowstate
+                "thumbnail": {"url": pulse['logo']},
+                "image": {"url": pulse['chart']},
+                "footer": {"text": "Rockefeller Crypto Intelligence"}
+            }
+            requests.post(WEBHOOK_CRYPTO, json={"embeds": [embed]})          
 
 def run_radar_cycle():
     """Main execution loop modified to include Crypto Pulse."""

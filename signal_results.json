@@ -97,5 +97,59 @@
         "symbol": "FENC",
         "type": "OPTION",
         "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-15 07:37:19.930717",
+        "symbol": "EMISR",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-15 07:37:22.341629",
+        "symbol": "SKK",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-15 07:37:24.771191",
+        "symbol": "BGM",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-15 07:37:27.307699",
+        "symbol": "SLE",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-15 07:37:29.599175",
+        "symbol": "QUCY",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-15 07:37:32.013530",
+        "symbol": "FSHPR",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-15 07:37:34.394779",
+        "symbol": "AUUD",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-15 07:37:37.263334",
+        "symbol": "ERNA",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-15 07:37:39.708774",
+        "symbol": "TSLA",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
     }
 ]
