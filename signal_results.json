@@ -25,5 +25,77 @@
         "symbol": "/ES",
         "type": "FUTURES",
         "strat": "Momentum Breakout"
+    },
+    {
+        "time": "2026-05-14 22:35:55.427723",
+        "symbol": "GTBP",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:35:59.481225",
+        "symbol": "TVGN",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:01.966109",
+        "symbol": "SPY",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-14 22:36:04.452006",
+        "symbol": "ATYR",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:06.965628",
+        "symbol": "MCOM",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:09.621020",
+        "symbol": "QSEAR",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:12.340997",
+        "symbol": "IPST",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:14.761782",
+        "symbol": "TSLA",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:17.682388",
+        "symbol": "NVDA",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-14 22:36:19.966014",
+        "symbol": "ZIVO",
+        "type": "OPTION",
+        "strat": "AI Extension Play"
+    },
+    {
+        "time": "2026-05-14 22:36:22.285880",
+        "symbol": "IPWR",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
+    },
+    {
+        "time": "2026-05-14 22:36:25.061916",
+        "symbol": "FENC",
+        "type": "OPTION",
+        "strat": "Credit Spread / Cash Secured Put"
     }
 ]

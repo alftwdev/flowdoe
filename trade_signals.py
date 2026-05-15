@@ -20,153 +20,127 @@ try:
 except ImportError:
     HAS_ESSENTIALS = False
 
+# Environment Variables
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_OPTIONS = os.getenv("WEBHOOK_OPTIONS_SIGNALS")
+WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 REGIME_LEDGER = os.path.join(BASE_PATH, "market_regime.json")
 SIGNAL_LOG = os.path.join(BASE_PATH, "signal_results.json")
 
-# --- 2. ECOSYSTEM HANDSHAKE & SHIELD LOGIC ---
+# --- 2. LOGIC HELPERS ---
 
-def update_regime_weather(pulse, change):
-    """Updates shared ledger for mornings.py and other ecosystem members."""
+def get_signal_tier(conviction_score, rsi, trend_bullish):
+    """Categorizes signal quality with color-coded risk levels."""
+    if "HIGH" in conviction_score and trend_bullish and 40 < rsi < 65:
+        return "Tier A - High Conviction", 0x2ecc71  # Green
+    if "HIGH" in conviction_score:
+        return "Tier B - Tactical Entry", 0xf1c40f  # Yellow
+    return "Tier C - Speculative", 0xe74c3c  # Red
+
+def calculate_rr_ratio(entry, target, stop, action="BTO"):
+    """Calculates Risk:Reward for visual transparency."""
     try:
-        data = {}
-        if os.path.exists(REGIME_LEDGER):
-            with open(REGIME_LEDGER, "r") as f: 
-                data = json.load(f)
-        
-        data.update({
-            "futures_pulse": pulse,
-            "futures_change": change,
-            "last_handshake": datetime.datetime.now().isoformat()
-        })
-        with open(REGIME_LEDGER, "w") as f: 
-            json.dump(data, f, indent=4)
-    except: 
-        pass
-
-def check_shield_compliance(symbol, current_rsi=None):
-    """
-    Validates if the RSI is within the limits set by the Volatility Sentry.
-    If current_rsi is not provided, it fetches it.
-    """
-    try:
-        # 1. Fetch current RSI if not provided
-        if current_rsi is None:
-            url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=15min&outputsize=1&apikey={TD_API_KEY}"
-            res = requests.get(url).json()
-            current_rsi = float(res['values'][0]['rsi'])
-
-        # 2. Check against Ledger
-        with open(REGIME_LEDGER, "r") as f:
-            data = json.load(f)
-            rsi_limit = data.get("rsi_shield_limit", 66)
-            vix_status = data.get("vix_status", "STABLE")
-            
-        if current_rsi > rsi_limit:
-            print(f"🛡️ Shield Block: {symbol} RSI ({current_rsi:.1f}) exceeds {vix_status} limit ({rsi_limit})")
-            return False, current_rsi
-        return True, current_rsi
-    except Exception as e:
-        return True, 0.0 # Fail-safe: allow if ledger/API is unreadable
-
-def get_market_shield():
-    """SPY as proxy for global sentiment and /ES pulse."""
-    try:
-        url = f"https://api.twelvedata.com/quote?symbol=SPY&apikey={TD_API_KEY}"
-        r = requests.get(url).json()
-        change = float(r.get('percent_change', 0))
-        
-        if change <= -1.0: 
-            status, safe = "🔴 BLEEDING (Risk-Off)", False
-        elif change >= 0.5: 
-            status, safe = "🟢 RISK-ON (High Conviction)", True
-        else: 
-            status, safe = "🟡 NEUTRAL", True
-            
-        update_regime_weather(status, change)
-        return status, safe
+        risk = abs(entry - stop)
+        reward = abs(target - entry)
+        return f"{round(reward / risk, 1)} : 1" if risk != 0 else "2.0 : 1"
     except:
-        return "⚪ UNKNOWN", True
+        return "2.0 : 1"
 
-# --- 3. ALPHA ROUTING ---
-
-def dispatch_alpha_signal(symbol, asset_type, strategy):
-    """Dual-channel router with institutional conviction and RSI Shield checks."""
-    
-    # Strip slash for API calls
-    api_symbol = symbol.replace("/", "") if asset_type == "FUTURES" else symbol
-
-    # 1. Market-Wide Pulse Check
-    shield_status, is_safe = get_market_shield()
-    
-    # 2. RSI Shield Compliance Check
-    is_compliant, rsi_val = check_shield_compliance(api_symbol)
-    if not is_compliant:
-        return # Suppress alert if RSI is too high for current volatility
-
-    # 3. Intelligence Gathering
+def get_dynamic_whale_scan():
+    """Twelve Data dynamic scan + core priority assets."""
+    url = f"https://api.twelvedata.com/market_movers/stocks?apikey={TD_API_KEY}"
     try:
-        conviction, color, is_whale = get_institutional_conviction(api_symbol, TD_API_KEY)
-        trend, is_bullish = get_trend_alignment(api_symbol, TD_API_KEY)
+        response = requests.get(url).json()
+        stocks = [s['symbol'] for s in response.get('values', [])[:10]]
+        return list(set(stocks + ["SPY", "TSLA", "NVDA"])) # Removed CLM/CRF from options scan
     except:
-        conviction, trend, color, is_whale, is_bullish = "NORMAL", "NEUTRAL", 0x95a5a6, False, True
+        return ["SPY", "TSLA", "NVDA", "AAPL", "AMD"]
 
-    target_webhook = WEBHOOK_FUTURES if asset_type == "FUTURES" else WEBHOOK_OPTIONS
+# --- 3. ANALYTICS ENGINE ---
+
+def analyze_and_dispatch(symbol, asset_type="OPTION"):
+    """Core intelligence for generating authoritative signals."""
+    conviction, _, _ = get_institutional_conviction(symbol, TD_API_KEY)
+    trend_status, is_bullish = get_trend_alignment(symbol, TD_API_KEY)
     
-    # Safety Filter: Only block Options if market is bleeding
-    if not is_safe and asset_type == "OPTIONS":
-        print(f"    [SENTRY] Signal for {symbol} suppressed: Market Pulse is Risk-Off.")
+    # Data Retrieval
+    rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&apikey={TD_API_KEY}"
+    price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
+    
+    try:
+        rsi_val = float(requests.get(rsi_url).json()['values'][0]['rsi'])
+        price = float(requests.get(price_url).json()['price'])
+    except:
         return
 
-    title = f"🏛️ Rockefeller Alpha: ${symbol}"
-    
-    if is_whale and is_bullish and is_safe:
-        verdict = "⚡ **TOP-TIER CONVICTION**: Institutional Flow + Market Shield Alignment."
-        color = 0x2ecc71
+    # Strategy Branching: Sosnoff vs Momentum
+    if rsi_val > 70:
+        strategy = "Credit Spread / Cash Secured Put"
+        action = "STO (Sell to Open)"
+        verdict = "⚠️ OVEREXTENDED: This is a THETA/INCOME play for premium sellers."
+        target_price = price * 0.96
+        stop_loss = price * 1.04
+        is_premium = True
     else:
-        verdict = "⚖️ **MEASURED SETUP**: Technical alignment present. Size appropriately."
+        strategy = "AI Extension Play"
+        action = "BTO (Buy to Open)"
+        verdict = "🚀 MOMENTUM: Trend alignment present. Size appropriately."
+        target_price = price * 1.08
+        stop_loss = price * 0.94
+        is_premium = False
 
+    tier_name, color = get_signal_tier(conviction, rsi_val, is_bullish)
+    rr_ratio = calculate_rr_ratio(price, target_price, stop_loss, action)
+
+    # Embed Construction
+    title = f"🚨 TACTICAL SIGNAL: {symbol} ({tier_name})"
     description = (
-        f"### **Strategy: {strategy}**\n"
+        f"**Strategy**: `{strategy}`\n"
+        f"**Action**: `{action}` | **Risk/Reward**: `{rr_ratio}`\n\n"
+        f"**Execution Data**:\n"
+        f"┣ **Entry Target**: `${price:,.2f}`\n"
+        f"┣ **Stop-Loss**: `${stop_loss:,.2f}`\n"
+        f"┗ **Target**: `${target_price:,.2f}`\n\n"
         f"**Conviction Matrix**:\n"
-        f"┣ **Whale Activity**: `{conviction}`\n"
-        f"┣ **Trend Shield**: `{trend}`\n"
-        f"┣ **Futures Pulse**: `{shield_status}`\n"
-        f"┗ **RSI Level**: `{rsi_val:.1f}`\n\n"
+        f"┣ **Whale Flow**: `{conviction}`\n"
+        f"┣ **Trend Shield**: `{trend_status}`\n"
+        f"┗ **RSI (1D)**: `{rsi_val:.1f}`\n\n"
         f"**Tactical Verdict**: {verdict}"
     )
 
-    if HAS_ESSENTIALS and target_webhook:
-        send_essentials_embed(target_webhook, title, description, color)
+    if is_premium:
+        description += "\n\n*Note: This signal is optimized for Options Sellers/Theta traders/Premium plays.*"
+
+    # Webhook Selection
+    webhook = WEBHOOK_OPTIONS if asset_type == "OPTION" else WEBHOOK_FUTURES
+    if HAS_ESSENTIALS and webhook:
+        send_essentials_embed(webhook, title, description, color)
         log_for_audit(symbol, asset_type, strategy)
-        print(f"    [DISPATCH] {symbol} alpha sent to Discord.")
+        print(f"✅ [DISPATCH] {symbol} sent to {'Futures' if asset_type == 'FUTURES' else 'Options'}.")
 
 def log_for_audit(symbol, asset_type, strategy):
-    """Feeds weekly_digest.py for statistical reward percentages."""
-    entry = {
-        "time": str(datetime.datetime.now()), 
-        "symbol": symbol, 
-        "type": asset_type, 
-        "strat": strategy
-    }
+    entry = {"time": str(datetime.datetime.now()), "symbol": symbol, "type": asset_type, "strat": strategy}
     try:
         log = []
         if os.path.exists(SIGNAL_LOG):
-            with open(SIGNAL_LOG, "r") as f: 
-                log = json.load(f)
+            with open(SIGNAL_LOG, "r") as f: log = json.load(f)
         log.append(entry)
-        with open(SIGNAL_LOG, "w") as f: 
-            json.dump(log, f, indent=4)
-    except: 
-        pass
+        with open(SIGNAL_LOG, "w") as f: json.dump(log, f, indent=4)
+    except: pass
+
+# --- 4. EXECUTION ---
 
 if __name__ == "__main__":
-    if "test" in sys.argv:
-        print("--- [ECOSYSTEM TEST] ---")
-        # Testing a standard stock/option
-        dispatch_alpha_signal("MSTY", "OPTIONS", "Yield-Capture Strategy")
+    # DYNAMIC SEARCH FOR OPTIONS
+    print("🔎 Rockefeller Scanner: Scanning Equities for Whale Flow...")
+    options_scan = get_dynamic_whale_scan()
+    for asset in options_scan:
+        analyze_and_dispatch(asset, "OPTION")
         time.sleep(1)
-        # Testing a futures contract
-        dispatch_alpha_signal("/ES", "FUTURES", "Momentum Breakout")
+
+    # DEDICATED FUTURES DISPATCH
+    print("📡 Rockefeller Intelligence: Monitoring Futures Desk...")
+    futures_watchlist = ["/ES", "/NQ", "/GC", "/CL"]
+    for future in futures_watchlist:
+        analyze_and_dispatch(future, "FUTURES")
+        time.sleep(1)

@@ -5,13 +5,13 @@ import requests
 import sys
 from dotenv import load_dotenv
 
+# --- 1. INITIALIZATION ---
 try:
     from essentials_tools import send_essentials_embed
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
 
-# --- CONFIG ---
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_PATH, ".env"))
 
@@ -20,44 +20,69 @@ WEBHOOK_ANN = os.getenv("WEBHOOK_ANNOUNCEMENTS") or os.getenv("WEBHOOK_MARKET_AN
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 HISTORY_FILE = os.path.join(BASE_PATH, "macro_history.csv")
 
+# --- 2. CRYPTO HIGHLIGHT ENGINE ---
+
+def get_crypto_weekly_highlights():
+    """Fetches BTC weekly performance for the public digest to drive subscriptions."""
+    url = f"https://api.twelvedata.com/time_series?symbol=BTC/USD&interval=1day&outputsize=7&apikey={TD_API_KEY}"
+    try:
+        response = requests.get(url, timeout=15)
+        data = response.json().get("values", [])
+        if not data or len(data) < 2:
+            return None
+        
+        # Twelve Data returns newest first
+        end_price = float(data[0]['close'])
+        start_price = float(data[-1]['close'])
+        weekly_delta = ((end_price - start_price) / start_price) * 100
+        return weekly_delta
+    except Exception as e:
+        print(f"⚠️ Crypto Highlight Error: {e}")
+        return None
+
 def get_sector_performance():
+    """Identifies the leading sector for the weekly recap."""
     url = f"https://api.twelvedata.com/sector_performance?apikey={TD_API_KEY}"
     try:
-        data = requests.get(url).json()
+        data = requests.get(url, timeout=15).json()
         if isinstance(data, list) and len(data) > 0:
             return f"{data[0]['sector']} ({data[0]['changes_percentage']}%)"
-    except: pass
+    except:
+        pass
     return "Broad Market"
 
+# --- 3. RECAP GENERATION ---
+
 def generate_weekly_recap():
-    # 1. FORCE CHECK
+    """Compiles and dispatches the weekly performance broadcast."""
+    # 1. SCHEDULE CHECK
     is_saturday = datetime.datetime.now().weekday() == 5
     if not is_saturday and "force" not in sys.argv:
         print("Sentry: Recap skipped (not Saturday).")
         return
 
-    if not os.path.exists(HISTORY_FILE): return
+    if not os.path.exists(HISTORY_FILE):
+        print("Sentry: No history file found.")
+        return
 
     try:
-        # Load and clean columns to handle CSV inconsistencies
-        df = pd.read_csv(HISTORY_FILE, on_bad_lines='skip')
-        df.columns = [c.strip() for c in df.columns]
+        # Load macro data
+        df = pd.read_csv(HISTORY_FILE)
         df['Date'] = pd.to_datetime(df['Date'])
-        
-        # Filter for the last 7 days of data
         last_7_days = df.sort_values('Date').tail(7)
-        
-        # Calculation Engine
-        # Dynamically find the price column (Signal or Price)
-        price_col = 'Price' if 'Price' in last_7_days else 'Signal'
-        start_price = float(last_7_days[price_col].iloc[0])
-        end_price = float(last_7_days[price_col].iloc[-1])
-        perf = ((end_price - start_price) / start_price) * 100
-        
-        regime_mode = last_7_days['Regime'].mode()[0].upper()
+
+        # Performance Calculations
+        start_val = last_7_days.iloc[0]['Price']
+        end_val = last_7_days.iloc[-1]['Price']
+        perf = ((end_val - start_val) / start_val) * 100
+        regime_mode = last_7_days['Regime'].mode()[0]
         sector = get_sector_performance()
         
-        # Count how many days the 'Shield' saved us (Risk-Off days)
+        # Crypto Bite for conversion
+        btc_highlight = get_crypto_weekly_highlights()
+        crypto_text = f"`{btc_highlight:+.2f}%`" if btc_highlight is not None else "`DATA_STREAM_PENDING`"
+        
+        # Count 'Shield' days (Risk-Off/BEARISH)
         shield_days = len(last_7_days[last_7_days['Regime'].str.contains('Risk-Off|BEARISH', case=False)])
 
         # 2. CONSTRUCT ANNOUNCEMENT
@@ -69,6 +94,9 @@ def generate_weekly_recap():
             f"**Market Performance**: `{perf:+.2f}%`\n"
             f"**Leading Sector**: `{sector}`\n"
             f"**Dominant Regime**: `{regime_mode}`\n\n"
+            f"### **Institutional Crypto Highlight**\n"
+            f"₿ **BTC/USD Weekly Delta**: {crypto_text}\n"
+            f"🎯 *Full trend alignment and real-time whale flow for BTC/ETH is available exclusively in the Essential Tier.*\n\n"
             f"### **Shield Performance**\n"
             f"🛡️ **Defensive Windows**: `{shield_days} Days` of Capital Preservation\n"
             f"🎯 **System Accuracy**: `No signals triggered during Risk-Off conditions.`\n\n"
@@ -84,7 +112,7 @@ def generate_weekly_recap():
             print("✅ Weekly Recap posted to Announcements.")
 
     except Exception as e:
-        print(f"❌ Recap Error: {e}")
+        print(f"❌ Weekly Digest Error: {e}")
 
 if __name__ == "__main__":
     generate_weekly_recap()
