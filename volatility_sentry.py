@@ -6,7 +6,6 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -18,29 +17,29 @@ class RockefellerSentry:
     def __init__(self):
         self.vix_last = 0.0
         self.tz = pytz.timezone('Pacific/Honolulu')
-        # Dynamic macro release filters (HST) - Blocks critical economic windows (e.g., 08:30 EST data releases)
-        self.macro_windows = ["02:25", "02:26", "02:27", "02:28", "02:29", "02:30", "02:31", "02:32", "02:33", "02:34", "02:35", "08:00", "08:05"]
+        # Macro news release windows (HST) where execution must be paused automatically
+        self.macro_windows = ["02:25", "02:30", "02:35", "08:00"]
 
     def on_message(self, ws, message):
         data = json.loads(message)
         
-        # Hardened filter: Process streaming pricing data only, ignoring connection handshakes
+        # Protect against unhandled non-numeric strings during connection setups
         if data.get("event") == "price" and "price" in data:
             try:
                 price = float(data.get("price"))
                 self.process_volatility_shift(price)
             except (ValueError, TypeError) as e:
-                print(f"⚠️ Sentry Parsing Pass: {e}")
+                print(f"⚠️ Parsing pass skipped: {e}")
 
     def process_volatility_shift(self, current_vix):
-        """Applies dynamic risk thresholds utilizing Natenberg's Volatility Surface benchmarks."""
+        """Processes real-time shifts across Natenberg Volatility Surface thresholds."""
         try:
             with open(REGIME_LEDGER, "r") as f:
                 ledger = json.load(f)
         except Exception: 
             ledger = {}
 
-        # 1. Evaluate Surface Thresholds
+        # 1. Evaluate Risk Posture Surface Limits
         if current_vix > 30:
             status, rsi_limit = "CRITICAL (System Lockdown)", 40
         elif current_vix > 20:
@@ -48,7 +47,7 @@ class RockefellerSentry:
         else:
             status, rsi_limit = "STABLE (Full Offensive)", 68
 
-        # 2. Calculate Intraday Volatility Velocity Spikes
+        # 2. Track Speed Velocity Spikes
         vix_velocity = "NOMINAL"
         if self.vix_last > 0:
             vix_delta = current_vix - self.vix_last
@@ -59,11 +58,11 @@ class RockefellerSentry:
 
         self.vix_last = current_vix
 
-        # 3. Assess Current Clock State against Macro Kill-Switch Windows
+        # 3. Assess Current Clock State Against Macro Constraints
         now_hst = datetime.now(self.tz).strftime("%H:%M")
         macro_muted = any(now_hst == window for window in self.macro_windows)
 
-        # 4. State Persistence: Non-destructive update to preserve structural tracking indices
+        # 4. Strict State Persistence (Applies updates non-destructively)
         ledger.update({
             "vix_status": status,
             "vix_current": current_vix,
@@ -78,16 +77,15 @@ class RockefellerSentry:
             json.dump(ledger, f, indent=4)
 
     def on_error(self, ws, error):
-        print(f"🛡️ SENTRY ERROR: {error}")
+        print(f"🛡️ Sentry Error Boundary: {error}")
 
     def on_close(self, ws, close_status_code, close_msg):
-        print("🛡️ SENTRY CLOSED: Reconnecting in 5 seconds...")
+        print("🛡️ Sentry Stream disconnected. Forcing reconnect cycle...")
         time.sleep(5)
         self.start_sentry()
 
     def start_sentry(self):
-        """Deploys a persistent stream connection to the Twelve Data index WebSocket."""
-        print("🛡️ Rockefeller Sentry: Activating WebSocket Stream...")
+        print("🛡️ Rockefeller Volatility Sentry: Initiating Stream Handshake...")
         ws = websocket.WebSocketApp(
             WS_URL,
             on_message=self.on_message,
