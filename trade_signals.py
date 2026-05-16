@@ -1,9 +1,10 @@
 import os
 import time
 import requests
-import datetime
+from datetime import datetime, time as dt_time
 import json
 import sys
+import pytz
 from dotenv import load_dotenv
 
 # --- 1. INITIALIZATION ---
@@ -37,146 +38,185 @@ def get_signal_tier(conviction_score, rsi, trend_bullish):
         return "Tier B - Tactical Entry", 0xf1c40f  # Yellow
     return "Tier C - Speculative", 0xe74c3c  # Red
 
-def calculate_rr_ratio(entry, target, stop, action="BTO"):
-    """Calculates Risk:Reward for visual transparency."""
+def get_market_context():
+    """Reads global regime health metrics directly from system memory."""
     try:
-        risk = abs(entry - stop)
-        reward = abs(target - entry)
-        return f"{round(reward / risk, 1)} : 1" if risk != 0 else "2.0 : 1"
+        with open(REGIME_LEDGER, "r") as f:
+            data = json.load(f)
+            return (
+                data.get("regime", "NEUTRAL"),
+                data.get("vix_status", "STABLE"),
+                float(data.get("rsi_shield_limit", 66.0))
+            )
     except:
-        return "2.0 : 1"
+        return "NEUTRAL", "STABLE", 66.0
 
-def get_dynamic_whale_scan():
-    """Twelve Data dynamic scan + core priority assets."""
-    url = f"https://api.twelvedata.com/market_movers/stocks?apikey={TD_API_KEY}"
+def fetch_asset_snapshot(symbol):
+    """Fetches price, change, and trend direction for macro futures anchors."""
     try:
-        response = requests.get(url).json()
-        stocks = [s['symbol'] for s in response.get('values', [])[:10]]
-        return list(set(stocks + ["SPY", "TSLA", "NVDA"])) # Removed CLM/CRF from options scan
-    except:
-        return ["SPY", "TSLA", "NVDA", "AAPL", "AMD"]
+        # Quote Data
+        q_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+        q_res = requests.get(q_url, timeout=10).json()
+        
+        price = float(q_res.get("close", q_res.get("price", 0.0)))
+        pct_change = float(q_res.get("percent_change", 0.0))
+        
+        # Supertrend Data
+        trend_status, _ = get_trend_alignment(symbol, TD_API_KEY) if HAS_ESSENTIALS else ("🟡 NEUTRAL", True)
+        
+        return price, pct_change, trend_status
+    except Exception as e:
+        print(f"⚠️ Error gathering statistics for macro token {symbol}: {e}")
+        return 0.0, 0.0, "🟡 DATA OFFLINE"
 
-# --- 3. ANALYTICS ENGINE ---
+# --- 3. THE AUTHORITATIVE FUTURES BROADCASTER ---
 
-def analyze_and_dispatch(symbol, asset_type="OPTION"):
-    """Core intelligence for generating authoritative signals."""
-    conviction, _, _ = get_institutional_conviction(symbol, TD_API_KEY)
-    trend_status, is_bullish = get_trend_alignment(symbol, TD_API_KEY)
+def dispatch_futures_scope(regime, vix_status, current_rsi, rsi_limit):
+    """Compiles and transmits the clean institutional Macro Futures Outlook."""
+    print("📡 [Broadcaster Engine] Executing Authoritative Macro Futures Outlook...")
     
-    # Data Retrieval
-    rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&apikey={TD_API_KEY}"
-    price_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
+    # Track core complex macro futures anchors without asset/flag emojis
+    assets = {
+        "/ES": "S&P 500 Futures (/ES)",
+        "/NQ": "Nasdaq Futures (/NQ)",
+        "/CL": "Crude Oil (/CL)",
+        "/GC": "Gold Futures (/GC)"
+    }
     
-    try:
-        rsi_val = float(requests.get(rsi_url).json()['values'][0]['rsi'])
-        price = float(requests.get(price_url).json()['price'])
-    except:
-        return
-
-    # Strategy Branching: Sosnoff vs Momentum
-    if rsi_val > 70:
-        strategy = "Credit Spread / Cash Secured Put"
-        action = "STO (Sell to Open)"
-        verdict = "⚠️ OVEREXTENDED: This is a THETA/INCOME play for premium sellers."
-        target_price = price * 0.96
-        stop_loss = price * 1.04
-        is_premium = True
+    framework_lines = []
+    color = 0x3498db  # Rockefeller Blue
+    
+    for symbol, label in assets.items():
+        price, change, trend = fetch_asset_snapshot(symbol)
+        sign = "+" if change >= 0 else ""
+        
+        # Format the visual indicator dot cleanly based on Supertrend response
+        dot = "🟡"
+        if "BULLISH" in trend: dot = "🟢"
+        if "BEARISH" in trend: dot = "🔴"
+        
+        # Enforce clean formatting matching requirements exactly
+        if symbol == "/GC":
+            line = f"┗ {label}: ${price:,.2f} | {sign}{change:.2f}% [{dot} {trend.split()[-1]}]"
+        else:
+            line = f"┣ {label}: ${price:,.2f} | {sign}{change:.2f}% [{dot} {trend.split()[-1]}]"
+        framework_lines.append(line)
+        
+    framework_text = "\n".join(framework_lines)
+    
+    # Process Strategy Posture
+    if "BEARISH" in regime or "CRITICAL" in vix_status:
+        status_text = "🔴 RISK-OFF REGIME ACTION ACTIVE"
+        posture_text = "Defensive Capital Preservation Mode. Scalp exposures reduced."
+        verdict_text = "Volatility thresholds violated or broad indices showing institutional distribution. Maintain cash postures."
+        color = 0xe74c3c
+    elif current_rsi > rsi_limit:
+        status_text = "🟡 FROTHY EXTENSION OVERWATCH"
+        posture_text = "Caution Posture. Pause new breakout entry allocation parameters."
+        verdict_text = "Ecosystem structures remain technically bullish, but current price is extended past tactical thresholds. Wait for value setups."
+        color = 0xf1c40f
     else:
-        strategy = "AI Extension Play"
-        action = "BTO (Buy to Open)"
-        verdict = "🚀 MOMENTUM: Trend alignment present. Size appropriately."
-        target_price = price * 1.08
-        stop_loss = price * 0.94
-        is_premium = False
+        status_text = "🟢 RISK-ON REGIME ALIGNMENT"
+        posture_text = "Capital protected; execution size authorized at 100%."
+        verdict_text = "Institutional whale flows are actively defending equity contract baselines. Macro trend constraints favor buying structural pullbacks."
 
-    tier_name, color = get_signal_tier(conviction, rsi_val, is_bullish)
-    rr_ratio = calculate_rr_ratio(price, target_price, stop_loss, action)
-
-    # Embed Construction
-    title = f"🚨 TACTICAL SIGNAL: {symbol} ({tier_name})"
     description = (
-        f"**Strategy**: `{strategy}`\n"
-        f"**Action**: `{action}` | **Risk/Reward**: `{rr_ratio}`\n\n"
-        f"**Execution Data**:\n"
-        f"┣ **Entry Target**: `${price:,.2f}`\n"
-        f"┣ **Stop-Loss**: `${stop_loss:,.2f}`\n"
-        f"┗ **Target**: `${target_price:,.2f}`\n\n"
-        f"**Conviction Matrix**:\n"
-        f"┣ **Whale Flow**: `{conviction}`\n"
-        f"┣ **Trend Shield**: `{trend_status}`\n"
-        f"┗ **RSI (1D)**: `{rsi_val:.1f}`\n\n"
-        f"**Tactical Verdict**: {verdict}"
+        f"Status: **{status_text}**\n\n"
+        f"### **Global Asset Framework**:\n"
+        f"{framework_text}\n\n"
+        f"### **Ecosystem Risk Metrics**:\n"
+        f"┣ Volatility Sentry (VIX): `{vix_status}`\n"
+        f"┣ SPY RSI Gate: `{current_rsi:.1f}` (Limit: {rsi_limit})\n"
+        f"┗ System Posture: `{posture_text}`\n\\n"
+        f"**Strategy Verdict**: *{verdict_text}*"
     )
+    
+    if HAS_ESSENTIALS and WEBHOOK_FUTURES:
+        send_essentials_embed(WEBHOOK_FUTURES, "🏛️ Rockefeller Macro Futures Outlook", description, color)
+        print("✅ [Broadcaster Engine] Futures Scope update successfully dispatched to channel.")
 
-    if is_premium:
-        description += "\n\n*Note: This signal is optimized for Options Sellers/Theta traders/Premium plays.*"
+# --- 4. ENGINE RUNTIME RUNNER ---
 
-    # Webhook Selection
-    webhook = WEBHOOK_OPTIONS if asset_type == "OPTION" else WEBHOOK_FUTURES
-    if HAS_ESSENTIALS and webhook:
-        send_essentials_embed(webhook, title, description, color)
-        log_for_audit(symbol, asset_type, strategy)
-        print(f"✅ [DISPATCH] {symbol} sent to {'Futures' if asset_type == 'FUTURES' else 'Options'}.")
+def run_radar_cycle():
+    tz_h = pytz.timezone('Pacific/Honolulu')
+    print(f"--- 🛡️ TRADE SIGNALS MONITOR ACTIVE: {datetime.now(tz_h).strftime('%Y-%m-%d %H:%M HST')} ---")
+    
+    # Local tracking variables to prevent multiple triggers in the exact same minute
+    last_scope_day = None
+    last_scope_type = None
 
-def log_for_audit(symbol, asset_type, strategy):
-    entry = {"time": str(datetime.datetime.now()), "symbol": symbol, "type": asset_type, "strat": strategy}
-    try:
-        log = []
-        if os.path.exists(SIGNAL_LOG):
-            with open(SIGNAL_LOG, "r") as f: log = json.load(f)
-        log.append(entry)
-        with open(SIGNAL_LOG, "w") as f: json.dump(log, f, indent=4)
-    except: pass
+    while True:
+        now_hst = datetime.now(tz_h)
+        day_of_week = now_hst.weekday()  # Monday=0, Friday=4, Saturday=5, Sunday=6
+        
+        # 1. CORE MARKET METRICS REFRESH
+        regime, vix_status, rsi_limit = get_market_context()
+        
+        # Fetch underlying baseline momentum metrics
+        try:
+            spy_url = f"https://api.twelvedata.com/rsi?symbol=SPY&interval=1day&time_period=14&apikey={TD_API_KEY}"
+            spy_res = requests.get(spy_url, timeout=10).json()
+            current_rsi = float(spy_res['values'][0]['rsi']) if 'values' in spy_res else 50.0
+        except:
+            current_rsi = 50.0
 
-# --- 4. EXECUTION ---
+        # 2. TWICE-DAILY FUTURES OUTLOOK EMISSION GATEWAY (Monday - Friday)
+        if day_of_week <= 4:
+            # A. Pre-Market Open Broadcast at 03:00 AM HST
+            if now_hst.hour == 3 and now_hst.minute == 0 and not (last_scope_day == now_hst.day and last_scope_type == "AM"):
+                dispatch_futures_scope(regime, vix_status, current_rsi, rsi_limit)
+                last_scope_day = now_hst.day
+                last_scope_type = "AM"
+                time.sleep(60)
+                continue
+                
+            # B. Post-Market Close Broadcast at 10:15 AM HST
+            if now_hst.hour == 10 and now_hst.minute == 15 and not (last_scope_day == now_hst.day and last_scope_type == "PM"):
+                dispatch_futures_scope(regime, vix_status, current_rsi, rsi_limit)
+                last_scope_day = now_hst.day
+                last_scope_type = "PM"
+                time.sleep(60)
+                continue
+
+        # 3. OPTIONS SCANNING MARKET SESSION GUARD CLAUSE
+        market_start = dt_time(3, 30)
+        market_end = dt_time(10, 0)
+        
+        # If outside regular equity hours or it is the weekend, skip options entirely
+        if day_of_week > 4 or not (market_start <= now_hst.time() <= market_end):
+            print("💤 [Sentry Guard] Equity options processing suspended. System tracking macro parameters safely.")
+            time.sleep(60)
+            continue
+
+        # 4. ACTIVE SIGNAL PROCESSING WINDOW (SPECULATIVE SCANNERS)
+        # ----------------------------------------------------------------------
+        print("🔍 [Sentry Scan] Equity channels open. Analyzing live tickers for option trade flows...")
+        
+        try:
+            # Dynamic monitoring target array pool
+            sample_watchlist = ["CLM", "CRF"]
+            for ticker in sample_watchlist:
+                conviction, embed_color, triggered = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0x95a5a6, False)
+                _, trend_bullish = get_trend_alignment(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NEUTRAL", True)
+                
+                if triggered:
+                    tier_label, color_code = get_signal_tier(conviction, current_rsi, trend_bullish)
+                    title = f"🚨 OPTIONS ALIGNMENT DETECTED: {ticker}"
+                    desc = f"Technical breakout alert tracking under **{tier_label}** thresholds."
+                    
+                    if WEBHOOK_OPTIONS and HAS_ESSENTIALS:
+                        send_essentials_embed(WEBHOOK_OPTIONS, title, desc, color_code)
+                        
+        except Exception as e:
+            print(f"⚠️ Error processing tactical scan iteration: {e}")
+
+        # 60 Second Base Cycle Heartbeat Sync
+        time.sleep(60)
 
 if __name__ == "__main__":
-    # DYNAMIC SEARCH FOR OPTIONS
-    print("🔎 Rockefeller Scanner: Scanning Equities for Whale Flow...")
-    options_scan = get_dynamic_whale_scan()
-    for asset in options_scan:
-        analyze_and_dispatch(asset, "OPTION")
-        time.sleep(1)
-
-    # DEDICATED FUTURES DISPATCH
-    print("📡 Rockefeller Intelligence: Monitoring Futures Desk...")
-    futures_watchlist = ["/ES", "/NQ", "/GC", "/CL"]
-    for future in futures_watchlist:
-        analyze_and_dispatch(future, "FUTURES")
-        time.sleep(1)
-
-    # --- ADDED TO trade_signals.py ---
-
-def broadcast_market_flowstate(current_rsi, vix_status, regime):
-    """
-    Explains the 'Why' behind the silence. 
-    Fires at 09:35 AM EST to Options and Futures channels.
-    """
-    rsi_limit = 66
-    
-    # Identify the 'Gatekeeper'
-    if current_rsi > rsi_limit:
-        reason = (f"The **RSI Shield** is currently the primary gatekeeper. With RSI at `{current_rsi:.1f}`, "
-                  f"the engine considers the risk-to-reward ratio unfavorable. We are avoiding 'buying the top'.")
-    elif vix_status != "STABLE":
-        reason = (f"The **Volatility Muzzle** is active. Due to `{vix_status}` conditions, "
-                  f"signals are suppressed to protect capital from erratic swings.")
+    # Force test parameter to check webhook structural execution instantly
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
+        r, v, rl = get_market_context()
+        dispatch_futures_scope(r, v, 55.0, rl)
     else:
-        reason = "Market conditions are nominal. The Sentry is scanning for Institutional Whale Flow."
-
-    for channel_name, webhook in [("Options", WEBHOOK_OPTIONS), ("Futures", WEBHOOK_FUTURES)]:
-        embed = {
-            "title": f"🏛️ {channel_name} Flowstate Update",
-            "description": (
-                f"**System Status**: `SCANNING / NO ENTRIES`\n\n"
-                f"**Market Context**:\n"
-                f"┣ **Regime**: `{regime}`\n"
-                f"┣ **Sentry RSI**: `{current_rsi:.1f}` (Limit: {rsi_limit})\n"
-                f"┗ **Volatility**: `{vix_status}`\n\n"
-                f"**The Why**: {reason}\n\n"
-                f"*The Shield is protecting capital while the engine monitors for high-conviction pullbacks.*"
-            ),
-            "color": 0x3498db,
-            "footer": {"text": f"Rockefeller Strategic Intelligence • {datetime.now().strftime('%H:%M HST')}"}
-        }
-        requests.post(webhook, json={"embeds": [embed]})    
+        run_radar_cycle()
