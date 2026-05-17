@@ -7,7 +7,7 @@ import sys
 import pytz
 from dotenv import load_dotenv
 
-# --- 1. INITIALIZATION & ECOSYSTEM ALIGNMENT ---
+# --- 1. ECOSYSTEM ROOT INITIALIZATION ---
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_PATH, ".env"))
 
@@ -21,14 +21,15 @@ try:
 except ImportError:
     HAS_ESSENTIALS = False
 
-# System Infrastructure Variables
+# System Infrastructure Gateways
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 REGIME_LEDGER = os.path.join(BASE_PATH, "market_regime.json")
+CHECKPOINT_FILE = os.path.join(BASE_PATH, "last_signal_checkpoint.json")
 
 def get_signal_tier(conviction_score, rsi, trend_bullish):
-    """Surgically ranks options signal setups based on tracking metrics."""
+    """Ranks options signal setups based on tracking metrics."""
     if "HIGH" in conviction_score and trend_bullish and 40 < rsi < 65:
         return "Tier A - High Conviction", 0x2ecc71
     if "HIGH" in conviction_score:
@@ -38,143 +39,148 @@ def get_signal_tier(conviction_score, rsi, trend_bullish):
 class RockefellerFuturesEngine:
     def __init__(self):
         self.tz = pytz.timezone('Pacific/Honolulu')
-        self.last_pulse_hour = -1
-        self.last_signal_timestamp = 0  # Cooldown throttle to prevent double-firing alerts
+        self.last_processed_time = self.load_checkpoint()
 
-    def run_engine_cycle(self, is_test=False):
-        """Processes core infrastructure logic for futures signals and options scans."""
-        if not HAS_ESSENTIALS:
-            print("❌ Critical System Halt: essentials_tools.py is missing.")
-            return
+    def load_checkpoint(self):
+        """Loads persistent alert historical markers to protect against spam loops."""
+        if os.path.exists(CHECKPOINT_FILE):
+            try:
+                with open(CHECKPOINT_FILE, "r") as f:
+                    data = json.load(f)
+                    return data.get("last_processed_time")
+            except:
+                return None
+        return None
 
-        # 1. Pull Ecosystem Metrics with Defensive Fallbacks
+    def save_checkpoint(self, timestamp):
+        """Saves current broadcast timestamp permanently to disk."""
+        self.last_processed_time = timestamp
+        try:
+            with open(CHECKPOINT_FILE, "w") as f:
+                json.dump({"last_processed_time": timestamp}, f)
+        except Exception as e:
+            print(f"⚠️ [System Alert] Checkpoint write failure: {e}")
+
+    def load_regime_state(self):
+        if not os.path.exists(REGIME_LEDGER):
+            return "BULLISH", "STABLE", 14.5, 65.0
         try:
             with open(REGIME_LEDGER, "r") as f:
-                ledger = json.load(f)
-        except Exception:
-            ledger = {}
+                state = json.load(f)
+            return (
+                state.get("regime", "BULLISH"),
+                state.get("vix_status", "STABLE"),
+                float(state.get("vix_current", 14.5)),
+                float(state.get("rsi_shield_limit", 65.0))
+            )
+        except:
+            return "BULLISH", "STABLE", 14.5, 65.0
 
-        regime = ledger.get("regime", "BULLISH")
-        vix_status = ledger.get("vix_status", "STABLE")
-        vix_current = ledger.get("vix_current", 14.5)
-        vix_velocity = ledger.get("vix_velocity", "NOMINAL")
-        rsi_limit = ledger.get("rsi_shield_limit", 68)
-        macro_muted = ledger.get("macro_muted", False)
-
-        now = datetime.datetime.now(self.tz)
-
-        # 2. Safety Intercepts: Guard Against Chaotic Volatility Spikes
-        if (macro_muted or vix_velocity == "CRITICAL_SPIKE") and not is_test:
-            print("🛡️ Risk Shield Active: Trading execution muted due to macro risk/volatility.")
+    def run_engine_cycle(self, is_test=False):
+        regime, vix_status, vix_current, rsi_limit = self.load_regime_state()
+        
+        if is_test:
+            print("🧪 Terminal Flag Found: Simulating synchronized dual-channel verification...")
+            self.broadcast_signal(
+                symbol="/ES & OPTION BENCHMARKS",
+                strat="Ecosystem Integration Verification Test",
+                status="VERIFIED TEST",
+                vix_current=vix_current,
+                rsi=55.0,
+                vix_status=vix_status,
+                regime=regime,
+                conviction="⚡ HIGH (System Dynamic Check)",
+                force_all_channels=True
+            )
             return
 
-        # 3. Interrogate Live Market Vectors (Tracking SPY as /ES Liquidity Proxy)
-        trend_status, is_bullish = get_trend_alignment("SPY", TD_API_KEY)
-        conviction_str, _, whale_active = get_institutional_conviction("SPY", TD_API_KEY)
-        
-        # Pull live tracking RSI or mock for terminal testing path
-        current_rsi = 58.4 if is_test else 55.0 
+        # --- PRODUCTION AUTOMATED LOGIC ---
+        SIGNAL_DATA_SOURCE = os.path.join(BASE_PATH, "signal_results.json")
+        if not os.path.exists(SIGNAL_DATA_SOURCE):
+            return
 
-        # 4. EXECUTION DECISION ENGINE
-        current_time_sec = time.time()
-        
-        # Condition A: Trend aligned, RSI under shield limit, and volatility is safe
-        if is_bullish and current_rsi <= rsi_limit and "CRITICAL" not in vix_status:
-            # Enforce a 30-minute cooldown window between live structural signals
-            if (current_time_sec - self.last_signal_timestamp > 1800) or is_test:
-                self.dispatch_tactical_entry(trend_status, current_rsi, rsi_limit, vix_status, conviction_str)
-                self.last_signal_timestamp = current_time_sec
-        
-        # Condition B: Trend is higher but RSI violates safety surface boundaries
-        elif current_rsi > rsi_limit and not is_test:
-            print(f"⚠️ Signal Suppressed: RSI tracking at {current_rsi:.1f} exceeds safety threshold ({rsi_limit}).")
-
-        # 5. HIGH-PRIORITY EQUITY SCANNING (Options Channel Alignment)
         try:
-            sample_watchlist = ["CLM", "CRF"]
-            for ticker in sample_watchlist:
-                opt_conviction, _, opt_triggered = get_institutional_conviction(ticker, TD_API_KEY)
-                _, opt_trend_bullish = get_trend_alignment(ticker, TD_API_KEY)
+            with open(SIGNAL_DATA_SOURCE, "r") as f:
+                signals = json.load(f)
+            if not signals:
+                return
+            
+            latest_signal = signals[-1]
+            signal_time = latest_signal.get("time") or latest_signal.get("timestamp") or latest_signal.get("date")
+            
+            # Persistent check stops the alert loop dead in its tracks
+            if signal_time == self.last_processed_time:
+                return  
                 
-                if opt_triggered or is_test:
-                    tier_label, color_code = get_signal_tier(opt_conviction, current_rsi, opt_trend_bullish)
-                    title = f"🚨 OPTIONS ALIGNMENT DETECTED: {ticker}"
-                    desc = (
-                        f"Technical breakout alert tracking under **{tier_label}** thresholds.\n\n"
-                        f"┣ **Asset Underlying**: `{ticker}`\n"
-                        f"┣ **Conviction Flow**: `{opt_conviction}`\n"
-                        f"┗ **Ecosystem Posture**: `{vix_status}`"
-                    )
-                    if WEBHOOK_OPTIONS:
-                        send_essentials_embed(WEBHOOK_OPTIONS, title, desc, color_code)
-                    if is_test:
-                        break
+            symbol = latest_signal.get("symbol", "/ES")
+            strat = latest_signal.get("strat") or latest_signal.get("strategy", "Momentum Breakout")
+            type_tag = latest_signal.get("type", "FUTURES").upper()
+            direction = latest_signal.get("direction", "LONG")
+            
+            # Contextual Technical Lookups via Twelve Data Indicators
+            conviction, _, _ = get_institutional_conviction(symbol, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0, False)
+            _, trend_bullish = get_trend_alignment(symbol, TD_API_KEY) if HAS_ESSENTIALS else ("NEUTRAL", True)
+            rsi_val = 55.0  # Normalized mid-band placeholder index
+            
+            if type_tag == "FUTURES":
+                self.broadcast_signal(symbol, strat, f"🟢 ACTIVE / SIGNAL TRIGGERED ({direction})", vix_current, rsi_val, vix_status, regime, conviction, target_channel="FUTURES")
+            elif type_tag == "OPTION":
+                self.broadcast_signal(symbol, strat, f"🟢 OPTIONS FOCUS SETUP ({direction})", vix_current, rsi_val, vix_status, regime, conviction, target_channel="OPTIONS")
+
+            # Commit state to cache file to seal entry
+            self.save_checkpoint(signal_time)
+
         except Exception as e:
-            print(f"⚠️ Options Tracking Anomaly: {e}")
+            print(f"⚠️ Production Loop Exception: {e}")
 
-        # 6. BI-HOURLY CHANNEL REFRESH (Provides Directional Pulse Without Fatigue)
-        if (now.hour % 2 == 0 and now.hour != self.last_pulse_hour) or is_test:
-            self.dispatch_intraday_pulse(regime, vix_status, vix_current, current_rsi, conviction_str)
-            self.last_pulse_hour = now.hour
-
-    # --- DISCORD EMBED BLUEPRINTS ---
-
-    def dispatch_tactical_entry(self, trend_status, rsi, rsi_limit, vix_status, conviction):
-        """Dispatches your exact target entry blueprint to the futures channel."""
-        whale_flag = "⚡ HIGH (Volume > 1.5x 30-day Avg - Whale Inflow)" if "HIGH" in conviction else "NORMAL (Sustained Participation)"
+    def broadcast_signal(self, symbol, strat, status, vix_current, rsi, vix_status, regime, conviction, target_channel=None, force_all_channels=False):
+        """Unified transmission matrix routing directly to designated channels with explicit string construction."""
         
+        # Explicit newline characters separated cleanly to enforce API payload compliance
+        lines = [
+            f"**System Status**: `{status}`",
+            "",
+            "**Tactical Entry Parameters**:",
+            f"┣ **Asset**: `{symbol}`",
+            f"┣ **Strategy**: `{strat}`",
+            "┗ **Tracking Profile**: `Institutional Flow Matching`",
+            "",
+            "**Market Context (The Radar)**:",
+            f"┣ **Regime**: `{regime}`",
+            f"┣ **Sentry RSI**: `{rsi:.1f}`",
+            f"┣ **Volatility Sentry**: `{vix_status} ({vix_current:.2f})`",
+            f"┗ **Institutional Flow**: `{conviction}`",
+            "",
+            "**Risk Management Guardrails**:",
+            "┗ **Sentry Reminder**: Signals provide structural setups; risk parameters ensure survival."
+        ]
+        
+        description_body = "\n".join(lines)
+
+        # Build out clean, stylized Rockefeller Embed layout
         embed = {
-            "title": "🏛️ Rockefeller Futures Flowstate Update",
-            "description": (
-                "**System Status**: `🟢 ACTIVE / SIGNAL TRIGGERED`\n\n"
-                "### **🎯 Tactical Entry Parameters**:\n"
-                f"┣ **Asset**: `/ES` (E-mini S&P 500 Futures)\n"
-                "┣ **Strategy**: `Momentum Breakout (Scalp)`\n"
-                "┣ **Direction**: `LONG`\n"
-                "┗ **Entry Vector**: `Market Order (Aggressive Buying Detected)`\n\n"
-                "### **📊 Market Context (The Radar)**:\n"
-                f"┣ **Regime**: `BULLISH ({trend_status})`\n"
-                f"┣ **Sentry RSI**: `{rsi:.1f}` (Safely under the {rsi_limit} Shield Limit)\n"
-                f"┣ **Volatility Sentry**: `{vix_status}`\n"
-                f"┗ **Institutional Flow**: `{whale_flag}`\n\n"
-                "### **🔬 Order Flow Intelligence**:\n"
-                "┣ **Momentum Vector**: *Aggressive market orders lifting the ask.*\n"
-                "┗ **Order Flow Note**: *Heavy volume backing the break. Watch for potential 'Trapped Short Sellers' to fuel short-term continuation.*\n\n"
-                "### **🛡️ Risk Management (Natenberg Surface Guardrails)**:\n"
-                "┣ **Stop Loss Vector**: *Structured dynamically off 1-hour ATR.*\n"
-                "┗ **Sentry Reminder**: *Signals provide setups; risk control ensures survival. Never revenge trade if a setup triggers a trailing stop.*"
-            ),
-            "color": 0x2ecc71,
-            "footer": {
-                "text": "Rockefeller Strategic Intelligence Execution Engine • HST Timezone"
-            },
+            "title": "🚨 Rockefeller Futures Flowstate Update" if "FUTURES" in str(target_channel).upper() or force_all_channels else "🔮 Rockefeller Options Spectrum Alert",
+            "description": description_body,
+            "color": 0x2ecc71 if "FUTURES" in str(target_channel).upper() or force_all_channels else 0x9b59b6,
+            "footer": { "text": "Rockefeller Strategic Intelligence Execution Engine • HST Timezone" },
             "timestamp": datetime.datetime.now(pytz.utc).isoformat()
         }
-        
-        if WEBHOOK_FUTURES:
-            requests.post(WEBHOOK_FUTURES, json={"embeds": [embed]})
 
-    def dispatch_intraday_pulse(self, regime, vix_status, vix_current, rsi, conviction):
-        """Dispatches standard periodic updates to maintain institutional reliability."""
-        embed = {
-            "title": "📊 Futures State of the Tape: Intraday Pulse Check",
-            "description": (
-                f"### **Session Structural Assessment**\n\n"
-                f"**Current Context Metrics**:\n"
-                f"┣ **Macro Regime**: `{regime}`\n"
-                f"┣ **Volatility Level**: `{vix_status}` (`{vix_current:.2f}`)\n"
-                f"┣ **Current RSI Level**: `{rsi:.1f}`\n"
-                f"┗ **Order Book Profile**: `{conviction}`\n\n"
-                "**📋 Operational Directive**:\n"
-                "Do not force trade sizes inside late mid-session liquidity drops. "
-                "Allow technical breakout sweeps to confirm institutional tracking before entry allocation."
-            ),
-            "color": 0x3498db,
-            "footer": { "text": "Rockefeller Intraday Pulse Monitor" },
-            "timestamp": datetime.datetime.now(pytz.utc).isoformat()
-        }
-        if WEBHOOK_FUTURES:
-            requests.post(WEBHOOK_FUTURES, json={"embeds": [embed]})
+        payload = {"embeds": [embed]}
+
+        # Handle Terminal Testing Multi-Path Execution
+        if force_all_channels:
+            if WEBHOOK_FUTURES:
+                requests.post(WEBHOOK_FUTURES, json=payload, timeout=10)
+            if WEBHOOK_OPTIONS:
+                requests.post(WEBHOOK_OPTIONS, json=payload, timeout=10)
+            return
+
+        # Route production assets cleanly to their exact workspace target
+        if target_channel == "FUTURES" and WEBHOOK_FUTURES:
+            requests.post(WEBHOOK_FUTURES, json=payload, timeout=10)
+        elif target_channel == "OPTIONS" and WEBHOOK_OPTIONS:
+            requests.post(WEBHOOK_OPTIONS, json=payload, timeout=10)
 
 
 if __name__ == "__main__":
@@ -183,12 +189,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         print("🧪 Triggering Verification Test Path...")
         engine.run_engine_cycle(is_test=True)
-        print("✅ Production transmission path successfully verified.")
+        print("✅ Terminal dual-channel test transmission completed successfully.")
     else:
         print("⚙️ Rockefeller Futures Engine is running in background daemon mode...")
         while True:
             try:
                 engine.run_engine_cycle(is_test=False)
+                time.sleep(15)  # Throttling query cycles
             except Exception as e:
-                print(f"⚠️ Engine Loop Intercept: {e}")
-            time.sleep(60)
+                print(f"⚠️ Engine Loop Interrupted: {e}")
+                time.sleep(10)

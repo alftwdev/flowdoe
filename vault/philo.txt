@@ -1,0 +1,188 @@
+================================================================================
+ROCKEFELLER CORE TRADING STRATEGIES & SYSTEMIC GATEKEEPERS
+================================================================================
+
+[STRATEGY_01: VOLUME SPREAD ANALYSIS (VSA) & ORDER BOOK ARCHITECTURE]
+Source Reference: SCALP 3 (VSA Super-Scalping) & Options Trading (Samuel)
+- MECHANIC: Price discovery is an auction process driven by order flow imbalance.
+- SELECTION RULES (BULLISH CONTEXT):
+  1. Stopping Volume: High volume down-bars into structural support where the smart money absorbs selling pressure. Invalidation occurs if the next candle closes below the low of the absorption bar.
+  2. The Shakeout: A sharp, low-volume intraday raid below a known support level designed to sweep retail stops before instantly reversing back inside the grid.
+  3. No Supply Test: Low volume pullbacks into historical support zones, confirming retail liquidation has completely dried up.
+- CONFIRMATION VECTOR: Momentum requires aggressive market orders lifting the ask. Pure limit order walls are structural traps unless backed by aggressive volume velocity.
+
+[STRATEGY_02: MOMENTUM OSCILLATION & MONETARY INFLOW CONFIRMATION]
+Source Reference: Must Learn Indicators (Quick Guide) & Candlestick (Pasternak)
+- TECHNICAL FILTER: Individual indicators trailing price action are insufficient. Systems require multidimensional confirmation.
+- CHAIKIN MONEY FLOW (CMF): 
+  - Utilize a 21-day baseline accumulation/distribution moving average divided by volume.
+  - CMF > 0 indicates systematic accumulation (Institutional buying presence).
+  - CMF < 0 indicates systematic distribution (Institutional selling presence).
+- CANDLESTICK TIMING GATEKEEPERS:
+  - Trend stalling is flagged via localized Doji formations (Equality of opening and closing boundaries). 
+  - Dojis or Hammer pins at local structure points demand an immediate execution pause until the next candle breaks the confirmation high/low.
+
+[STRATEGY_03: ULTRA-SHORT TIME FRAME SCALPING EXECUTION]
+Source Reference: SCALP 1 (1-Min Scalping) & SCALP 2 (DayTrading Guide)
+- HOLDING PERIOD: Time exposure equals capital risk. Target duration ranges from seconds to minutes. 
+- MATRIX CRITERIA: Scalping relies entirely on high asset liquidity, high volume velocity, and tight fractional bid/ask spreads. High transaction slippage invalidates the trade entry.
+- POSITION SCALING & MANAGEMENT:
+  - Minimum acceptable Risk-to-Reward (RR) ratio per tactical trigger is strictly 2:1.
+  - Trailing Stop Adjustment: The primary execution objective upon trade entry execution is adjusting the trailing protective stop to break-even + transaction friction costs at the earliest technical pivot point.
+
+[STRATEGY_04: HARD SYSTEMIC RISK OVERRIDES & CIRCUIT BREAKERS]
+Source Reference: Step-By-Step Trading (Elder) & Options Trading (Samuel)
+- SYSTEMIC 3-STRIKE RULE: If the execution loop logs three (3) consecutive trailing stop liquidations within a single trading session, the daemon must immediately engage a hard system lockout lock. No further order triggers are permitted for 24 hours.
+- EMOTIONAL BIAS LOCK: System code structures must entirely forbid revenge trading or forcing trade sizes inside low-liquidity market doldrums. 
+- THE NATENBERG COMPLIANCE CHECK: All entry parameters defined above are strictly subordinate to the Natenberg Volatility Surface metrics stored in the shared json ledger. High VIX levels compress all trailing stop windows automatically.
+================================================================================
+
+================================================================================
+SECTION 02: HIGH-CONVICTION FILTERS & MATRIX DATA STRUCTURES
+================================================================================
+
+[STRATEGY_05: FIBONACCI CONFLUENCE ZONE VERIFICATION]
+Source Reference: Constance Brown (Fibonacci Analysis)
+- CORE RULE: Anti-Curve-Fitting Enforcement. Code loops are strictly prohibited from dynamically adjusting anchor swings post-facto to justify a trade setup.
+- MATHEMATICAL INTERSECTION MATRIX:
+  - Define Major Swings using hard multi-day structural highs/lows.
+  - Calculate overlapping extensions (1.618 / 2.618) and retracements (0.382 / 0.618).
+  - A valid breakout "Confluence Zone" requires a tight mathematical cluster where at least two independent price projections align within a 0.15% margin array. If price breaks out without confluence validation, entry is denied.
+
+[STRATEGY_06: DYNAMIC MOMENTUM CHANNELS (ADVANCED RSI)]
+Source Reference: John Hayden (RSI Complete Guide)
+- ENGINE MODIFICATION: RSI is an absolute momentum tracking vector, not a static boundary layer.
+- BEHAVIORAL EXECUTION CODES:
+  - Bullish Regime Support: During active accumulation, pullbacks must find absolute support within the 40 to 50 RSI channel range. A drop below 40 invalidates intermediate-term bullish conviction.
+  - Momentum Velocity Gate: Tactical breakout signals are only approved for execution if the RSI rate-of-change (ROC) shows positive acceleration concurrent with price crossing structural resistance boundaries.
+
+[STRATEGY_07: SYSTEMATIC ORDER FLOW REJECTION CODES]
+Source Reference: Futures Trading 101
+- TECHNICAL TRIGGER FILTER: Distinguish structural capital participation from retail vacuum spikes.
+- MECHANICAL GATING:
+  - Price spikes tracking into a momentum breakout zone must be accompanied by Level 2 order book depth expansion (bid/ask stacking stability).
+  - Rejection Rule: If the execution cycle encounters immediate bid liquidation ("ghost bids vanishing") upon price entering a technical grid line, the daemon must immediately tag the trend as a liquidity trap and mute the breakout trigger.
+
+[STRATEGY_08: TIME-OF-DAY & CALENDAR BIAS MATRICES]
+Source Reference: Jay Kaeppel (Seasonal Stock Market Trends)
+- SYSTEMIC WEIGHTING FACTOR: The system adjusts internal baseline setup probabilities according to cyclical market conditions.
+- TEMPORAL PARAMETERS:
+  - Midday Doldrums: Orders generated between 11:30 AM and 1:30 PM EST must be filtered with a 35% higher volume threshold verification to counter low-liquidity market noise.
+  - Seasonal Multiplier: Cross-reference active date sequences against long-term historical data arrays to adjust signal conviction scaling.
+
+[STRATEGY_09: DISCORD PAYLOAD COMPLIANCE FORMAT]
+Source Reference: Entering & Exiting Spreads Guide & Lawrence McMillan
+- DATA STRUCTURE: All automated option notifications must utilize standardized JSON payloads mapped directly to native Discord embeds.
+- SCHEMA MANDATE:
+  {
+    "embeds": [{
+      "title": "🚨 OPTIONS STRATEGIC CALLOUT: [TICKER]",
+      "color": "[TIER_COLOR_HEX]",
+      "fields": [
+        {"name": "Strategy Type", "value": "[e.g., Bull Call Debit Spread]", "inline": true},
+        {"name": "Execution Setup", "value": "Buy $[STRIKE_1] / Sell $[STRIKE_2] [EXP_DATE]", "inline": false},
+        {"name": "Risk Capital Matrix", "value": "Max Risk: $[COST] | Max Reward: $[PROFIT]", "inline": true},
+        {"name": "Ecosystem Alignment", "value": "Breakeven: $[BE_PRICE] | Realized Vol Status: [VIX_STATUS]", "inline": false}
+      ]
+    }]
+  }
+================================================================================
+
+Advanced Regime Allocation & Risk Shields
+To expand your baseline Natenberg rules within market_regime.json, use these secondary conditions derived from Sheldon Natenberg’s Option Pricing and Volatility and Lawrence McMillan's Options as a Strategic Investment:
+[REGIME: STABLE / COMPRESSED]
+- Market Context: VIX <= 20
+- Volatility Character: Low realized standard deviation; IV compressing below 30th percentile.
+- Technical Impact: Breakout strategies require explicit high-volume confirmation because false breakouts increase in low-volatility environments.
+- Algorithmic Action: Maximize the RSI entry threshold (`rsi_shield_limit = 68`). Deploy full size allocations for momentum plays.
+
+[REGIME: ELEVATED / SHIFTING]
+- Market Context: 20 < VIX <= 30
+- Volatility Character: IV expansion; realized intraday swings widen; institutional hedging acceleration.
+- Technical Impact: Momentum targets are reached rapidly, but trailing risk must tighten to prevent profit evaporation.
+- Algorithmic Action: Compress execution windows (`rsi_shield_limit = 52`). Transition strategy from wide breakout targets to structured, quick scalp execution patterns.
+
+[REGIME: CRITICAL / OUTLIER DISRUPTION]
+- Market Context: VIX > 30
+- Volatility Character: Intraday distributions exhibit fat tails (leptokurtic). Geometric Brownian motion assumptions fail.
+- Technical Impact: Severe bid-ask spread widening; execution slippage risks increase significantly.
+- Algorithmic Action: Activate system lockdown (`rsi_shield_limit = 40`). Restrict momentum breakout entries exclusively to multi-hour structural level breaches confirmed by volume spikes.
+
+Signal Filtering Logic for Options Flows
+When analyzing institutional conviction via option trade streams, implement these exact filtering matrices to distinguish noise from true directional conviction:
+IF Option_Leg_Type == "CALL" AND Trade_Condition == "At-The-Ask" OR "Above-The-Ask":
+    THEN Action = Assess as Aggressive Bullish Opening Flow
+    IF Delta >= 0.60 AND Days_To_Expiration <= 14:
+        THEN Conviction_Score = "HIGH - Momentum Acceleration / Delta Chasing"
+    ELSE IF Delta <= 0.30 AND Days_To_Expiration > 45:
+        THEN Conviction_Score = "MODERATE - Long-Term Macro Accumulation"
+
+IF Option_Leg_Type == "PUT" AND Trade_Condition == "At-The-Ask" OR "Above-The-Ask":
+    THEN Action = Assess as Aggressive Bearish Opening Flow / Downside Protection
+    IF Delta >= 0.50 AND Days_To_Expiration <= 21:
+        THEN Conviction_Score = "HIGH - Tail Risk Hedging or Short Gamma Trigger Spike"
+
+/ES Breakout Strategy Implementation Rules
+To code an automated breakout module for E-mini S&P 500 futures, execute trades using these specific rules derived from CME and professional trading desks:
+[ENTRY RULE: BREAKOUT CONFIRMATION]
+- Identify a minimum 30-minute consolidation range profile.
+- Trigger buy signal ONLY when price closes above range resistance AND Volume Delta indicates active buying imbalance (>55% buy volume).
+- Cross-reference `vix_status`: If `ELEVATED`, require entry limit to be set within 2 ticks of the breakout line to mitigate immediate pullbacks.
+
+[RISK MANAGEMENT MATRIX]
+- Reward-to-Risk Target Ratio: Minimum 2:1.
+- Protective Stop Configuration: Deploy a multi-tiered structural trailing exit. Initial stop-loss must be pinned 1 tick below the median point of the breakout candle or the structural support line.
+- Breakeven Trigger: Once price advances by the equivalent of 2x the initial risk envelope, automatically shift the stop-loss to breakeven + 1 tick to guard capital.
+- Loss Enforcement: If three consecutive intraday breakdown stops are executed, halt script operations for the cycle to prevent revenge execution cycles during choppy, range-bound markets.
+
+Module 4: VAULT_FINNHUB_DATA_PIPELINE.txt
+Core Focus: Data architecture mapping, API parameters, and integration endpoints for systemic data fetching.
+I. Endpoints Mapping for Signal Processing
+To populate technical features and market variables into trade_signals.py or helper utilities via an execution pipeline, use the following structural JSON payload definitions:
+	•	Real-Time Price Quotes (REST/WebSocket Trigger):
+	◦	Endpoint: GET /quote?symbol={SYMBOL}&token={API_KEY}
+	◦	Response Field Injection Map: JSON  {
+	◦	  "c": "Current Price -> Inject to momentum signal calculations",
+	◦	  "h": "High of day -> Reference for breakout ceiling metrics",
+	◦	  "l": "Low of day -> Reference for trailing stop baselines",
+	◦	  "o": "Open price of the current active session",
+	◦	  "pc": "Previous close -> Daily trend baseline reference"
+	◦	}
+	◦	   
+	•	Historical Candle Bars (OHLCV Arrays):
+	◦	Endpoint: GET /stock/candle?symbol={SYMBOL}&resolution={RES}&from={FROM_STAMP}&to={TO_STAMP}&token={API_KEY}
+	◦	Resolution Parameter Options: 1 (1-min), 5 (5-min), 15 (15-min), D (Daily).
+	◦	Array Parsing Map: Parse array payload fields c (close), h (high), l (low), v (volume) into pandas DataFrames to execute RSI arrays and volatility standard deviation computations.
+	•	Macro Economic Indicator Streams:
+	◦	Endpoint: GET /economic/code?token={API_KEY}
+	◦	Tracking Target Codes for System Overlay:
+	▪	MA-USA-6667797870: ISM Purchasing Managers Index (PMI) -> Tracks structural macro liquidity shifts.
+	▪	MA-USA-656880: 1-Day Repo Rate -> Monitors institutional money-market stress anomalies.
+
+Integration Architecture Map for volatility_sentry.py
+To link these vault components directly into your operational scripts on PythonAnywhere, modify your file parsing structures so your engine continuously checks the market_regime.json blueprint. This keeps execution clean and dynamic:
+                     +---------------------------------------+
+                     |         volatility_sentry.py          |
+                     |  - Monitored Stream: VIX Proxy        |
+                     |  - Logic Reference: VAULT_VOLATILITY  |
+                     +-------------------+-------------------+
+                                         |
+                                         v Writes to
+                     +-------------------+-------------------+
+                     |          market_regime.json           |
+                     |  Holds: rsi_shield_limit, vix_status |
+                     +-------------------+-------------------+
+                                         |
+                                         v Reads from
+                     +-------------------+-------------------+
+                     |          trade_signals.py             |
+                     |  - Fetches: Finnhub Candles/Quotes    |
+                     |  - Logic Reference: VAULT_BREAKOUT    |
+                     |  - Evaluates: RSI against shield      |
+                     +-------------------+-------------------+
+                                         |
+                                         v Triggers
+                     +-------------------+-------------------+
+                     |         Discord Webhooks              |
+                     |  - Broadcasts Alerts instantly        |
+                     +---------------------------------------+
