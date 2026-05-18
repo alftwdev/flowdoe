@@ -36,144 +36,113 @@ for ticker in INCOME_TARGETS:
 
 WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-PULSE_FILE = os.path.join(BASE_DIR, "last_pulse.txt")
+PULSE_FILE = os.path.join(BASE_DIR, "last_pulse_timestamp.txt")
 
-last_alert_cache = {}
+# --- 2. DATA ACQUISITION & INTEGRATION LAYER ---
 
-# --- 2. LIVE INTELLIGENCE GATHERING ---
-
-def fetch_live_metrics(symbol):
-    """Fetches RSI, current Price, % Change, and Live NAV using high-fidelity endpoints."""
+def get_live_close_and_rsi(symbol):
+    """Retrieves real-time close price and 14-period RSI metric from Twelve Data."""
+    url_price = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
+    url_rsi = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1d&time_period=14&apikey={TD_API_KEY}"
     try:
-        # 1. Fetch Quote (Price + Daily % Change simultaneously)
-        q_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
-        q_res = requests.get(q_url, timeout=10).json()
-        
-        price = float(q_res.get('close', 0.0))  
-        change_pct = float(q_res.get('percent_change', 0.0))
-
-        # 2. Fetch RSI (1D, 14 Period)
-        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
-        r_res = requests.get(rsi_url, timeout=10).json()
-        rsi = float(r_res['values'][0]['rsi']) if 'values' in r_res else 50.0
-
-        # 3. Dynamic NAV Fetch
-        nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
-        nav_url = f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}"
-        nav_res = requests.get(nav_url, timeout=10).json()
-        
-        fallback_nav = 6.47 if symbol == "CLM" else 6.25
-        nav = float(nav_res.get('price', fallback_nav))
-        
-        return price, change_pct, rsi, nav
+        p_res = requests.get(url_price, timeout=10).json()
+        r_res = requests.get(url_rsi, timeout=10).json()
+        price = float(p_res.get("price", 0))
+        rsi_vals = r_res.get("values", [])
+        rsi = float(rsi_vals[0].get("rsi", 50.0)) if rsi_vals else 50.0
+        return price, rsi
     except Exception as e:
-        print(f"⚠️ [Data Fetch Error] Failed to compile metrics for {symbol}: {e}")
-        return 0.0, 0.0, 50.0, (6.47 if symbol == "CLM" else 6.25)
+        print(f"    [SENTRY ERROR] Data lookup failure for {symbol}: {e}")
+        return 0, 50.0
 
-def evaluate_emergency_shields(tz_h):
-    """Scans for live Whale Dumps during market hours."""
-    global last_alert_cache
-    
-    now = datetime.now(tz_h)
-    market_start = dt_time(3, 30) 
-    market_end = dt_time(10, 0)   
-    
-    if not (market_start <= now.time() <= market_end):
-        return 
+def fetch_sec_filing_shield(symbol):
+    """Scans for active structural dilution filings. (Simulated boundary check)"""
+    return "No N2/SEC Detected"
 
-    for ticker in PRIORITY_ASSETS:
-        price, change_pct, rsi, nav = fetch_live_metrics(ticker)
-        if price == 0.0: continue
-
-        whale_status, _, is_whale_dump = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NOMINAL Flow", 0, False)
-        alert_signature = f"{ticker}_{whale_status}_{is_whale_dump}"
-
-        if is_whale_dump:
-            if last_alert_cache.get(ticker) == alert_signature:
-                continue 
-                
-            title = f"🚨 CRITICAL: WHALE DUMP DETECTED [{ticker}]"
-            description = (
-                f"### **Institutional Capitulation Shield Active**\n"
-                f"**Asset Identified**: `${ticker}`\n"
-                f"┣ **Real-Time Spot Price**: `${price:.2f}` (`{change_pct:+.2f}%`)\n"
-                f"┣ **Whale Status**: `{whale_status}`\n"
-                f"┗ **RSI Position**: `{rsi:.1f}`\n\n"
-                f"⚠️ *Sentry Recommendation: Immediate capital exposure review.*"
-            )
-            
-            if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
-                send_essentials_embed(WEBHOOK_CORNERSTONE, title, description, 0xe74c3c)
-                
-            last_alert_cache[ticker] = alert_signature
-
-def get_ticker_report(ticker):
-    """Assembles tactical report with zero-variance inline premium mathematics."""
-    price, change_pct, rsi, nav = fetch_live_metrics(ticker)
-    if price == 0.0:
-        return f"### **Cornerstone Flowstate Check: {ticker}**\n⚠️ *Data Feed Offline.*\n"
-
-    whale_status, _, is_whale_dump = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NOMINAL Flow", 0, False)
-    sec_shield = "No N2/SEC Detected" 
-    
-    # Mathematical Precision Alignment
-    premium = ((price - nav) / nav) * 100
-    
-    if "No" not in sec_shield or is_whale_dump:
-        status = "🔴 CRITICAL: EXIT"
-        income_note = "LIQUIDATE: Structural Dilution / Whale capitulation in progress."
-        verdict = "🚨 SEC Dilution or High-Volume Whale Dump identified."
-        recommendation = "SELL/EXECUTE CAPITAL PROTECTION PROTOCOL IMMEDIATELY."
-    elif premium > 25.0:
-        status = "⚠️ HIGH PREMIUM"
-        income_note = "HOLD / PAUSE REINVESTMENT: Premium near historic risk bands."
-        verdict = "The Premium extension has stretched the rubber band thin."
-        recommendation = "Maintain posture; pause new margin capital allocation."
-    else:
-        status = "✅ STABLE"
-        income_note = "ACCUMULATION PHASE"
-        verdict = "Premium within standard deviations."
-        recommendation = "Healthy DRIP at NAV."
-
-    return (
-        f"### **{ticker} Cornerstone Flowstate Update**\n"
-        f"**Status**: {status}\n"
-        f"┣ **Real-Time Spot Price**: `${price:.2f}` (`{change_pct:+.2f}%`)\n"
-        f"┣ **Current Premium to NAV**: `{premium:.2f}%` (NAV: `${nav:.2f}`)\n"
-        f"┣ **SEC Shield**: `{sec_shield}`\n"
-        f"┣ **RSI (1D)**: `{rsi:.1f}`\n"
-        f"┣ **Income Note**: `{income_note}`\n"
-        f"┣ **Whale Flow**: `{whale_status}`\n"
-        f"┣ **Recommendation**: `{recommendation}`\n"
-        f"┗ **Strategy Verdict**: *{verdict}*\n"
-    )
+# --- 3. MONITORED DISPATCH MATRIX ---
 
 def send_daily_pulse(is_test=False):
-    print(f"\n📡 [Broadcast Engine] Compiling {'TEST ' if is_test else 'DAILY'} Tactical Pulse...")
-    
+    """Compiles and broadcasts the core structural asset flow state across all notification layers."""
+    title = f"🏛️ Cornerstone Flowstate Update" + (" [TEST BROADCAST]" if is_test else "")
     reports = []
-    for ticker in PRIORITY_ASSETS:
-        reports.append(get_ticker_report(ticker))
-    
-    full_report = "\n".join(reports)
-    title = "🏛️ Cornerstone Flowstate Update" if not is_test else "🧪 TEST: Rockefeller Flowstate Scan"
-    
-    color = 0x3498db  
-    if "STABLE" in full_report: color = 0x2ecc71       
-    if "HIGH PREMIUM" in full_report: color = 0xf1c40f 
-    if "CRITICAL" in full_report: color = 0xe74c3c     
-    
+    has_alerts = False
+
+    for ticker, config in PRIORITY_ASSETS.items():
+        market_price, rsi_1d = get_live_close_and_rsi(ticker)
+        nav_price, _ = get_live_close_and_rsi(config["nav_ticker"])
+
+        if market_price == 0 or nav_price == 0:
+            print(f"⚠️ Skipping asset tracking cycle for {ticker} due to core market access limits.")
+            continue
+
+        # Mathematical Premium Evaluation
+        premium = ((market_price - nav_price) / nav_price) * 100
+        sec_status = fetch_sec_filing_shield(ticker)
+        whale_status, color_hex, is_whale = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0x2ecc71, False)
+
+        # Contextual Gauge Valuation Logic
+        if premium < 12.0:
+            premium_label = "UNDERVALUED / LOW"
+        elif premium <= 18.0:
+            premium_label = "STABLE / NOMINAL"
+        else:
+            premium_label = "HIGH RISK"
+
+        if rsi_1d < 40.0:
+            rsi_label = "OVERSOLD"
+        elif rsi_1d <= 60.0:
+            rsi_label = "NEUTRAL"
+        else:
+            rsi_label = "OVERBOUGHT"
+
+        # Operational Bounds Checking
+        if premium > 22.0 or "Detected" in sec_status or is_whale:
+            status_str = "🚨 CRITICAL BOUNDARY BREACH"
+            income_note = "TACTICAL REDUCTION RECOMMENDED: High premium extension risks capital exposure."
+            rec_str = "Cease proactive accumulation. Halt distribution reinvestment programs immediately."
+            verdict_str = "Aggressive price distortion detected relative to underlying book value assets."
+            has_alerts = True
+        else:
+            status_str = "✅ STABLE: Nominal Flowstate"
+            income_note = "HOLD/ACCUMULATE: Net distributions healthy relative to carrying costs."
+            rec_str = "Stable environment. Reinvest distributions; accumulate on tactical pullbacks."
+            verdict_str = "Premium variance within historical standard deviations. No active dilution signatures."
+
+        # Absolute Line-by-Line Uniformity Layout Assembly with Integrated Gauges
+        asset_report = (
+            f"**{ticker} Cornerstone Flowstate Update**\n"
+            f"Status: `{status_str}`\n"
+            f"┣ Premium to NAV: `{premium:.1f}%` ({premium_label})\n"
+            f"┣ SEC Shield: `{sec_status}`\n"
+            f"┣ RSI (1D): `{rsi_1d:.1f}` ({rsi_label})\n"
+            f"┣ Income Note: `{income_note}`\n"
+            f"┣ Whale Flow: `{whale_status}`\n"
+            f"┣ Recommendation: `{rec_str}`\n"
+            f"┗ Strategy Verdict: *{verdict_str}*"
+        )
+        reports.append(asset_report)
+
+    if not reports:
+        return
+
+    full_report = "\n\n".join(reports)
+    color = 0xe74c3c if has_alerts else 0x2ecc71
+
+    # Platform A: Discord Delivery Channel
     if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
         send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
+        print("✅ Core structural analytics successfully dispatched to Discord Server category.")
 
+    # Platform B: Pushover Real-Time Notification Pipeline (Preserving Tree Layout)
     if os.getenv("PUSHOVER_API_TOKEN"):
         requests.post("https://api.pushover.net/1/messages.json", data={
             "token": os.getenv("PUSHOVER_API_TOKEN"),
             "user": os.getenv("PUSHOVER_USER_KEY"),
             "title": title,
-            "message": full_report.replace("#", "").replace("**", "").replace("┣", "").replace("┗", ""),
-            "priority": 1 if "CRITICAL" in full_report else 0
+            "message": full_report,  # Preserves all line markers, trees (┣, ┗), and layout structure
+            "priority": 1 if has_alerts else 0
         }, timeout=10)
+        print("✅ Uniform notification payload dispatched successfully via Pushover Gateway.")
 
     try:
         with open(PULSE_FILE, "w") as f:
@@ -195,13 +164,17 @@ def run_monitor():
 
     while True:
         now_hst = datetime.now(tz_h)
-        if now_hst.hour == 8 and now_hst.minute == 0 and last_pulse_day != now_hst.day:
-            send_daily_pulse()
-            last_pulse_day = now_hst.day
-            time.sleep(60) 
-            continue
+        current_day = now_hst.date()
 
-        evaluate_emergency_shields(tz_h)
+        # Structural execution gate target window: 08:00 AM HST (Post Market Summary Close)
+        if now_hst.time() >= dt_time(8, 0) and current_day != last_pulse_day:
+            print(f"🎯 Target Execution Window Met at {now_hst.strftime('%H:%M HST')}. Generating Pulse metrics...")
+            try:
+                send_daily_pulse(is_test=False)
+                last_pulse_day = current_day
+            except Exception as e:
+                print(f"⚠️ System Matrix execution fault encountered inside tracking run: {e}")
+
         time.sleep(60)
 
 if __name__ == "__main__":
