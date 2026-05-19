@@ -24,7 +24,7 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOKS = {
     "FUTURES": os.getenv("WEBHOOK_FUTURES_TRADING"),
     "OPTIONS": os.getenv("WEBHOOK_TRADE_SIGNALS"),
-    "SENTRY": os.getenv("WEBHOOK_MARKET_ANALYSIS")  # Houses the passive "Why" suppression logs
+    "SENTRY": os.getenv("WEBHOOK_MARKET_ANALYSIS")  # Maintained for system fallback
 }
 
 # Targeted Watchlist Structures
@@ -131,8 +131,9 @@ def execute_signal_scan(is_test=False):
                 log_event(f"Successfully routed pristine trade signal alert for {symbol} to {asset_class} webhook.")
 
             else:
-                # --- EFFICIENT ANTI-NOISE LAYER: DISPATCH CHOP MONITORS ---
-                if not WEBHOOKS["SENTRY"]:
+                # --- EFFICIENT ANTI-NOISE LAYER: DISPATCH CHOP MONITORS TO TARGET CHANNEL ---
+                if not target_webhook:
+                    log_event(f"Suppression routing skipped: Missing target endpoint for {asset_class}.", "WARNING")
                     continue
 
                 filter_trigger = "Order flow trend divergence or weak conviction volume thresholds."
@@ -159,8 +160,10 @@ def execute_signal_scan(is_test=False):
                         "footer": {"text": "Rockefeller Sentry Shield"}
                     }]
                 }
-                requests.post(WEBHOOKS["SENTRY"], json=payload, timeout=10)
-                log_event(f"Passive anti-noise telemetry logged cleanly for filtered asset: {symbol}.")
+                
+                # Dispatches directly to the corresponding futures or options webhook
+                requests.post(target_webhook, json=payload, timeout=10)
+                log_event(f"Passive anti-noise telemetry logged cleanly for filtered asset: {symbol} directly to {asset_class} channel.")
 
         except Exception as e:
             log_event(f"Signal scan handling error encountered for asset entry {symbol}: {e}", "ERROR")
