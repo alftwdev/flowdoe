@@ -1,4 +1,5 @@
 import requests
+import logging
 import json
 import datetime  # FIXED: Added missing import
 
@@ -63,3 +64,16 @@ def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
         requests.post(webhook_url, json=payload, timeout=15)
     except Exception as e:
         print(f"    [TOOLS] Discord Broadcast Failed: {e}")
+
+# Configure logger
+logging.basicConfig(
+    filename='ecosystem.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def log_event(message, level="INFO"):
+    if level == "ERROR":
+        logging.error(message)
+    else:
+        logging.info(message)        

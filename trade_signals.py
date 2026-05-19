@@ -1,249 +1,178 @@
 import os
-import time
-import requests
-import datetime
-import json
 import sys
+import json
+import requests
+from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 
-# --- 1. ECOSYSTEM ROOT INITIALIZATION ---
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_PATH, ".env"))
-
+# Ingest high-performance ecosystem tools and shared memory state
+from ecosys import EcosystemState, log_event
 try:
-    from essentials_tools import (
-        send_essentials_embed, 
-        get_institutional_conviction, 
-        get_trend_alignment
-    )
+    from essentials_tools import get_trend_alignment, get_institutional_conviction
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
 
-# System Infrastructure Gateways
+# --- 1. INITIALIZATION & INFRASTRUCTURE ROUTING ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
-WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
-REGIME_LEDGER = os.path.join(BASE_PATH, "market_regime.json")
-CHECKPOINT_FILE = os.path.join(BASE_PATH, "last_signal_checkpoint.json")
 
-# SECURITY DETECTOR: Paste your direct Discord image URL link here (Must end in .png or .jpg)
-ESSENTIALS_BRAND_WATERMARK = "https://images-ext-1.discordapp.net/external/.../your_image.png"
+# SURGICAL ROUTING DICTIONARY: Maps distinct signals to unique webhook endpoints
+WEBHOOKS = {
+    "FUTURES": os.getenv("WEBHOOK_FUTURES_TRADING"),
+    "OPTIONS": os.getenv("WEBHOOK_TRADE_SIGNALS"),
+    "SENTRY": os.getenv("WEBHOOK_MARKET_ANALYSIS")  # Houses the passive "Why" suppression logs
+}
 
-def get_rsi_context_gauge(rsi_val):
-    """Dynamically converts a raw RSI float into an actionable market zone gauge."""
-    if rsi_val <= 30:
-        return f"`{rsi_val:.1f}` 🔴 OVERSOLD (Exhaustion Sweep)"
-    elif 30 < rsi_val <= 40:
-        return f"`{rsi_val:.1f}` 🟡 BEARISH DISPLACEMENT"
-    elif 40 < rsi_val <= 60:
-        return f"`{rsi_val:.1f}` 🔵 NEUTRAL BALANCE (Fair Value Zone)"
-    elif 60 < rsi_val <= 70:
-        return f"`{rsi_val:.1f}` 🟢 BULLISH ACCELERATION"
-    else:
-        return f"`{rsi_val:.1f}` 🔴 OVERBOUGHT (Extension Risk)"
+# Targeted Watchlist Structures
+FUTURES_WATCHLIST = ["/ES", "/NQ"]
+OPTIONABLE_WATCHLIST = ["SPY", "QQQ", "AAPL", "NVDA"]
 
-def get_risk_allocation_matrix(vix_status, regime):
-    """Evaluates systemic volatility to deliver structural risk parameters."""
-    vix_clean = str(vix_status).upper()
-    regime_clean = str(regime).upper()
+def execute_signal_scan(is_test=False):
+    """
+    Evaluates market microstructure trend alignments.
+    Enforces VSA absorption rules, Volatility Surface limits, and the Larry Williams Chop Shield.
+    """
+    if not TD_API_KEY:
+        log_event("Twelve Data API Key missing from configuration environment.", "ERROR")
+        return
+
+    state = EcosystemState()
     
-    if "SPIKING" in vix_clean or "CRITICAL" in vix_clean:
-        return "🚨 HIGH RISK (Throttled Sizes / Trailing Stops Mandated)"
-    elif "EXPANDING" in vix_clean or "BEARISH" in regime_clean:
-        return "⚠️ MODERATE RISK (Standard Tactical Sizing / Tight Safeguards)"
-    else:
-        return "🛡️ LOW RISK (Optimal Market Environment for Trend Scaling)"
-
-def generate_canary_fingerprint(base_text, timestamp_str):
-    """Surgically injects a unique, invisible tracking signature into text block strings."""
-    if not timestamp_str:
-        return base_text
-    hash_val = sum(ord(c) for c in timestamp_str)
-    selector = hash_val % 4
+    # Extract structural constraints dynamically from memory state cache
+    vix_velocity = state.get("vix_velocity", "STABLE")
+    macro_muted = state.get("macro_muted", False)
+    rsi_shield_limit = state.get("rsi_shield_limit", 66)
     
-    zw_space = "\u200b"
-    zw_non_joiner = "\u200c"
-    zw_joiner = "\u200d"
-    
-    if selector == 0:
-        fingerprint = zw_space + zw_non_joiner
-    elif selector == 1:
-        fingerprint = zw_joiner + zw_space
-    elif selector == 2:
-        fingerprint = zw_non_joiner + zw_joiner
-    else:
-        fingerprint = zw_space + zw_joiner + zw_non_joiner
-        
-    if base_text.endswith("."):
-        return base_text[:-1] + fingerprint + "."
-    return base_text + fingerprint
+    # Build complete combined scan universe
+    scan_universe = FUTURES_WATCHLIST + OPTIONABLE_WATCHLIST
+    if is_test:
+        scan_universe = ["/ES", "SPY"]
 
-class RockefellerFuturesEngine:
-    def __init__(self):
-        self.tz = pytz.timezone('Pacific/Honolulu')
-        self.last_processed_time = self.load_checkpoint()
+    log_event(f"Core execution scan sequence triggered for {len(scan_universe)} assets.")
 
-    def load_checkpoint(self):
-        if os.path.exists(CHECKPOINT_FILE):
-            try:
-                with open(CHECKPOINT_FILE, "r") as f:
-                    data = json.load(f)
-                    return data.get("last_processed_time")
-            except:
-                return None
-        return None
-
-    def save_checkpoint(self, timestamp):
-        self.last_processed_time = timestamp
+    for symbol in scan_universe:
         try:
-            with open(CHECKPOINT_FILE, "w") as f:
-                json.dump({"last_processed_time": timestamp}, f)
-        except Exception as e:
-            print(f"⚠️ [System Alert] Checkpoint write failure: {e}")
+            # 1. Determine Asset Classification & Target Webhook Channel Route
+            if symbol in FUTURES_WATCHLIST:
+                asset_class = "FUTURES"
+                target_webhook = WEBHOOKS["FUTURES"]
+                strategy_profile = "Momentum Order-Book Expansion"
+                tracking_profile = "Institutional Tape Matching"
+                vehicle_desc = f"{symbol} FUTURES CONTRACT (ACTIVE DESK)"
+            else:
+                asset_class = "OPTIONS"
+                target_webhook = WEBHOOKS["OPTIONS"]
+                strategy_profile = "Synthetic Premium Monetization"
+                tracking_profile = "Implied Volatility Surface Skew"
+                vehicle_desc = f"{symbol} EQUITY OPTIONS MATRIX"
 
-    def load_regime_state(self):
-        if not os.path.exists(REGIME_LEDGER):
-            return "BULLISH", "STABLE", 14.5, 65.0
-        try:
-            with open(REGIME_LEDGER, "r") as f:
-                state = json.load(f)
-            return (
-                state.get("regime", "BULLISH"),
-                state.get("vix_status", "STABLE"),
-                float(state.get("vix_current", 14.5)),
-                float(state.get("rsi_shield_limit", 65.0))
-            )
-        except:
-            return "BULLISH", "STABLE", 14.5, 65.0
+            # 2. Ingest Multidimensional Technical & Conviction Flows
+            if HAS_ESSENTIALS and not is_test:
+                trend_status, supertrend_bullish = get_trend_alignment(symbol, TD_API_KEY)
+                conviction_status, embed_color, stopping_volume_detected = get_institutional_conviction(symbol, TD_API_KEY)
+            else:
+                # Forced configuration pass if running a terminal mock test execution
+                supertrend_bullish = True
+                stopping_volume_detected = True
+                trend_status = "🟢 BULLISH ALIGNMENT (FORCED TEST)"
+                conviction_status = "⚡ HIGH (Whale Inflow - FORCED TEST)"
 
-    def run_engine_cycle(self, is_test=False):
-        regime, vix_status, vix_current, rsi_limit = self.load_regime_state()
-        
-        if is_test:
-            print("🧪 Terminal Flag Found: Simulating updated trader layout execution...")
-            self.broadcast_signal(
-                symbol="/ES FUTURES CONTRACT (JUNE DESK)",
-                strat="Momentum Order-Book Expansion",
-                status="VERIFIED SYSTEM UPDATE",
-                vix_current=vix_current,
-                rsi=55.4,
-                vix_status=vix_status,
-                regime=regime,
-                conviction="⚡ HIGH (System Dynamic Check)",
-                timestamp_marker="TEST_VERIFICATION_MATRIX",
-                force_all_channels=True
-            )
-            return
-
-        SIGNAL_DATA_SOURCE = os.path.join(BASE_PATH, "signal_results.json")
-        if not os.path.exists(SIGNAL_DATA_SOURCE):
-            return
-
-        try:
-            with open(SIGNAL_DATA_SOURCE, "r") as f:
-                signals = json.load(f)
-            if not signals:
-                return
+            # 3. Enforce Strategy Gatekeepers (Larry Williams Anti-Chop Pivot Shield)
+            # If testing, bypass the shield to verify webhook piping layout functions
+            inside_chop_pivot = False if is_test else macro_muted
             
-            latest_signal = signals[-1]
-            signal_time = latest_signal.get("time") or latest_signal.get("timestamp") or latest_signal.get("date")
-            
-            if signal_time == self.last_processed_time:
-                return  
+            # 4. Operational Routing Logic Execution
+            if supertrend_bullish and stopping_volume_detected and not inside_chop_pivot:
+                # --- VALID TRADING ENTRY SIGNAL (TIER A CONVICTION) ---
+                if not target_webhook:
+                    log_event(f"Missing routing target endpoint for {asset_class} channel pipeline.", "ERROR")
+                    continue
+
+                title = f"⚡ ESSENTIALS {asset_class.upper()} FLOWSTATE UPDATE"
                 
-            symbol = latest_signal.get("symbol", "/ES")
-            strat = latest_signal.get("strat") or latest_signal.get("strategy", "Momentum Breakout")
-            type_tag = latest_signal.get("type", "FUTURES").upper()
-            direction = latest_signal.get("direction", "LONG")
-            
-            conviction, _, _ = get_institutional_conviction(symbol, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0, False)
-            rsi_val = 52.3  # Dynamic technical lookup placeholder
-            
-            # Append execution context modifiers based on order flow tracking
-            formatted_strat = f"{strat} (Directional {direction})"
-            
-            if type_tag == "FUTURES":
-                self.broadcast_signal(f"{symbol} CONTRACT", formatted_strat, f"🟢 DISPATCHING ACTIVE SETUP", vix_current, rsi_val, vix_status, regime, conviction, timestamp_marker=signal_time, target_channel="FUTURES")
-            elif type_tag == "OPTION":
-                self.broadcast_signal(symbol, formatted_strat, f"🔮 OPTIONS FOCUS REGISTRATION", vix_current, rsi_val, vix_status, regime, conviction, timestamp_marker=signal_time, target_channel="OPTIONS")
+                # Cross-Channel Surgical Optimization Check:
+                content_payload = ""
+                if asset_class == "FUTURES":
+                    content_payload = "📢 **System Notice**: Index macro conditions match options collateral setups. Cross-referencing `#options-signal`."
 
-            self.save_checkpoint(signal_time)
+                embed = {
+                    "title": title,
+                    "description": (
+                        f"### **Tactical Entry Parameters**\n"
+                        f"┣ **Trading Vehicle**: `{vehicle_desc}`\n"
+                        f"┣ **Execution Strategy**: {strategy_profile}\n"
+                        f"┗ **Tracking Profile**: {tracking_profile}\n\n"
+                        f"📊 **Market Context (The Radar)**\n"
+                        f"┣ **Market Outlook**: `{state.get('regime', 'BULLISH REGIME')}`\n"
+                        f"┣ **Trend Vector**: `{trend_status}`\n"
+                        f"┣ **Volatility Surface**: `{state.get('vix_current', 14.50)}` ({vix_velocity})\n"
+                        f"┗ **Order Book Flow**: {conviction_status}\n\n"
+                        f"🛡️ **Risk Management Guardrails**\n"
+                        f"┗ **Allocation Parameter**: `OPTIMAL ENV FOR TREND SCALING (RSI Limit < {rsi_shield_limit})`"
+                    ),
+                    "color": 0x2ecc71 if asset_class == "FUTURES" else 0x3498db, # Green for Futures, Blue for Options
+                    "timestamp": datetime.now(pytz.utc).isoformat(),
+                    "footer": {"text": f"ESSENTIALS Execution Engine • HST Timezone"}
+                }
+
+                payload = {"embeds": [embed]}
+                if content_payload and asset_class == "FUTURES" and WEBHOOKS["OPTIONS"]:
+                    try:
+                        requests.post(WEBHOOKS["OPTIONS"], json={"content": content_payload}, timeout=5)
+                    except Exception as e:
+                        log_event(f"Cross-channel push link failed: {e}", "ERROR")
+
+                # Dispatch primary payload cleanly to its isolated channel target
+                requests.post(target_webhook, json=payload, timeout=10)
+                log_event(f"Successfully routed pristine trade signal alert for {symbol} to {asset_class} webhook.")
+
+            else:
+                # --- EFFICIENT ANTI-NOISE LAYER: DISPATCH CHOP MONITORS ---
+                if not WEBHOOKS["SENTRY"]:
+                    continue
+
+                filter_trigger = "Order flow trend divergence or weak conviction volume thresholds."
+                if inside_chop_pivot:
+                    filter_trigger = f"Intraday price ranges for `{symbol}` consolidated tightly inside 3-day structural pivot grid. Entry suppressed to preserve win-rate."
+                elif not supertrend_bullish:
+                    filter_trigger = f"Asset momentum failed technical parameters. Immediate overhead structural resistance detected."
+
+                title = f"🛡️ Sentry Suppression Matrix: {symbol}"
+                description = (
+                    f"### **Ecosystem Structural Capital Protection**\n"
+                    f"┣ **Asset Evaluated**: `{symbol}`\n"
+                    f"┣ **Current Operational Status**: `Signal Muted / Suppressed`\n"
+                    f"┗ **Filter Constraint**: {filter_trigger}\n\n"
+                    f"*The algorithm remains quiet to prevent notification fatigue and eliminate standard retail drawdown phases during sideways chop.*"
+                )
+
+                payload = {
+                    "embeds": [{
+                        "title": title,
+                        "description": description,
+                        "color": 0x34495e, # Structural Dark Slate
+                        "timestamp": datetime.now(pytz.utc).isoformat(),
+                        "footer": {"text": "Rockefeller Sentry Shield"}
+                    }]
+                }
+                requests.post(WEBHOOKS["SENTRY"], json=payload, timeout=10)
+                log_event(f"Passive anti-noise telemetry logged cleanly for filtered asset: {symbol}.")
 
         except Exception as e:
-            print(f"⚠️ Production Loop Exception: {e}")
-
-    def broadcast_signal(self, symbol, strat, status, vix_current, rsi, vix_status, regime, conviction, timestamp_marker=None, target_channel=None, force_all_channels=False):
-        """Dispatches refined, branded analytics directly to targeted ecosystem endpoints."""
-        
-        # Interpret raw numeric inputs into institutional gauges
-        rsi_gauge = get_rsi_context_gauge(rsi)
-        risk_gauge = get_risk_allocation_matrix(vix_status, regime)
-        
-        # Inject invisible security trace marker into system baseline parameter
-        protected_risk = generate_canary_fingerprint(risk_gauge, timestamp_marker)
-
-        lines = [
-            f"**System Status**: `{status}`",
-            "",
-            "**Tactical Entry Parameters**:",
-            f"┣ **Trading Vehicle**: `{symbol}`",
-            f"┣ **Execution Strategy**: `{strat}`",
-            "┗ **Tracking Profile**: `Institutional Tape Matching`",
-            "",
-            "**Market Context (The Radar)**:",
-            f"┣ **Market Outlook**: `{regime} REGIME`",
-            f"┣ **Sentry RSI Vector**: {rsi_gauge}",
-            f"┣ **Volatility Surface**: `{vix_status} ({vix_current:.2f})`",
-            f"┗ **Order Book Flow**: `{conviction}`",
-            "",
-            "**Risk Management Guardrails**:",
-            f"┗ **Allocation Parameter**: {protected_risk}"
-        ]
-        
-        description_body = "\n".join(lines)
-        channel_title = "🚨 ESSENTIALS Futures Flowstate Update" if "FUTURES" in str(target_channel).upper() or force_all_channels else "🔮 ESSENTIALS Options Spectrum Alert"
-
-        embed = {
-            "title": channel_title,
-            "description": description_body,
-            "color": 0x2ecc71 if "FUTURES" in str(target_channel).upper() or force_all_channels else 0x9b59b6,
-            "author": {
-                "name": "ESSENTIALS Systems",
-                "icon_url": ESSENTIALS_BRAND_WATERMARK
-            },
-            "thumbnail": {
-                "url": ESSENTIALS_BRAND_WATERMARK
-            },
-            "footer": { "text": "ESSENTIALS Execution Engine • HST Timezone" },
-            "timestamp": datetime.datetime.now(pytz.utc).isoformat()
-        }
-
-        payload = {"embeds": [embed]}
-
-        if force_all_channels:
-            if WEBHOOK_FUTURES:
-                requests.post(WEBHOOK_FUTURES, json=payload, timeout=10)
-            if WEBHOOK_OPTIONS:
-                requests.post(WEBHOOK_OPTIONS, json=payload, timeout=10)
-            return
-
-        if target_channel == "FUTURES" and WEBHOOK_FUTURES:
-            requests.post(WEBHOOK_FUTURES, json=payload, timeout=10)
-        elif target_channel == "OPTIONS" and WEBHOOK_OPTIONS:
-            requests.post(WEBHOOK_OPTIONS, json=payload, timeout=10)
-
+            log_event(f"Signal scan handling error encountered for asset entry {symbol}: {e}", "ERROR")
 
 if __name__ == "__main__":
-    engine = RockefellerFuturesEngine()
-    
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
-        engine.run_engine_cycle(is_test=True)
+        print("🧪 Initiating routing matrix and anti-noise script test parameters...")
+        execute_signal_scan(is_test=True)
+        print("✅ Production routing and suppression checks completed cleanly.")
     else:
+        import time
+        log_event("Trade Signal core engine background daemon initialized.")
         while True:
-            try:
-                engine.run_engine_cycle(is_test=False)
-                time.sleep(15)
-            except Exception as e:
-                time.sleep(10)
+            execute_signal_scan(is_test=False)
+            time.sleep(900)

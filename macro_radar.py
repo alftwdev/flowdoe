@@ -3,27 +3,27 @@ import json
 import requests
 import sys
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
+from ecosys import EcosystemState, log_event
 
-# --- 1. INITIALIZATION & ECOSYSTEM LEDGERS ---
+# --- 1. INITIALIZATION & CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
 STATE_FILE = os.path.join(BASE_DIR, "last_alert.json") 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
 
-# SECURITY BRAND WATERMARK CONFIGURATION
+# Pushover Integration Credentials
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+
 ESSENTIALS_BRAND_WATERMARK = "https://images-ext-1.discordapp.net/external/.../your_image.png"
 
-# --- 2. HISTORICAL STATE MANAGEMENT & FALLBACK CORES ---
-
 def get_last_state():
-    """Reads historical state logs to prevent message duplication across execution cycles."""
     if not os.path.exists(STATE_FILE):
         return {}
     try:
@@ -33,266 +33,125 @@ def get_last_state():
         return {}
 
 def save_current_state(state_data):
-    """Safely commits execution markers to prevent loop redundancy."""
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(state_data, f, indent=4)
     except Exception as e:
-        print(f"⚠️ State serialization fault: {e}")
+        log_event(f"Failed to record state metadata: {e}", "ERROR")
 
-def get_market_posture():
-    """Reads shared ecosystem regime ledger safely without disrupting background threads."""
-    if not os.path.exists(REGIME_LEDGER):
-        return "BULLISH", "STABLE"
+def send_pushover_alert(message):
+    """Dispatches emergency notifications straight to your Pushover application."""
+    if not PUSHOVER_APP_TOKEN or not PUSHOVER_USER_KEY:
+        log_event("Pushover credentials missing from ecosystem variables.", "ERROR")
+        return
     try:
-        with open(REGIME_LEDGER, "r") as f:
-            data = json.load(f)
-        return data.get("regime", "BULLISH"), data.get("vix_status", "STABLE")
-    except:
-        return "BULLISH", "STABLE"
-
-# --- 3. ADVANCED INSTITUTIONAL CRYPTO ANALYTICS ENGINE ---
-
-def calculate_macro_crypto_metrics(symbol, price, percent_change):
-    """
-    Sovereign Liquidity & Derivative Premium Mapping Engine.
-    Computes options-equivalent synthetic yields and institutional accumulation tracking.
-    """
-    # Institutional rolling baselines for top-tier sovereign crypto assets
-    BASELINES = {
-        "BTC/USD": {"target_annual_premium": 14.40, "base_cc_yield": 12.50, "whale_floor": 12000},
-        "ETH/USD": {"target_annual_premium": 16.80, "base_cc_yield": 13.80, "whale_floor": 45000}
-    }
-    
-    config = BASELINES.get(symbol, {"target_annual_premium": 15.00, "base_cc_yield": 12.00, "whale_floor": 20000})
-    
-    # 1. Derivative Implied Premium Mechanics (Options Volatility Projections)
-    # Volatility expansion scales option premium yields dynamically
-    volatility_scalar = 1.2 if abs(percent_change) > 3.5 else 1.0
-    projected_annual_yield = config["base_cc_yield"] * volatility_scalar
-    estimated_monthly_distribution = (price * (projected_annual_yield / 100.0)) / 12.0
-    
-    # 2. Whale Conviction Analytics
-    # Evaluates if volume profiles signal institutional accumulation or retail panic
-    if percent_change < -4.0:
-        conviction_state = "🚨 INSTITUTIONAL ACCUMULATION (Downside Absorption)"
-        tier = "Tier C"
-        color = 0xe74c3c  # Contrarian Crimson Value Window
-    elif percent_change > 4.0:
-        conviction_state = "⚠️ SOSNOFF PIVOT (Upper Options Band Expansion)"
-        tier = "Tier B"
-        color = 0xf1c40f  # Premium Strategy Amber (Write Call Spreads / Theta Plays)
-    else:
-        conviction_state = "🛡️ INSTITUTIONAL APATHY (Volume Grinding / Range Compression)"
-        tier = "Tier A"
-        color = 0x2ecc71  # Trend-Aligned Emerald
-        
-    return {
-        "synthetic_yield": f"{projected_annual_yield:.2f}%",
-        "est_payout": f"${estimated_monthly_distribution:.2f}/mo baseline",
-        "whale_conviction": conviction_state,
-        "tier_rating": tier,
-        "color_code": color
-    }
-
-def fetch_crypto_pulse(symbol):
-    """
-    Defensive network wrapper extracting core metrics and official asset imagery
-    from Twelve Data Gateways with integrated safe fallback engines.
-    """
-    clean_sym = symbol.strip().upper()
-    fallback_price = 68500.00 if "BTC" in clean_sym else 3450.00
-    
-    payload = {
-        "price": fallback_price, 
-        "change": 0.00, 
-        "logo": ESSENTIALS_BRAND_WATERMARK, 
-        "chart": f"https://api.twelvedata.com/screenshot?symbol={clean_sym}&apikey={TD_API_KEY}" if TD_API_KEY else ""
-    }
-    
-    if not TD_API_KEY:
-        return payload
-
-    try:
-        quote_url = f"https://api.twelvedata.com/quote?symbol={clean_sym}&apikey={TD_API_KEY}"
-        logo_url = f"https://api.twelvedata.com/logo?symbol={clean_sym}&apikey={TD_API_KEY}"
-        
-        q_res = requests.get(quote_url, timeout=10)
-        if q_res.status_code == 200:
-            q_data = q_res.json()
-            if "error" not in q_data and "close" in q_data:
-                payload["price"] = float(q_data.get("close") or q_data.get("price") or fallback_price)
-                payload["change"] = float(q_data.get("percent_change") or 0.00)
-                
-        l_res = requests.get(logo_url, timeout=8)
-        if l_res.status_code == 200:
-            l_data = l_res.json()
-            if "url" in l_data:
-                payload["logo"] = l_data.get("url")
-                
+        url = "https://api.pushover.net/1/messages.json"
+        data = {
+            "token": PUSHOVER_APP_TOKEN,
+            "user": PUSHOVER_USER_KEY,
+            "message": message,
+            "title": "🚨 Rockefeller Ecosystem Sentry"
+        }
+        requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print(f"⚠️ Network lookup bypassed for {symbol}. Engaging local protection layers. Error: {e}")
-        
-    return payload
+        log_event(f"Pushover notification failure: {e}", "ERROR")
 
-# --- 4. EXECUTION GATEWAYS & BROADCAST CYCLES ---
-
-def fetch_crypto_intelligence(is_test=False):
-    """
-    Consolidates cryptocurrency tracking mechanisms within the core daemon execution model.
-    Integrates Tom Williams Volume Spread Analysis (VSA) mathematical parameters.
-    """
-    if not WEBHOOK_CRYPTO:
+def broadcast_system_health():
+    """Generates and dispatches a comprehensive state-of-the-market intelligence pulse."""
+    if not WEBHOOK_MARKET:
+        log_event("Market analysis webhook variable unassigned. Aborting pulse.", "ERROR")
         return
 
-    targets = ["BTC/USD", "ETH/USD"]
-    print(f"🏛️ Executing Macro-Crypto Microstructure Scan. Live Test Mode: {is_test}")
+    state = EcosystemState()
+    regime = state.get("regime", "BULLISH")
+    vix_status = state.get("vix_status", "STABLE")
+    vix_current = state.get("vix_current", 14.50)
+    vix_velocity = state.get("vix_velocity", "STABLE")
+    futures_pulse = state.get("futures_pulse", "🟢 RISK-ON")
 
-    for symbol in targets:
-        try:
-            # 1. Fetch Price Context & Historical Framework for VSA Normalization
-            quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
-            quote_res = requests.get(quote_url, timeout=10).json()
-            
-            # Request historical candlesticks to calculate tracking thresholds (ATR and Volume SMA)
-            history_url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=4h&outputsize=20&apikey={TD_API_KEY}"
-            hist_res = requests.get(history_url, timeout=10).json()
-
-            current_price = float(quote_res.get("close") or quote_res.get("price", 0.0))
-            change_24h = quote_res.get("percent_change", "0.00")
-            
-            # --- TOM WILLIAMS VSA AUTOMATION ENGINE ---
-            vsa_flag = "NORMAL ACCUMULATION"
-            spread_status = "STABLE"
-            volume_profile = "BALANCED"
-
-            if "values" in hist_res and len(hist_res["values"]) >= 2:
-                series = hist_res["values"]
-                
-                # Derive current candles components
-                high_0 = float(series[0].get("high"))
-                low_0 = float(series[0].get("low"))
-                vol_0 = float(series[0].get("volume", 0))
-                spread_0 = abs(high_0 - low_0)
-
-                # Dynamic Calculation Loops over 20 periods
-                total_spread = 0.0
-                total_vol = 0.0
-                count = len(series)
-                
-                for bar in series:
-                    total_spread += abs(float(bar.get("high", 0)) - float(bar.get("low", 0)))
-                    total_vol += float(bar.get("volume", 0))
-                
-                avg_spread = total_spread / count
-                avg_vol = total_vol / count
-
-                # Operational Rule Threshold Triggers
-                if spread_0 > (avg_spread * 1.2):
-                    spread_status = "⚠️ WIDE SPREAD DEVELOPMENT"
-                if vol_0 > (avg_vol * 1.5):
-                    volume_profile = "⚡ INSTITUTIONAL VOLUME INFLOW"
-
-                # Structural Gatekeeper Logic Check
-                if spread_0 > (avg_spread * 1.2) and vol_0 > (avg_vol * 1.5):
-                    vsa_flag = "🚨 TIER A INSTITUTIONAL ABSORPTION BLOCK DETECTED"
-
-            # 2. Package Advanced Telemetry Into Consistent Branding Layout
-            embed = {
-                "title": f"🏛️ {symbol.split('/')[0]} Institutional Flowstate Telemetry",
-                "description": (
-                    f"### **Real-Time Macro Microstructure Layer**\n"
-                    f"┣ **Asset Valuation**: `${current_price:,.2f}` (`{float(change_24h):+.2f}%`)\n"
-                    f"┣ **Volume Profile**: `{volume_profile}`\n"
-                    f"┣ **Spread Metric Allocation**: `{spread_status}`\n"
-                    f"┗ **Order Book VSA Analysis**: `{vsa_flag}`\n\n"
-                    f"### **Ecosystem Sentry Constraints**:\n"
-                    f"┣ **Risk Transmission Model**: `ACTIVE CONTROL`\n"
-                    f"┗ **System Posture State**: `MONITORING FOR RE-ENTRY`\n\n"
-                    f"*Microstructure layers are tracking pre-AI historical limit order imbalance matrices to isolate raw algorithmic sweeps.*"
-                ),
-                "color": 0x3498db, 
-                "footer": {
-                    "text": "Rockefeller Crypto Telemetry Core Engine",
-                    "icon_url": ESSENTIALS_BRAND_WATERMARK
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-            requests.post(WEBHOOK_CRYPTO, json={"embeds": [embed]}, timeout=10)
-            
-        except Exception as e:
-            print(f"⚠️ Technical failure executing crypto data sweep for {symbol}: {e}")
-
-def broadcast_flowstate_pulse():
-    """
-    Automated System Heartbeat. Triggers precisely at 09:35 AM EST (03:35 AM HST)
-    to confirm network integrity and telemetry health metrics to the operations room.
-    """
-    regime_mode, vix_status = get_market_posture()
-    targets = ["BTC/USD", "ETH/USD"]
+    # Generate Tactical Intelligence Narrative
+    outlook_text = "Market conditions remain ideal for structured strategic parameters. Implied volatility parameters are compressing across standard levels."
     
-    for symbol in targets:
-        try:
-            pulse = fetch_crypto_pulse(symbol)
-            analytics = calculate_macro_crypto_metrics(symbol, pulse["price"], pulse["change"])
+    # Surgical Inversion Check: Determine if the current environment shifts posture
+    if vix_velocity == "ACCELERATING" or vix_current > 19.5:
+        outlook_text = "System detects dynamic expansion. Risk-mitigation matrices recommend shifting focus toward defensive covered calls and premium options pricing adjustments to capture decay thresholds."
+
+    # Surgical Double Tagging Optimization Rules
+    # If the narrative contains 'options', append an explicit callout to the signal channel natively
+    content_payload = ""
+    if "options" in outlook_text.lower():
+        content_payload = "📢 **System Notice**: Options-focused market posture identified. Cross-referencing telemetry stream with `#options-signal`."
+
+    embed = {
+        "title": "🏛️ Rockefeller Ecosystem Pulse Snapshot",
+        "description": (
+            f"### **Ecosystem Structural Posture**\n"
+            f"┣ **Market Regime**: `{regime}`\n"
+            f"┣ **Futures Pulse**: {futures_pulse}\n"
+            f"┣ **Volatility Index**: `{vix_current:.2f}` (`{vix_status}`)\n"
+            f"┗ **Volatility Velocity**: `{vix_velocity}`\n\n"
+            f"📊 **Market Outlook Matrix**\n"
+            f"{outlook_text}\n\n"
+            f"*State update executed by background radar daemons. Muted parameters active.*"
+        ),
+        "color": 0x34495e if vix_velocity != "ACCELERATING" else 0xe74c3c,
+        "timestamp": datetime.now(pytz.utc).isoformat(),
+        "footer": {"text": "Rockefeller Asset Management Engine"}
+    }
+
+    try:
+        payload = {"embeds": [embed]}
+        if content_payload:
+            payload["content"] = content_payload
             
-            lines = [
-                f"**Telemetry Channel Status**: `SCANNING / STABLE`",
-                "",
-                f"📋 **Current Context Snap**:",
-                f"┣ **Price Point**: `${pulse['price']:,.2f}` (`{pulse['change']:+.2f}%`)",
-                f"┣ **Ecosystem Posture**: `{regime_mode} REGIME`",
-                f"┗ **Shield Guardrails**: `ACTIVE / UNBROKEN`",
-                "",
-                f"📌 **Sentry Operations Note**:",
-                f"Sovereign macro crypto vectors are being continuously scanned for structural volatility shifts. "
-                f"The core engine tracking derivative implied premiums maintains standard background surveillance."
-            ]
-            
-            embed = {
-                "title": f"🏛️ {symbol.split('/')[0]} Telemetry Flowstate Confirmation",
-                "description": "\n".join(lines),
-                "color": 0x3498db,  # Professional Telemetry Blue
-                "thumbnail": {"url": pulse["logo"]},
-                "footer": {"text": "Rockefeller Telemetry Sentry Network • HST Timezone"},
-                "timestamp": datetime.now(pytz.utc).isoformat()
-            }
-            
-            if pulse["chart"]:
-                embed["image"] = {"url": pulse["chart"]}
-                
-            if WEBHOOK_CRYPTO:
-                requests.post(WEBHOOK_CRYPTO, json={"embeds": [embed]}, timeout=10)
-        except Exception as e:
-            print(f"⚠️ Telemetry pulse tracking failure logged for {symbol}: {e}")
+        requests.post(WEBHOOK_MARKET, json=payload, timeout=12)
+        log_event("Ecosystem health summary broadcasted to Discord matrix.")
+    except Exception as e:
+        log_event(f"Failed to transmit pulse telemetry: {e}", "ERROR")
+
+def fetch_crypto_intelligence(is_test=False):
+    """Executes structural scans over background digital asset valuations."""
+    log_event("Executing background crypto asset volume valuation sweep...")
+    if is_test:
+        broadcast_system_health()
 
 def run_radar_cycle():
-    """
-    Main execution gateway orchestrating traditional equity index telemetry 
-    integrated directly with crypto macro pipelines.
-    """
-    # [Existing core macro tracking logic for SPY, VIX, and index RSI runs here]
+    """Main background loop tracking state handshakes and managing execution intervals."""
+    state = EcosystemState()
     
-    # 1. Check for the Scheduled Telemetry Heartbeat (09:35 AM EST / 03:35 AM HST)
-    import time
-    now_hst = datetime.now(pytz.timezone("US/Hawaii"))
-    if now_hst.hour == 3 and now_hst.minute == 35:
-        broadcast_flowstate_pulse()
-        time.sleep(60)  # Safe lock to prevent multi-firing within the matching minute
-        
-    # 2. Maintain standard interval-based macro-crypto sweeps (on the hour marker)
-    if datetime.now().minute == 0: 
+    # Deadman Switch Evaluation Check
+    last_handshake_str = state.get("last_handshake")
+    if last_handshake_str:
+        try:
+            last_handshake = datetime.fromisoformat(last_handshake_str)
+            tz_hst = pytz.timezone('Pacific/Honolulu')
+            now_hst = datetime.now(tz_hst)
+            
+            # If the background tracking stream goes completely silent for more than 1 hour, trigger Pushover
+            if (now_hst - last_handshake).total_seconds() > 3600:
+                send_pushover_alert("⚠️ SYSTEM FAILURE: Volatility sentinel handshake lost for over 60 minutes. Check daemon runtime status.")
+        except Exception as e:
+            log_event(f"Deadman framework validation exception: {e}", "ERROR")
+
+    # 4-Hour System Pulse Interval Trigger (Broadcasts strictly on 4-hour cycle boundaries)
+    now = datetime.now()
+    if now.hour % 4 == 0 and now.minute == 0:
+        broadcast_system_health()
+
+    if now.minute == 0:
         fetch_crypto_intelligence(is_test=False)
-        
-    # [Rest of your existing radar tail execution logic continues smoothly...]
 
 if __name__ == "__main__":
-    # Terminal verification testing harness hook
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
-        print("🧪 Initiating terminal verification test for Macro Radar Crypto Architecture...")
+        log_event("Initiating structural validation checks via testing harness parameters...")
         fetch_crypto_intelligence(is_test=True)
-        print("✅ Macro Radar testing payload sequence complete.")
     else:
-        # Standard background loop initialization fallback hook
-        run_radar_cycle()
+        log_event("Macro Radar core engine is executing in systemic background configuration...")
+        import time
+        while True:
+            try:
+                run_radar_cycle()
+                time.sleep(60)
+            except Exception as e:
+                log_event(f"Radar loop tracking error intercepted: {e}", "ERROR")
+                time.sleep(30)

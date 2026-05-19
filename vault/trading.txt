@@ -1,0 +1,679 @@
+How do you all automate your trading?
+Infrastructure
+Hi
+
+I’ve got a handful of strategies I trade on the daily timeframe. Currently I’m running my code in the last 10 minutes of RTH and then going to my broker and executing whatever it says. I would like to remove this chore from my life. What platforms/apis do you all recommend?
+
+Edit: I know how to write code. I don’t want to hire anyone. I’m not sharing my strategy.
+
+
+Upvote
+123
+
+Downvote
+
+114
+Go to comments
+
+
+Share
+Join the conversation
+Sort by:
+
+Best
+
+Search Comments
+Expand comment search
+Comments Section
+VoyZan
+•
+1y ago
+Since you're posting here on algotrading I'm assuming you've got some coding experience.
+
+Hence, build a program that will connect to the broker's API and do the manual bit for you. If your broker doesn't provide an API, look for a platform that does - IBKR, Alpaca, ETrade, TD Ameritrade, EZE EMS, Trading View, etc.
+
+Once you have that, automate the trading. At a minimum you would usually need a few components:
+
+Connecting to the API and maintaining the authentication.
+
+Reading ledger (cash/balances), positions and asset price
+
+Submitting, cancelling and modifying orders
+
+Retrieving and processing order status updates
+
+Managing the strategy in order to run its code on some form of an interval
+
+The strategy code itself that will carry out the decision making logic and place the orders
+
+Package that code with Docker and deploy it on cloud. It's really not as hard as it may sound.
+
+On top of that you may need to think deeper about a few aspects:
+
+Concurrency and safety - ensuring problems in one module of the system won't affect other modules
+
+Programmatic risk - sanity and fat finger checks on order placement
+
+Deploying safely - how credentials are stored, network firewall, etc.
+
+Logging - to understand what went wrong when things go wrong
+
+Automated tests - to reduce the risks and make the project more maintainable
+
+Since you've mentioned manual order placement I'm gonna also assume you don't do high-frequency trading. In that case, implement the project in any well-known language you're familiar with. Python may be a good choice for its large open source community. IBKR or Trading View are often mentioned as good platforms to start. Alpaca is meant to be great if you're in the US. IBKR - although not without its pains - could be a good easy way to get started if all you're doing is reading price data and making trades based on it.
+
+If you wanna do it in Python and IBKR I've built a couple of packages that make it easier:
+
+IBeam for authentication
+
+IBind for the Python client
+
+I must say this is actually such great advise. Recently built this exact system. Managed to solve the problem for myself. Issue I find is most providers don’t have a great API you can use.
+
+Had to build it in python ontop of mt5, which has been working wonderfully.
+
+I am considering creating an open api people can use that provides the core functionality you mentioned here, so anyone with a little coding experience can automate trades.
+
+It honestly is a very painful experience getting the right broker and one that has a well documented and easy to use api.
+
+I personally use Traderpost to automate. It takes JSOn in the alert message (from trading view) and reads it then spits it to tradovate (or your broker of choice). Works really well and is easy to set up, dont need coding experience either.
+
+I run a couple algos on prop firms, and its perfect because you dont need direction access to their APIs, you just sign in with your credentials.
+
+//
+
+Automating Stock Investing Technical Analysis With Python
+Using Python To Find When To Buy And Sell Stocks
+Farhad Malik
+Farhad Malik
+
+Follow
+13 min read
+·
+Feb 7, 2021
+
+//
+
+How I Built a Complete Stock Trading Analysis App in Under 10 Hours with Claude
+
+Ben HardenBen Harden
+Ben Harden
+Published Mar 2, 2025
++ Follow
+In the fast-paced world of software development, time is often the most precious resource. Recently, I challenged myself to build a comprehensive stock trading analysis application in under 10 hours. The kicker? I had absolutely no frontend development experience. The result? A fully-functional platform that includes technical analysis, sentiment tracking, ML-based price predictions, and options strategy recommendations—complete with a professional-looking interface.
+
+Here's how I did it with the help of Claude, and what I learned along the way.
+
+The Challenge: A Complete Trading App in One Day
+I've always been fascinated by the intersection of finance and technology. As someone who dabbles in stock trading, I wanted to create a tool that would combine various analysis techniques in one place - from traditional technical indicators to modern sentiment analysis and machine learning predictions.
+
+The challenge was significant: build a full-stack application with both Python backend and React frontend that could:
+
+
+Fetch and analyze stock market data
+Process social media sentiment about stocks
+Generate ML-based price predictions
+Recommend options trading strategies
+Present everything in an intuitive, responsive interface
+All within a single workday, and with zero frontend development experience.
+
+The Scale: 6,000 Lines of Production-Quality Code
+What surprised me most about this project was the sheer volume of code we produced in such a short time. The final application consists of approximately 6,000 lines of code across all components:
+
+
+Backend Python code: ~3,500 lines spanning data handling, ML prediction, sentiment analysis, and options strategy modules
+Frontend React code: ~2,500 lines creating responsive visualizations and an intuitive user interface
+To put this in perspective, projects of this size typically take weeks or even months to develop, especially for someone with no frontend experience. The code isn't just functional—it includes error handling, documentation, and follows best practices for maintainability.
+
+Leveraging Claude as a Development Partner
+The game-changer was using Claude as my development partner. With its ability to understand complex context and generate coherent, working code, I was able to dramatically accelerate my development workflow and overcome my lack of frontend knowledge.
+
+Here's how Claude helped me build the application:
+
+1. Architecture Planning and Design
+I started by describing my vision to Claude - a trading platform with multiple analysis capabilities. Claude helped me design a modular architecture that separated concerns effectively:
+
+
+Core modules for data handling, backtesting, and strategy implementation
+Specialized modules for sentiment analysis and options trading
+A Flask API backend to serve the processed data
+A React frontend with data visualization components
+Despite my inexperience with frontend frameworks, Claude explained React concepts in an accessible way and suggested file structures and component hierarchies that made sense to me as a backend developer.
+
+The modular architecture Claude helped design, showing data flow between components
+
+2. Backend Development
+The backend required several complex components:
+
+
+Data Handler: Fetching historical price data and calculating technical indicators
+Sentiment Analyzer: Processing Twitter and Reddit data for market sentiment
+Price Predictor: ML model for forecasting future price movements
+Options Strategies: Analyzing and recommending options trading approaches
+For each component, I described the functionality I needed, and Claude generated the Python code, complete with error handling, documentation, and implementation details. This was in my comfort zone, but Claude's suggestions still improved my typical approach.
+
+A snippet of the sentiment analysis module Claude helped create
+
+3. Frontend Creation (The Real Challenge)
+The frontend was where I faced the biggest hurdle. With zero React experience, I needed not just code but education on:
+
+
+React component fundamentals
+State management
+UI design principles
+Data visualization libraries
+Responsive design techniques
+Claude was patient in explaining concepts, generating examples, and helping me understand what the code was doing. Rather than just giving me code snippets, Claude provided explanations that helped me grasp the underlying principles.
+
+4. API Integration
+Connecting the frontend and backend was where my inexperience could have created the biggest bottleneck. Claude generated the API endpoints in Flask and the corresponding fetch calls in the React frontend, ensuring they matched perfectly. It also explained the client-server communication model in a way that bridged my knowledge gap.
+
+Key Features of the Trading App
+The final application included several powerful features:
+
+Technical Analysis Dashboard
+The dashboard displays interactive charts for stock prices, volume, and RSI indicators. Users can adjust time ranges and get real-time updates on technical indicators.
+
+Article content
+Interactive price charts with moving averages and volume indicators—my first experience with data visualization libraries
+
+
+Sentiment Analysis
+The app scrapes and analyzes social media data from Twitter and Reddit to gauge market sentiment. It visualizes sentiment scores, bullish ratios, and provides insights into market perception.
+
+
+
+Article content
+Social media sentiment breakdown showing positive, neutral, and negative trends
+
+
+Recommended by LinkedIn
+I Built a Stock Trading App Where Users Trade Stocks with Monopoly Money at Market Rates
+I Built a Stock Trading App Where Users Trade Stocks…
+Dallas Hall  1 year ago
+Claude Code's Source "Leaked" — It Was Never Hidden
+Claude Code's Source "Leaked" — It Was Never Hidden
+Rushit P.  1 month ago
+Redux Thunk vs Redux Saga
+Redux Thunk vs Redux Saga
+Davit Gasparyan  6 months ago
+ML Price Predictions
+Using gradient boosting models, the app generates price predictions with confidence scores. It shows projected returns and visualizes potential price paths.
+
+
+
+Article content
+ML-based price prediction showing confidence intervals and potential price movements
+
+
+Options Strategy Recommendations
+Based on market outlook, volatility, and price predictions, the app recommends appropriate options trading strategies like covered calls, protective puts, or iron condors.
+
+
+
+Article content
+Smart options strategy recommendations based on current market conditions
+
+
+Lessons Learned
+This speed-development experiment taught me several valuable lessons:
+
+1. AI-Assisted Development Flattens Learning Curves
+The most remarkable insight was how Claude flattened the learning curve for frontend development. What would have taken me months to learn traditionally was compressed into hours of guided, practical application.
+
+2. Focus on Architecture First
+Having Claude help me design a solid architecture at the beginning made everything else smoother—especially for someone with my limited frontend experience. The modular design meant that individual components could be developed and tested independently.
+
+The React component hierarchy made development much more efficient, even for a React novice
+
+3. Iteration Becomes Lightning Fast
+When I needed to change or improve a feature, I could simply explain the change to Claude, and it would update the code while maintaining consistency with the rest of the application. This was crucial since I lacked the intuition to make these changes efficiently on my own.
+
+4. The Human Element Remains Crucial
+Despite Claude's capabilities, my domain knowledge of finance and trading was essential for guiding the development in the right direction. The best results came from combining Claude's coding abilities with my industry expertise, even though I lacked frontend skills.
+
+Challenges and Solutions
+The process wasn't without challenges:
+
+Challenge: Learning React Fundamentals Quickly
+As someone with zero frontend experience, understanding React's component model and state management was initially overwhelming.
+
+Solution: Claude broke down concepts into digestible chunks and provided examples that built my understanding progressively, focusing on "just enough" knowledge to accomplish each task.
+
+Challenge: Data Processing Complexity
+Financial data can be messy and inconsistent, especially from multiple sources like stock APIs and social media.
+
+Solution: Claude helped implement robust error handling and data normalization functions that made the application resilient to data inconsistencies.
+
+Challenge: UI/UX Design Without Design Experience
+Creating an intuitive, professional-looking interface seemed impossible given my lack of design experience.
+
+Solution: Claude suggested proven design patterns from financial applications and helped implement them using Tailwind CSS, which provided guardrails that prevented common design mistakes.
+
+Challenge: Performance Optimization
+Initial versions of the charting components were sluggish when handling large datasets.
+
+Solution: Claude suggested optimizations like data filtering based on the selected time range and efficient re-rendering strategies that dramatically improved performance—concepts I wouldn't have known to implement.
+
+The Path Forward
+This project was just the beginning. With the foundation in place, I plan to:
+
+
+Add more advanced technical indicators
+Implement backtesting for custom trading strategies
+Enhance the ML model with more features and better training
+Add portfolio management capabilities.
+
+//
+
+Is algorithmic trading right for you? Explore automated systems
+June 05, 2025
+Posted in Trading Knowledge
+6 minute read
+BB-diverg-HERO
+Home
+chevron_right
+Trading Knowledge
+chevron_right
+Is algorithmic trading right for you? Explore automated systems
+Headshot - Moheb
+By Moheb Hanna
+Market Analyst
+Get an in-depth look at algorithmic trading and how to automate your strategies. Learn about trading systems, AI tools for coding, backtesting, risk management, and key metrics to optimize your approach in the markets
+
+What is an algorithmic trading system?
+An algorithmic trading system is a set of predefined rules or criteria that, based on incoming data, triggers and executes trades according to those established instructions. Trading systems vary widely, ranging from those based on fundamental analysis to those utilizing technical analysis, statistical data, or a combination of these methods. A trading system doesn't predict price movements; instead, it reacts to price changes based on predefined rules and strategies.
+
+Building an algorithmic automated trading system demands both market understanding and practical experience. Essentially, traders utilize their expertise to identify recurring market patterns, reactions to specific events, and behaviors of various currency pairs. This experience refines the system by accounting for key elements, including market liquidity, order execution, different order types, economic releases, and fundamental analysis. Traders can use this knowledge in instrument selection, trading hours, or potentially to activate or deactivate the system as needed.
+
+Building an algorithmic trading system used to be an intimidating process for the average retail trader; however, we live in an era where we all have access to free programming tools. It has become far more accessible for traders to utilize an Artificial Intelligence (AI) model to aid in coding a strategy. Many of the commonly used AI tools can help a trader get started. By providing the strategy parameters to the AI model, a coded trading system file can then be downloaded and applied to a trading platform.
+
+For example, an AI-generated trading algorithm written in MQL4 or MQL5 can be downloaded, applied to the MT4 or MT5 platform, and enabled to execute trades.
+
+The AI’s ability to code enables traders to create and test more strategies, saving them time and effort to focus on improving their trading plans.
+
+Oanda ad banner - welcome bonus
+What are the advantages of algorithmic trading systems?
+Emotions and biases: An automated trading system can help traders eliminate emotional trading decisions or biases they may have towards a specific market move or a fundamental expectation. This may hold as long as the emotions and biases are excluded when designing the system itself.
+Data processing: Algorithms can process vast amounts of data and execute trades much faster than humans. Designing and testing different algorithmic trading systems enables traders to explore and consider market approaches they may not have previously considered. It enables traders to delve deeper into various technical indicators, allowing them to gain a better understanding of how to incorporate different indicators and tools within the same strategy. Using an automated system will enable traders to approach markets with various methods. A simple example is utilizing a trend-following strategy alongside a range trading strategy.
+Backtesting: Algorithmic trading strategies can be tested using historical data to evaluate their performance before being implemented in live trading. The backtesting process relies heavily on the quality of data for the instrument being traded. Backtesting helps traders validate and optimize their strategies. It allows traders to test their methods on different types of datasets, for example, by testing on shorter timeframes or by dividing the testing data into periods that correspond to specific market events. It can also enable traders to employ or apply strategies to various market instruments that exhibit distinct price action behavior.
+For example, suppose the US dollar's price action is trending due to a fundamental market event, such as a change in interest rate expectations. In that case, it is possible to observe price movements for cross-pairs, which do not include the US dollar, which may provide trading ranges, thus creating an environment for applying a trend-following strategy along with a range-trading one.
+24/5 Operation: Algorithms can run continuously, allowing for trading around the clock.
+It goes without saying that having a 24/5 active trading system escalates the risk exposure, as the system becomes vulnerable to any market-impacting event.
+What are the disadvantages of algorithmic trading systems?
+System failures: Generally speaking, all software is susceptible to technical glitches, bugs, or network issues that can result in errors or data loss. And that's why traders need to pay attention to such matters and have an understanding of how the platform and their software work.
+Market volatility: Sudden market changes can trigger unexpected algorithm behavior and losses. An example can be a surprise tariff announcement by the US president or an unexpected interest rate decision by a major central bank, such as the Federal Reserve. A trader employing a mean reversion strategy that seeks small market movements may yield negative results if inadequate risk management procedures are in place.
+Over-optimization: Algorithms that are too closely fitted to historical data may look great in backtesting, but may not perform well in live trading. It is easy for many to create a chart, apply a moving average, and optimize the average parameters so that it fits the data set perfectly. This is called 'curve fitting,' as it essentially learns the random fluctuations of past data instead of identifying true market patterns.
+Regulatory risks: Rules and regulations related to algorithmic trading or trading in general differ between jurisdictions; these differences may include margin requirements, instrument availability, intermarket access, or trade entry and exit rules.
+One of the most commonly known regulatory requirements that applies only in the US that algorithmic traders must follow and incorporate into their design is the “First In First Out” (FIFO) rule. As the name implies, the rule requires that traders exit their equal-sized trades on the same currency pair in the same order in which they were initially opened.
+What are types of trading systems?
+Trend following: Trend -following trading strategies or systems are one of the most commonly used approaches, primarily employed on more extended time frames, such as daily or weekly, to allow for potentially larger price movements. Trend following strategies or systems may come with lower transaction costs, however, it can involve other types of costs such as finance fees and rollover. Which is why traders need to be selective of which currency pair or instrument they are trading.
+
+Although a trend -following strategy can generate significant price moves, it should also include parameters to preserve profits made from larger moves. Generally speaking, long term trends may consist of multiple price dips along the way, which can erase or negate any profits made.
+Moving averages ttrading systems: Another standard trading system approach is by using price interaction with a moving average or a combination of multiple moving average crosses, for example, a fast average crossing above or below a slower one. Traders can utilize the crosses as points of entry and exit. These types of strategies can be vulnerable to whipsaws; some traders may use filters to minimize their impact.
+
+Moving averages and trading systems can be customized for longer or shorter trading ideas, depending on the trader's choice, and can be implemented on any timeframe. However, it goes without saying that the shorter the timescale, the more frequent the trades are executed, and thus, higher trading costs, which traders need to incorporate into any system or take into account when creating a trading system.
+Technical patterns or breakout systems: It was previously difficult to program an automated system based on a technical chart pattern, as patterns can take many different forms with varying angles, degrees, or price move percentages, making it challenging to code. However, that’s not the case anymore, with the abundance of advanced software solutions currently available., CcChart patterns and breakout systems are becoming increasingly accessible. An example of this is the Autoc Chartist MT4 Plugin1 or the TradingView cChart pattern indicator2.
+Chart Pattern recognition - Trading View
+Chart pattern recognition – TradingView. Past performance is not indicative of future results.
+Market inefficiencies – arbitrage: Algorithmic trading offers strategies that aim to capitalize on market inefficiencies. Arbitrage trading strategies involve algorithms that detect and aim to profit from price discrepancies of the same asset or its derivative across different markets.
+
+There are many types of trading systems, and the ideas can be limitless, especially with AI technologies. Advanced algorithmic trading systems incorporate AI into their design, enabling the system to adapt itself to changing market conditions. The above types of trading systems are the basic ones, and as traders continue to develop more advanced strategies, the possibilities are endless.
+
+Choosing an algo trading platform
+Numerous platforms can be used for algorithmic trading. These platforms offer various tools and ways for traders to create, optimize, and test their trading systems before making any real investments.
+
+One of the most commonly used algorithmic trading platforms is MetaTrader. The platform offers an easy-to-use interface and programming language that enables traders around the world to create algorithmic trading robots known as “Expert Advisers” or EAs.
+
+The advancement of artificial intelligence has made it a much easier task to create an EA now, as it utilizes many of the available AI platforms. Traders don’t need to learn coding anymore; instead, they can input their trading parameters and rules to an AI platform in plain English and download a ready-made EA file, which can be applied to Meta Trader for algo trading.
+
+Oanda ad banner - welcome bonus
+Key considerations
+There are many other key considerations that traders should take into account when building a trading system. By no means should this blog post be considered inclusive of all considerations; however, we have attempted to cover the basics and some of the most important considerations.
+
+Market data feeds: Real-time data feeds provide the most up-to-date market prices, volumes, and other relevant information. This data is crucial for algorithms to make decisions.
+
+Infrastructure: Servers, networks, and software are required to run the trading algorithms and connect to trading platforms and data feeds.
+
+Strategy development: Defining a robust and tested trading strategy is crucial for success.
+
+Risk management: Implementing stop-loss orders and other risk management measures is essential.
+
+Monitoring and maintenance: Algorithms require regular monitoring and maintenance to ensure they function as intended.
+
+Evaluating results
+Evaluating the results of a trading system is crucial for determining its effectiveness and making necessary adjustments. Traders typically look at several key metrics to assess performance. Profit/loss is the most basic, showing the overall gain or loss. The Sharpe ratio measures risk-adjusted return, indicating how much return is earned for each unit of risk taken. Drawdown shows the maximum decline from a peak, highlighting potential exposure. The win rate, average profit, and average loss help analyze the consistency and quality of trades. By combining these metrics, traders can gain a comprehensive understanding of their system's strengths and weaknesses, enabling them to refine strategies and manage risk effectively.
+
+Footnotes:
+
+1 https://autochartist.com/metatrader_en/
+
+2 https://www.tradingview.com/scripts/chartpattern/
+
+//
+
+
+
+Nice build. The HMM regime detection and half-Kelly sizing tell me you've actually read the literature, which puts you ahead of 95% of these posts.
+
+Few thoughts from someone who just went through a similar process:
+
+I built an options wheel bot (cash-secured puts + covered calls) that runs on a Raspberry Pi, manages real retirement accounts through Schwab's API. Different strategy than yours — I'm not predicting direction, I'm harvesting the variance risk premium. The edge is mathematically defined (implied vol systematically overprices realized vol) rather than pattern-based, which means the win rate sits around 80%+ by design.
+
+What I learned going from paper to live in the last 48 hours:
+
+Your bot will try to do things the broker won't allow. Mine attempted to write covered calls against shares that had pending sell orders. Would have created naked calls in an IRA. The broker caught it, but the bot should have caught it first. You won't find these edge cases in paper trading.
+
+The bid-ask spread on cheap options will destroy you at your account size. I had to build a tiered spread filter because a $0.25 option with a $0.10 spread looks fine in a backtest but eats 40% of your edge on the round trip. At $500-1000, this is your #1 enemy.
+
+480 trades is not enough. I ingested Sinclair's Positional Option Trading chapter on Kelly sizing — his own real-world example with 1,000 trades showed the Kelly estimate was only 1.4 standard deviations above zero. 7% chance the true optimal bet was negative. You need way more data before trusting the sizing math.
+
+Get a quantitative peer review before going live. I had a second AI review my entire methodology and it found a mathematical tautology in one of my filters that made it completely useless — the variables cancelled out algebraically. Looked great in code, did literally nothing. You won't catch that yourself.
+
+Your event-driven LLM strategy being "breakeven after a lot of noise" is the correct base case for LLM predictions. They're better as judges (evaluating a setup you already found) than predictors (finding the setup). Consider using Claude to evaluate and rank candidates rather than generate trade ideas.
+
+The 29% exposure is smart. The $30 max per trade is smart. The fact that you blocked the pairs strategy after it failed backtesting is smart. You clearly have discipline.
+
+But $500-1000 is genuinely too small for equities after commissions and slippage. I'd paper trade another 2-3 months, get to 1000+ resolved trades, then fund it properly. The bot will still be there when you're ready.
+
+Good luck with it.
+
+
+ComradeZuvarna
+OP
+•
+4d ago
+Hey! Really appreciate the detailed breakdown. I spent around 2 months in picking up relevant literature to study algo trading and this sub has been really helpful in pointing out some good sources. The Sinclair Kelly sample size point is one I've thought about. You're right that 480 trades is thin. The bot uses half-Kelly (×0.5) and additionally applies a "Davey waiver" from Kevin Davey'sBuilding Winning Algorithmic Trading Systems : strategies with fewer than 30 resolved live trades get their size halved again (×0.5 on top of half-Kelly). It doesn't solve the problem but it limits overconfident sizing in the early sample.
+
+Here are the literature I referred to that shaped the key concepts:
+
+Half-Kelly sizing: Thorp's original derivation, applied via Ernie Chan's Algorithmic Trading: Winning Strategies and Their Rationale
+
+Kalman filter mean reversion: Chan's Machine Trading : dynamic mean estimation on non-stationary series
+
+HMM regime detection: Hamilton (1989) regime-switching, via hmmlearn
+
+Pairs/stat-arb: Engle-Granger cointegration two-step test from Chan's Algorithmic Trading
+
+Cross-sectional momentum: Jegadeesh & Titman (1993) : rank assets, long top quartile
+
+Time-series momentum: Moskowitz, Ooi & Pedersen (2012) : 12-1 lookback returns
+
+Walk-forward + Monte Carlo validation: Davey's methodology from Building Winning Algorithmic Trading Systems
+
+On the LLM-as-judge point you're right. The event-driven strategy being breakeven is the expected result for LLM-as-predictor. I want to restructure it to score/rank momentum candidates that already passed price-action filters, rather than generate signals from news cold...
+
+
+markwmke
+•
+4d ago
+Love that you're building on real sources. Are you using any tools like Massive or Unusual Whales?
+
+
+ComradeZuvarna
+OP
+•
+2d ago
+Not currently, the sentiment pipeline is NewsAPI headlines + Reddit + CoinGecko Fear & Greed as inputs fed to Claude for scoring. Unusual Whales would be interesting for options flow but there are no options in the bot right now (equities and crypto only, market orders). Massive I haven't looked at, does it help specifically with entry timing or more as a screener?
+
+
+u/wado729 avatar
+wado729
+•
+4d ago
+I'm doing the same thing, but just options. How did you configure or develop your regime detection? I tried but wasn't able to get it nailed down.
+
+
+ComradeZuvarna
+OP
+•
+4d ago
+I am running a 3-state HMM on SPY daily returns (log return, vol, VIX), GaussianHMM via hmmlearn, 100-day lookback. But it has a caveat that I found was also widely discussed in many forums when I was researching about it which makes it tricky to deal with i.e. it gets stuck outputting confidence=1.0 during stable regimes, which makes the probability estimate meaningless. I have sanity-check overrides that redistribute extreme confidence values, but it's a known weak point I want to fix. The core idea came from Hamilton (1989) regime-switching models, implemented via the hmmlearn library.
+
+//
+
+before optimizing, worth diagnosing where the 1.5 min actually goes. with only 5 tickers, IB pacing limits probably arent the main bottleneck (historical data rule is max 60 requests in any 10 min window, 5 tickers × 7 indicators = 35 if youre making one historical call per indicator).
+
+things that often actually cause minute-long delays with IB:
+- sequential reqHistoricalData calls, each round trip eats a few seconds. use ib_async (modern maintained fork of ib_insync, since ib_insync stopped being maintained in early 2024) and gather them concurrently
+- using reqHistoricalData repeatedly during the trading day when you should be on reqMktData (streaming subscription, capped at 100 simultaneous market data lines but no pacing throttle)
+
+- pre-market data not being cached. fetch once into sqlite or parquet, only request live updates intraday
+
+also Automatic-Essay2175s flag on random sampling of 5 from 100 is the more interesting question. if random vs ranked produces similar PnL, your edge isnt really in the picks.
+
+makes sense as a concept, but small flag: an analyst inspecting 5 stocks every 3 min wouldnt actually random them, theyd be pulling whatever has the biggest catalyst at that moment (IV spike, volume, news, gap, etc). random from 100 means each stock has the same chance regardless of whether anything is happening there.
+
+if the goal is "analyst-like", maybe replace the random with a ranking step. cheap and fast: every 3 min rank the 100 by some live signal (RVOL, change %, ATR%, whatever fits your strategy) and pick the top 5. youd be looking at the most "interesting" 5 each cycle instead of 5 by lottery.
+random is fine for backtesting noise studies but for live trading it tends to dilute whatever edge you might have on the basket of 100.
+
+
+Random selection is leaving alpha on the table. Pre-market you already know regime state, volatility percentile, relative strength ranked across all 100 - use those to score and select top 5 rather than random. Your hit rate on those 5 goes up, processing time stays the same. Separate what can run pre-market (regime classification, factor scoring) from what needs to be live (price action, order flow confirmation). Live portion should be under 30s ideally. The 1.5m signal window is fine for swing/intraday but you're essentially trading 3-min-delayed signals on a 3-min loop which compounds the lag.
+
+
+This is a classic "compute vs. latency" bottleneck. If you're doing complex ML inference (like LSTMs or XGBoost) on a large ticker basket, the "signal decay" becomes real—by the time you calculate the alpha, the entry might be gone.
+
+One approach I’ve used is to offload the heavy signal processing to a background worker and use a simpler "Z-score gate" (like σ > 2.5) to filter the universe before running the deep models. It cuts the compute load by 80% without losing much sensitivity. I actually built a terminal that handles this pipeline for crypto perps (alphasignal.digital)—I found that keeping the ML inference separate from the execution heartbeat is the only way to scale past a few symbols without missing windows.
+
+//
+
+Firstly, discover a sustainable edge through research- this can take months or years (or never) depending on your sophistication. Your choice of architecture, vendors, trading budgets should follow afterwards and will often reveal themselves through a process of elimination. You can get historical data for research purposes from many outlets for free or pennies. You don’t build a house and then look for land to lay a foundation…
+
+
+15-minute bars are better than 1-minute bars, but I’d still be careful: this is intraday systematic trading, and the backtesting problem gets materially harder than with daily or hourly data.
+
+Especially if your entries depend on wicks, OHLC bars can be misleading because you don’t know the intrabar path. A backtest may assume a fill that was not actually reachable, or may ignore spread/slippage/queue effects. For ORB-style systems this matters a lot, because many variants are basically testing small differences around the open.
+
+Also, the cost is not just the data subscription. The real cost is research complexity. Once you start varying markets, sessions, opening ranges, stop rules, targets, filters, time windows, and execution assumptions, the parameter space explodes very quickly. That is where overfitting becomes the main enemy.
+
+I’m not saying “don’t do it,” but since you said you are not a programmer, I would be cautious about starting with intraday futures. Before choosing brokers/platforms, I’d first define the exact research question, test whether the edge survives conservative assumptions, and maybe discuss the full research workflow with an LLM or someone experienced. Platform architecture should follow from the strategy, not the other way around.
+
+
+Your stack is solid for retail futures and the math is roughly right. MultiCharts + dxFeed or IQFeed + AMP + Rithmic is the standard non-programmer futures setup; nothing wrong with starting there. I'd actually push back a bit on Reddit's reflexive "use Python" advice when you've explicitly said you don't program yet MultiCharts EasyLanguage will get you to a live, validated, walk-forward-tested strategy faster than learning Python from scratch, and the skill transfers later if you decide to switch.
+
+The one thing worth adding to your cost analysis: funding firms (Topstep, Apex, Earn2Trade) change the math more than people initially realize. You pay $50-150/month for an evaluation account, but they supply the platform + data + execution as part of the deal. Your monthly stack cost effectively drops to that one subscription. The tradeoffs are real you give up 10-20% of profits and trade against their rules (max daily loss, scaling restrictions, trailing drawdowns), and most evaluations are designed to be hard to pass but if you're confident in your strategy and don't have $10K+ to comfortably risk, the unit economics often work out better than self-funded for the first year or two while you prove out the system.
+
+Honest gotcha though: if your strategy passes a funded eval, it should also be profitable self-funded. If it fails consistently, the data is telling you the strategy isn't ready not that the eval is rigged. Use evals as a forcing function for discipline, not a shortcut to free capital.
+
+the architecture choices that have mattered most in my setup: separating the strategy logic from the execution layer so you can backtest and live-trade the same code with minimal changes, using a message queue (zmq or redis) between components rather than tight coupling, and idempotent order handling so a restart doesn't double-fire executions. the part most retail systems get wrong is treating backtesting and live trading as separate code paths, which means you're effectively running two strategies.
+
+The biggest architectural mistake I see: tight coupling between signal generation and execution. When your regime detector and order router share state, one failure cascades to the other. What works: treat regime detection as a pure read layer — writes to its own namespace, execution reads from that. For futures: feeder (CQG, Rithmic) isolated. Feed drops, risk engine keeps running on last known state. Circuit breakers per bot — one bad signal pauses that bot, others keep running. Platform matters less than the boundaries.
+
+Not about Rithmic specifically — my comment was about software architecture.
+
+The principle: your regime detector and your execution engine should be separate processes that communicate through a shared data store (Redis, a DB, a file), not through direct function calls or shared in-memory state.
+
+Concretely:
+
+Regime detector writes: {state: "TRENDING_DOWN", hurst: 0.625, confidence: 0.78} to its own key
+
+Execution engine reads that key before deciding to place an order
+
+They never call each other
+
+If your regime detector crashes at 3am, execution reads stale data and either holds (safe) or vetoes (also safe). It doesn't crash too.
+
+For Rithmic/Multicharts: if you have the technical ability to use Rithmic's API directly, yes — fewer middleware layers = fewer failure points. But the architectural principle applies regardless of which broker stack you're on.
+
+
+Honestly, your approach already looks more realistic than most beginners jumping into algo trading. Focusing on costs, data quality, and execution before strategy hype is a good sign.
+
+MultiCharts + AMP + Rithmic sounds like a pretty reasonable beginner stack for futures. The main thing is probably avoiding over-optimization during backtesting because that traps a lot of new algo traders.
+
+On architecture, the guy who mentioned separating signal from execution is right and it matters more than platform choice. I write regime state (ranging/trending, VIX level, ES slope) to a JSON file every 15 minutes. Execution reads from that. If the strategy process crashes at 3am, execution holds on last known state instead of blowing up. Simple pattern but it has saved me multiple times.
+
+On platform, I skipped MultiCharts entirely and went Python + ib_insync directly against IBKR. No monthly platform cost. If you can describe your strategy logic clearly, an LLM can write the code and you own every line of it. The maintenance burden people warn about is real but manageable if your logic stays simple and well documented.
+
+On data for MGC specifically: COMEX, whatToShow=TRADES not MIDPOINT. Learned that the hard way. IQFeed is solid but Yahoo Finance covers VIX and ES correlation data for free if you add a User-Agent header to the request.
+
+On regime logging: do it from day one even before you have enough trades to act on it. I log VIX, ES price, ES slope, and ATR multiplier on every check. After 30 or 40 closed trades you will start seeing exactly which regime buckets your edge actually holds in.
+
+MorningStar shows 50+ metrics on a single asset page. How many do you actually use?
+
+Most of those 50+ are noise once you're systematic about it. For backtest validation I track 62 - but most are there to catch specific failure modes: regime-conditioned Sharpe, max adverse excursion, turnover-adjusted returns, CPCV distribution width. Raw Sharpe and Calmar alone tell you almost nothing. The test I use: would this metric catch a strategy secretly curve-fit to one regime? If yes it stays. If it'd pass on a random walk, it goes.
+
+//
+
+The real edge is pure and perfect data..
+
+Edge is simply what probability do you know about the price going forward that most other participants dont know about or cannot capitalize on.
+
+100% agree, confluence is where the edge lives. Structure gives you the road map, momentum the fuel, order flow the confirmation.
+
+Been building similar systems and the tape is brutal truth serum. Lee-Ready + quote aggregation is a good start, but context kills: VWAP rejection + VAH absorption = tape screaming "trap" even if delta looks bullish.
+
+The data layer really matters most. Historical options chains need point-in-time reconstruction (no survivorship bias), bid/ask fills (not last price), and live tape with volume at price for backtesting realism, I think this is the key.
+
+I've been using APIs that deliver executable quotes and historical universe for exactly this. What's your kill switch for looks good but tape says no?
+
+
+Entry is easy. Exit is hard. Our market is tweet based. Nothing is surviving bc its all moving erratically compared to just 6 months ago. Algos ive forward tested with very expensive tick data that forward test profitable over years are all negative since the war In Iran started. Super frustrating.
+
+Nailed it. Perfect historical data from 2012-2021 is worthless when VIX spikes 12→35 overnight or 2022 correlation goes 1.0. Data + regime awareness + systematic risk controls is the full stack.
+
+What is your current veto framework in the layers of data, regime and tape? VIX term structure? Cross-asset stress (HY spreads, USD strength)?
+
+My current set-up is:
+
+Layer	Signal	Veto Trigger
+Data	Point-in-time chains + fills	Last price fills, survivorship bias (using CuteMarkets API for executable bid/ask)
+Regime	VIX / Carry Stress	VIX >25, USDJPY >160, SPX PCR >1.2
+Tape	Order Flow Confirmation	Cum. Delta < -1.5σ, Aggression Ratio <0.25 (2 Bars)
+
+
+Solid setup. VIX/USDJPY/PCR stack is clean for equities — we work on crypto so the equivalents differ but the layer logic is identical.
+
+Our current stack:
+
+Layer	Signal	Veto Trigger
+Data	Binance tick + funding/OI/liquidation feeds	Feed staleness >30s, exchange latency spike
+Regime	HMM 3-state + Hurst exponent	HMM in transition OR Hurst <0.5 (no fractal persistence)
+Tape	VPIN + CVD divergence	VPIN >0.7 (informed flow dominant) OR CVD/price diverge >2σ
+The Hurst gate gets the most questions — below 0.5 means returns are mean-reverting noise, no directional persistence. Any trend-following signal firing in that state has negative expected value regardless of data quality. It's not a "trade smaller" condition, it's a "don't trade" condition.
+
+Curious how you handle the regime layer when VIX spikes fast (like overnight gap to 35) — does your system have a recalibration lag, or do the threshold triggers fire fast enough to avoid the first 15 minutes?
+
+
+100% on the data. I'm building AlphaSignal (alphasignal.digital) and we spent months just refining our Order Flow and GEX data feeds to ensure they were 'clean' enough for institutional use. Most retail platforms just give you noise. If you want to see how high-fidelity GEX/CVD data looks in a terminal, feel free to poke around.
+
+This hits so true. The real work isn't chasing one signal, it's making sure all the pieces line up.
+
+//
+
+The hardest part of systematic trading is doing nothing
+Strategy
+System’s flat. No signal. Market’s moving anyway.That’s when it gets difficult.Every instinct says, Just get in. You built the system to trade, not sit there watching candles move without you.But when the setup isn’t there, forcing a trade is basically discretionary trading with extra steps.Honestly, I’ve probably lost more money during no-signal periods than from flaws in the actual strategy itself.Sitting on your hands when the algo says nothing is a skill on its own, and nobody really talks about how to build it.
+
+Anyone else struggle more with quiet periods than actual losing streaks?
+
+
+With a background in emotion psychology, I can tell you this is exactly how our brains are wired. We have a massive action bias—doing nothing feels completely unnatural, especially when you see the market moving. The math behind a system is the easy part; managing your own boredom and FOMO is the real challenge.
+
+Took me a while to realize the most expensive thing I was doing was overriding flat days that the system was correctly skipping. What helped: tag every no-signal period with a regime label (vol bucket, trend strength, whatever your strategy uses) and pull the historical Sharpe of the strategy in that regime. When you can look at a flat day and see "we're in low-vol range-bound regime, this strategy has historically returned -0.3 Sharpe in that bucket," sitting still stops feeling like missing out and starts feeling like the strategy doing its job. Pair that with a separate P&L bucket for any executed overrides track them as their own micro-strategy with their own win rate. Mine has been net-negative every quarter I've measured it, which is the strongest behavioral fix I've found.
+
+the framing that helped me: a no-signal period isnt your system doing nothing, its your system actively rejecting every setup it saw. thats output. logging every rejected setup with a reason code turns 'doing nothing' into a visible decision you can audit later. boredom only feels expensive because the work is invisible
+
+this is exactly it. the urge to force a trade during no-signal periods feels different from discretionary FOMO - it's more like you're testing whether your own system works. we built explicit veto gates into our setup that all have to pass before any trade fires. when gates are open but there's no signal, fine. but when regime reads trending down at 90% confidence, gates don't even open. doesn't stop the itch though.
+
+The quiet periods are genuinely harder than losing streaks and I think it’s because a losing streak still feels like participation.
+
+You’re in the game. The no-signal period makes you question whether the system works at all even when it’s doing exactly what it should.
+
+What helped me think about it differently is tracking opportunity cost the other way. Every forced trade outside the system is a data point you’re adding manually to a strategy that wasn’t built for it. You’re not missing the market, you’re protecting the edge from yourself.
+
+True that. I also suffered briefly with this. Though distracting myself worked. I started running exact same strategy in paper account too. Whenever there was urge to do something, I would do that to paper bot. It would break mostly and lesson was learned very cheaply.
+
+Then I started tracking each signal and gates of bot which kept me productively busy because with live telemetry learning was steep curve.
+
+Additionally, I would stream live data on backtest and check the parity with live execution or no execution. Kept me very busy.
+
+Doing all this was enough to keep me busy and not touch live execution. Result "No touch" streak for over 3 months now except weekly universe update. Algo does awesome on its own.
+
+
+This is one of the most underrated edges in systematic trading and almost nobody quantifies it.
+
+The "do nothing" discipline is actually measurable — if you track your out-of-system interventions separately from your algo's P&L, you'll almost always find that discretionary overrides during flat periods are net negative. The algo doesn't have a narrative, doesn't get bored, doesn't feel like it's "missing" a move. You do.
+
+One thing that helps: build a shadow journal specifically for trades you almost took but didn't. Review it monthly. Seeing how many would have been losers is the fastest way to rewire the urge. The quiet periods are where the edge compounds — staying flat when the setup isn't there is part of the strategy.
+
+//
+
+How are you researching your strategies?
+
+
+Various ways. I'm not a big believer in limiting myself to a specific way. I'll list some of the ways I use. but keep in mind I look at developing strategies as a iterative process. It's rare a strategy survives its initial creation. I often change things, experiment with things, add, remove things, etc etc. A lot of times I'll read something and have a idea of how I can improve it by modifying it.... Anyways... Some of the methods I use
+
+Books
+
+Research papers
+
+Read Website articles
+
+Financial news
+
+Economic news
+
+Brute force
+
+In regards to AI, it's a augmenter for me. It helps me develop my ideas faster. It helps me code up the prototype faster than when I used to code it all by hand in a editor. It's not perfect and I've found plenty of mistakes, but overall it helps.
+
+Claude Code for the actual coding, but the research side is just obsessive logging tbh.
+
+I run a directional options screener buy calls/puts, no spreads and every alert gets logged with the full entry context: RSI, EMA alignment, IV rank, GEX bias, DTE. Once enough trades resolve I go through the data and look for patterns. Win rate by DTE bucket, by strategy type, by whether the AI gate approved or flagged it.
+
+The AI piece is interesting, Claude reads the full signal before it fires and can reject or flag caution. I was skeptical at first but it genuinely filters out a lot of the borderline stuff that would've just been noise. The score threshold alone wasn't catching it.
+
+Rest is just pandas. No fancy tooling. Honestly the biggest unlock wasn't any specific technique, it was just being consistent about what I logged so I could actually audit it later. Most of my filter changes came from going back through losses and asking "what did these have in common."
+
+Started with the AI gate as purely observational, no hard blocks, just logging what it said alongside the outcome. After enough trades resolved I ran the numbers and the signals it flagged as caution or rejected were actually outperforming the ones it approved. That was backwards from what I expected.
+
+Turns out the score system was good at finding setups but not great at weighting certain contextual factors -- things like earnings proximity, elevated IV relative to the move needed, or when multiple indicators were technically aligned but the broader tape was wrong. The LLM was picking up on that kind of inconsistency even when the numeric score looked fine.
+
+Once I saw that in the data I flipped it to a hard gate. Could I eventually encode those patterns into a rule-based pre-trade filter? Probably. But the LLM catches edge cases I haven't thought to hardcode yet, and when it rejects something it gives a reason I can actually read and learn from. That feedback loop has been more useful than the blocking itself honestly.
+
+
+My research loop is pretty iterative, and AI (Claude Code + ChatGPT) mainly helps with speed + exploration:
+
+Coding + backtesting infra — biggest impact. Data pulls, feature engineering, validation, pipeline work, etc. are way faster. Main win is iteration speed: I can test ideas quickly, drop them if they don’t work, and move on without getting stuck in plumbing.
+
+Learning / domain compression — helpful for ramping up on new ideas or reading papers fast, but I still double-check everything against sources or data. Kinda fun seeing Claude and ChatGPT criticize each other’s angles on the same thing (yes, I mean “criticize” literally).
+
+Sometimes it helps surface edge cases or variations I wouldn’t have thought to test, but this is pretty rare.
+
+Overall I just use it to crank up experiment throughput, not as a source of alpha or PnL ideas (yet).
+
+I actually don’t use notebooks, though I've seen people do (including at banks/shops), so I think they might be fine for research iteration.
+
+My own setup is more “Claude Code helps me build the stack directly” — data handling, testing framework, visualization, pipeline glue, etc.
+
+For me, the alpha ideation still starts with me. AI mostly removes implementation friction. It goes straight to the best practices in all implementation areas (better than I can do it). I still need to tell it what I want. Once in a long while, CC makes a methodological suggestion that surprises me, but that has been very rare.
+
+That said, the speedup is pretty massive once you stop spending most of your time wiring things together manually. The whole process becomes much less exhausting.
+
+Mostly a 3-step loop for me: hypothesis in plain English, quick prototype/backtest, then a pretty brutal falsification pass. AI helps a lot in steps 1-2 because it turns fuzzy ideas into code/tests faster, but I don’t trust it for PnL or inference. Biggest unlock was treating it like a junior pair programmer and forcing every claim through sanity checks, unit tests, and dumb baselines. If it can’t beat a simple baseline with the same holding period, it dies fast.	
+
+
+Pretty similar to software dev for me:
+
+write the hypothesis in plain English first
+
+let AI generate a tiny backtest scaffold
+
+immediately add full trade logging + costs/slippage
+
+do the real work in notebooks: sanity plots, regime slices, parameter sensitivity, and walk-forward
+
+AI is great for boilerplate and refactors, but I still don’t trust it for the conclusions. Biggest upgrade for me was keeping a graveyard of rejected ideas with notes on why they failed — saves a lot of wheel-reinventing.	
+
+for me it's been: 1) read papers in JFE / journal of empirical finance for ideas, 2) implement a stripped-down version in python and backtest with deliberately conservative slippage and fees, 3) walk-forward to see if the edge survives. step 2 kills 80% of papers because the academic versions assume frictionless execution. the surviving 20% then go to paper trading for 2-3 months before any live capital. it's slow but the false-positive rate is what matters at this stage.
+
+
+for me it's been: identify a market microstructure or behavioural anomaly with a plausible mechanism, build the simplest implementation that captures it (no parameter sweeps yet), backtest with conservative slippage, walk-forward with rolling windows. the key step most retail researchers skip is the why does this work hypothesis upfront, since strategies discovered by data-mining without a mechanism rarely survive out-of-sample. ymmv but the false-positive rate matters more than the discovery rate.
+
+Claude API generates idea/ builds the function into my backtesting engine
+
+Brute force combination scan on in sample data to find edge
+
+Edge is then passed through a rigorous validation pipeline. (IS/OS/WF permutation tests, Monte Carlo, param sensitivity tests, and others based on my goals)
+
+Validated edges are reviewed and the process repeats at step 1
