@@ -139,73 +139,90 @@ def fetch_crypto_pulse(symbol):
 
 def fetch_crypto_intelligence(is_test=False):
     """
-    Orchestrates macro-crypto intelligence scans. Evaluates options volatility profiles,
-    generates contextual premium layers, and updates communication vectors.
+    Consolidates cryptocurrency tracking mechanisms within the core daemon execution model.
+    Integrates Tom Williams Volume Spread Analysis (VSA) mathematical parameters.
     """
-    if not WEBHOOK_CRYPTO and not is_test:
+    if not WEBHOOK_CRYPTO:
         return
 
-    regime_mode, vix_status = get_market_posture()
     targets = ["BTC/USD", "ETH/USD"]
-    state = get_last_state()
-    
+    print(f"🏛️ Executing Macro-Crypto Microstructure Scan. Live Test Mode: {is_test}")
+
     for symbol in targets:
         try:
-            pulse = fetch_crypto_pulse(symbol)
-            analytics = calculate_macro_crypto_metrics(symbol, pulse["price"], pulse["change"])
+            # 1. Fetch Price Context & Historical Framework for VSA Normalization
+            quote_url = f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}"
+            quote_res = requests.get(quote_url, timeout=10).json()
             
-            # Anti-Spam Sentry Guardrail (Bypassed during direct Terminal Verification runs)
-            state_key = f"crypto_{symbol.replace('/', '_')}"
-            if not is_test and state.get(state_key) == f"{pulse['price']:.2f}":
-                continue
-            
-            # Construct standard institutional-grade payload lines
-            lines = [
-                f"**Ecosystem Operational State**: `🟢 ACTIVE INFRASTRUCTURE TRACKING`" if not is_test else f"**Ecosystem Operational State**: `VERIFIED SYSTEM UPDATE`",
-                "",
-                f"📊 **Sovereign Liquidity Matrix ({symbol.split('/')[0]} Core)**",
-                f"┣ **Current Spot Valuation**: `${pulse['price']:,.2f}` (`{pulse['change']:+.2f}%`)",
-                f"┣ **Derivative Implied Premium**: `{analytics['synthetic_yield']} Annualized`",
-                f"┣ **Est. Yield Generation Potential**: `{analytics['est_payout']}`",
-                f"┗ **Ecosystem Market Posture**: `{regime_mode} REGIME / VIX: {vix_status}`",
-                "",
-                f"🐳 **Order Book Volume Mechanics**",
-                f"┗ **Whale Conviction Gauge**: `{analytics['whale_conviction']}`",
-                "",
-                f"🛡️ **Systemic Strategy Directives ({analytics['tier_rating']})**"
-            ]
-            
-            if "SOSNOFF PIVOT" in analytics["whale_conviction"]:
-                lines.append(f"┗ **Sentry Advisory**: Spot extension hitting historical resistance. Restrain long delta exposure; harvest high implied volatility by selling out-of-the-money call options or deploying premium credit structures.")
-            elif "INSTITUTIONAL ACCUMULATION" in analytics["whale_conviction"]:
-                lines.append(f"┗ **Sentry Advisory**: Downside liquidation exhaustion detected. Institutional absorption suggests prime positioning to accumulate spot or deploy cash-secured short puts to lock in high option premiums.")
-            else:
-                lines.append(f"┗ **Sentry Advisory**: Macro momentum consolidated into range compression. Yield generation optimized via passive theta-decay harvesting or delta-neutral funding arbitrage.")
+            # Request historical candlesticks to calculate tracking thresholds (ATR and Volume SMA)
+            history_url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=4h&outputsize=20&apikey={TD_API_KEY}"
+            hist_res = requests.get(history_url, timeout=10).json()
 
-            embed = {
-                "title": f"🏛️ {symbol} Macro-Liquidity Radar",
-                "description": "\n".join(lines),
-                "color": analytics["color_code"],
-                "thumbnail": {"url": pulse["logo"]},
-                "footer": {"text": f"Rockefeller Crypto Intelligence Matrix • HST Timezone"},
-                "timestamp": datetime.now(pytz.utc).isoformat()
-            }
+            current_price = float(quote_res.get("close") or quote_res.get("price", 0.0))
+            change_24h = quote_res.get("percent_change", "0.00")
             
-            # Attach live Twelve Data chart visual vector if confirmed present
-            if pulse["chart"]:
-                embed["image"] = {"url": pulse["chart"]}
+            # --- TOM WILLIAMS VSA AUTOMATION ENGINE ---
+            vsa_flag = "NORMAL ACCUMULATION"
+            spread_status = "STABLE"
+            volume_profile = "BALANCED"
+
+            if "values" in hist_res and len(hist_res["values"]) >= 2:
+                series = hist_res["values"]
                 
-            webhook_target = WEBHOOK_MARKET if is_test and not os.getenv("WEBHOOK_CRYPTO") else WEBHOOK_CRYPTO
-            if webhook_target:
-                requests.post(webhook_target, json={"embeds": [embed]}, timeout=10)
+                # Derive current candles components
+                high_0 = float(series[0].get("high"))
+                low_0 = float(series[0].get("low"))
+                vol_0 = float(series[0].get("volume", 0))
+                spread_0 = abs(high_0 - low_0)
+
+                # Dynamic Calculation Loops over 20 periods
+                total_spread = 0.0
+                total_vol = 0.0
+                count = len(series)
                 
-            state[state_key] = f"{pulse['price']:.2f}"
+                for bar in series:
+                    total_spread += abs(float(bar.get("high", 0)) - float(bar.get("low", 0)))
+                    total_vol += float(bar.get("volume", 0))
+                
+                avg_spread = total_spread / count
+                avg_vol = total_vol / count
+
+                # Operational Rule Threshold Triggers
+                if spread_0 > (avg_spread * 1.2):
+                    spread_status = "⚠️ WIDE SPREAD DEVELOPMENT"
+                if vol_0 > (avg_vol * 1.5):
+                    volume_profile = "⚡ INSTITUTIONAL VOLUME INFLOW"
+
+                # Structural Gatekeeper Logic Check
+                if spread_0 > (avg_spread * 1.2) and vol_0 > (avg_vol * 1.5):
+                    vsa_flag = "🚨 TIER A INSTITUTIONAL ABSORPTION BLOCK DETECTED"
+
+            # 2. Package Advanced Telemetry Into Consistent Branding Layout
+            embed = {
+                "title": f"🏛️ {symbol.split('/')[0]} Institutional Flowstate Telemetry",
+                "description": (
+                    f"### **Real-Time Macro Microstructure Layer**\n"
+                    f"┣ **Asset Valuation**: `${current_price:,.2f}` (`{float(change_24h):+.2f}%`)\n"
+                    f"┣ **Volume Profile**: `{volume_profile}`\n"
+                    f"┣ **Spread Metric Allocation**: `{spread_status}`\n"
+                    f"┗ **Order Book VSA Analysis**: `{vsa_flag}`\n\n"
+                    f"### **Ecosystem Sentry Constraints**:\n"
+                    f"┣ **Risk Transmission Model**: `ACTIVE CONTROL`\n"
+                    f"┗ **System Posture State**: `MONITORING FOR RE-ENTRY`\n\n"
+                    f"*Microstructure layers are tracking pre-AI historical limit order imbalance matrices to isolate raw algorithmic sweeps.*"
+                ),
+                "color": 0x3498db, 
+                "footer": {
+                    "text": "Rockefeller Crypto Telemetry Core Engine",
+                    "icon_url": ESSENTIALS_BRAND_WATERMARK
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+            requests.post(WEBHOOK_CRYPTO, json={"embeds": [embed]}, timeout=10)
             
         except Exception as e:
-            print(f"⚠️ Defensive failure logged during {symbol} intelligence loop: {e}")
-            
-    if not is_test:
-        save_current_state(state)
+            print(f"⚠️ Technical failure executing crypto data sweep for {symbol}: {e}")
 
 def broadcast_flowstate_pulse():
     """

@@ -41,13 +41,17 @@ ESSENTIALS_BRAND_WATERMARK = "https://images-ext-1.discordapp.net/external/.../y
 def get_market_posture():
     """Reads shared ecosystem ledger safely without disrupting daemon execution loop."""
     if not os.path.exists(REGIME_LEDGER):
-        return "BULLISH", "STABLE"
+        return "BULLISH", "STABLE", "STABLE"
     try:
         with open(REGIME_LEDGER, "r") as f:
             data = json.load(f)
-        return data.get("regime", "BULLISH"), data.get("vix_status", "STABLE")
+        return (
+            data.get("regime", "BULLISH"), 
+            data.get("vix_status", "STABLE"), 
+            data.get("vix_velocity", "STABLE")
+        )
     except:
-        return "BULLISH", "STABLE"
+        return "BULLISH", "STABLE", "STABLE"
 
 def get_ticker_metrics_safe(ticker):
     """
@@ -164,8 +168,15 @@ def generate_canary_fingerprint(base_text, seed_string):
 
 def process_income_intelligence_cycle(is_test=False):
     """Orchestrates data pipeline workflows while filtering for targeted yield variables."""
-    regime_mode, vix_status = get_market_posture()
+    regime_mode, vix_status, vix_velocity = get_market_posture()
     
+    # NATENBERG RISK MITIGATION MATRIX LAYER
+    natenberg_warning = ""
+    if vix_velocity == "ACCELERATING":
+        natenberg_warning = "⚠️ **NATENBERG SURFACE RISK EXPOSURE**: Accelerated Volatility Spike detected. Premium risk pricing is unstable. Systems recommend delaying options rolling sequences until implied volatility flatten boundaries establish."
+    elif vix_status in ["STABLE", "DECAYING"]:
+        natenberg_warning = "ℹ️ **NATENBERG SURFACE ALLOCATION**: Implied risk metrics remain compressed. System mandates standard 0.5x yield portfolio allocation thresholds to preserve principal parameters."
+
     if is_test:
         print("🧪 Running terminal verification test for Premium Income Architecture...")
         test_ticker = "SPYI"
@@ -192,17 +203,24 @@ def process_income_intelligence_cycle(is_test=False):
             f"📊 **Premium Yield Positioning (Strategic Analytics)**",
             f"┣ **Ex-Div Recapture Cycle**: `{analytics['recapture_cycle']}` (Avg. Gap Fill Window)",
             f"┗ **NAV Erosion Guardrail Floor**: `{analytics['nav_safeguard_floor']}` (Synthetic Boundary)",
-            "",
+            ""
+        ]
+        
+        if natenberg_warning:
+            lines.append(natenberg_warning)
+            lines.append("")
+            
+        lines.extend([
             f"🛡️ **Capital Allocation Mandate (Waterfall Rules)**",
             f"┗ **Systemic Protocol Guidance**: {protected_reminder}"
-        ]
+        ])
         
         embed_desc = "\n".join(lines)
         
         embed_payload = {
             "title": "🚨 ESSENTIALS Option-Income Flowstate Matrix",
             "description": embed_desc,
-            "color": 0x9b59b6,
+            "color": 0x9b59b6 if vix_velocity != "ACCELERATING" else 0xe74c3c,
             "author": {
                 "name": "ESSENTIALS Systems",
                 "icon_url": ESSENTIALS_BRAND_WATERMARK
@@ -219,6 +237,7 @@ def process_income_intelligence_cycle(is_test=False):
             print("✅ Premium Income test notification successfully dispatched to Discord.")
         return
 
+    # Regular Production Feed Engine Processing Block
     for feed_url in RSS_FEED_VECTORS:
         try:
             response = requests.get(feed_url, timeout=15)
@@ -271,15 +290,22 @@ def process_income_intelligence_cycle(is_test=False):
                             f"📊 **Premium Yield Positioning (Strategic Analytics)**",
                             f"┣ **Ex-Div Recapture Cycle**: `{analytics['recapture_cycle']}` (Avg. Gap Fill Window)",
                             f"┗ **NAV Erosion Guardrail Floor**: `{analytics['nav_safeguard_floor']}` (Synthetic Boundary)",
-                            "",
+                            ""
+                        ]
+                        
+                        if natenberg_warning:
+                            lines.append(natenberg_warning)
+                            lines.append("")
+                            
+                        lines.extend([
                             f"🛡️ **Capital Allocation Mandate (Waterfall Rules)**",
                             f"┗ **Systemic Protocol Guidance**: {protected_rem}"
-                        ]
+                        ])
                         
                         prod_payload = {
                             "title": "🚨 ESSENTIALS Option-Income Flowstate Matrix",
                             "description": "\n".join(lines),
-                            "color": 0x9b59b6,
+                            "color": 0x9b59b6 if vix_velocity != "ACCELERATING" else 0xe74c3c,
                             "author": {
                                 "name": "ESSENTIALS Systems",
                                 "icon_url": ESSENTIALS_BRAND_WATERMARK
@@ -306,10 +332,29 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         process_income_intelligence_cycle(is_test=True)
     else:
-        print("⚙️ Rockefeller Income Alpha Engine is executing in daemon background configuration...")
+        print("⚙️ Rockefeller Income Alpha Engine is executing in systematic hybrid configuration...")
+        tz_hst = pytz.timezone('Pacific/Honolulu')
+        
         while True:
             try:
-                process_income_intelligence_cycle(is_test=False)
-                time.sleep(300)
+                now = datetime.now(tz_hst)
+                regime_mode, vix_status, vix_velocity = get_market_posture()
+                
+                # HYBRID EXECUTION MATRIX LIMIT RULES
+                # Rule 1: Weekly Deep Dive on Friday after market close (10:15 AM HST - 10:20 AM HST window)
+                is_weekly_pulse_window = (now.weekday() == 4 and now.hour == 10 and now.minute >= 15 and now.minute <= 20)
+                
+                # Rule 2: Event-Driven Sentry Override Filter (Instant breakout deployment)
+                is_emergency_override = (vix_velocity == "ACCELERATING")
+                
+                if is_weekly_pulse_window or is_emergency_override:
+                    print(f"⚡ Hybrid Execution Triggered. Reason: Weekly Window={is_weekly_pulse_window} | Emergency Override={is_emergency_override}")
+                    process_income_intelligence_cycle(is_test=False)
+                    # Block rapid duplicate cycling during processing event loops
+                    time.sleep(360)
+                else:
+                    # Low-frequency database state polling layer to save server CPU allocation
+                    time.sleep(60)
             except Exception as e:
+                print(f"⚠️ Core execution daemon exception caught: {e}")
                 time.sleep(30)
