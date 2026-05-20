@@ -375,3 +375,26 @@ KNOWLEDGE BANK: QUANTITATIVE EXTENSIONS (PRE-AI CORE)
 
 Specifically for trade_signals.py:
 Ensure the Tom Williams VSA Algorithmic Mathematics (ATR/SMA thresholds), the Natenberg Volatility Surface Guardrails (the 0.5x compression scale and layout lockouts), and the Larry Williams Chop Shield (3-bar structural pivots) are in place.
+
+// CLM CRF:
+
+Keep an eye on the premium to NAV. They’ll usually do a RO when it gets around 25% or better. Keep eyes open for a N2 SEC filing and hopefully bail out before everyone else does. The share price will usually roll back to match the RO price or sometimes even less. Buy back then if you wish.
+
+Why would you leave and not buy more? this position almost always trades at a premium and it drips at nav why would you participate in the rights offering or sell before the rights offering just to buy back in later why not just buy more and not create a taxable event.
+
+
+Because the share price will eventually drop to the RO price (or less sometimes) during the time leading up to the offering date. You will realize up to a 15% - 20% haircut in share price if you do not sell. I’ve been through 3-4 of them. It makes sense to sell if you notice the N2 soon enough. You will miss a month or 2 of divs but nowhere near the share price loss. Buy back at the lower share price after the RO.
+
+It doesn’t make sense to sell if you’re just gonna buy it again, just buy more during the 15% drop add to your position. See the people who are in the market today are so weird. Yall love to give away your money.
+
+Look…..say you own 1000 shares. Here’s an example from last RO. Share price $8.88 at N2 filing in February. Share price dropped as low as $6.47 in early April then RO pricing came in at $6.97. You sell and retain as much $$$ as you can. Then buy back in at a much lower price for more shares. Or you can just let your $8,880 turn jnto $6470. Personally im selling those 1000 shares as high as possible then using that $8,880 to rebuy 1372 shares at $6.47. Or as low as I can. The $.12/share missed div is peanuts compared to losing over $2,000. This fund does not appreciate. It slowly erodes your value as it returns your own money back to you. You can still make it work better by selling in front of the RO and buying more shares lower.
+
+Oh I know whah the rights offering is. You don’t need to explain so you sold your shares had to pay taxes on it and now you plan to rebuy. So you got a minuscule profit for what? Or you can hold your 1000 shares buy another 1500 shares when it dips look at that you now have lowered your cost basis and you have 2500 shares that drip at NAV of a position that almost always trades at a premium, it’s a compounding machine. If it drips your money back to you the you would have no profit.
+
+The lesson everyone learns eventually is:  do less; predict less; trade less
+
+The RO is like a bright light with a message saying “Sell me now and take profit because I’m about to drop “. Until the RO you buy shares and get the high distributions. You DRIP at the NAV which is say 28% lower than the share price. You sell almost all the way out when RO is announced. You buy back in when it begins to go back up. CRF just announced an RO. Let’s see how the price reacts as a dry run. Definitely not a buy and hold fund. But there is a strategy people use to this and they do quite well with it.
+
+Share prices drops a lot because shares are being purchased at a very low price. This rights offering will be formally announced via an N-2 filing with the SEC. It will probably start in May and end in mid June. I am expecting the share price to drop below the current NAV of $6.96.
+
+Looks like for every 3 shares you own, you can buy 1 share at the discounted price. Come back in early April after the formal RO filing with the SEC.

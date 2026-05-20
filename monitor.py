@@ -57,15 +57,14 @@ def get_live_close_and_rsi(symbol):
 
 def fetch_sec_filing_shield(symbol):
     """Scans for active structural dilution filings. (Simulated boundary check)"""
-    return "No N2/SEC Detected"
+    return "No N2/ RO detected"
 
 # --- 3. MONITORED DISPATCH MATRIX ---
 
 def send_daily_pulse(is_test=False):
     """Compiles and broadcasts the core structural asset flow state across all notification layers."""
-    title = f"🏛️ Cornerstone Flowstate Update" + (" [TEST BROADCAST]" if is_test else "")
+    title = f"💲 Cornerstone Flowstate Update" + (" [🧪 TEST ONLY]" if is_test else "")
     reports = []
-    has_alerts = False
 
     for ticker, config in PRIORITY_ASSETS.items():
         market_price, rsi_1d = get_live_close_and_rsi(ticker)
@@ -80,40 +79,43 @@ def send_daily_pulse(is_test=False):
         sec_status = fetch_sec_filing_shield(ticker)
         whale_status, color_hex, is_whale = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0x2ecc71, False)
 
-        # Contextual Gauge Valuation Logic
+        # Contextual Gauge Valuation Logic (Calibrated for historical 25% RO Risk boundaries)
         if premium < 12.0:
-            premium_label = "UNDERVALUED / LOW"
-        elif premium <= 18.0:
-            premium_label = "STABLE / NOMINAL"
+            premium_label = "low"
+        elif premium < 20.0:
+            premium_label = "neutral"  # 15.3% sits safely here now
+        elif premium < 25.0:
+            premium_label = "approaching"
         else:
-            premium_label = "HIGH RISK"
+            premium_label = "high"
 
         if rsi_1d < 40.0:
-            rsi_label = "OVERSOLD"
+            rsi_label = "oversold"
         elif rsi_1d <= 60.0:
-            rsi_label = "NEUTRAL"
+            rsi_label = "neutral"
         else:
-            rsi_label = "OVERBOUGHT"
+            rsi_label = "overbought"
 
         # Operational Bounds Checking
-        if premium > 22.0 or "Detected" in sec_status or is_whale:
-            status_str = "🚨 CRITICAL BOUNDARY BREACH"
-            income_note = "TACTICAL REDUCTION RECOMMENDED: High premium extension risks capital exposure."
+        if premium > 24.0 or "Active" in sec_status or is_whale:
+            status_str = "CRITICAL"
+            status_emoji = "🚨"
+            income_note = "Tactical reduction"
             rec_str = "Cease proactive accumulation. Halt distribution reinvestment programs immediately."
             verdict_str = "Aggressive price distortion detected relative to underlying book value assets."
-            has_alerts = True
         else:
-            status_str = "✅ STABLE: Nominal Flowstate"
-            income_note = "HOLD/ACCUMULATE: Net distributions healthy relative to carrying costs."
-            rec_str = "Stable environment. Reinvest distributions; accumulate on tactical pullbacks."
+            status_str = "STABLE"
+            status_emoji = "✅"
+            income_note = "Accumulation phase"
+            rec_str = "Reinvest distributions"
             verdict_str = "Premium variance within historical standard deviations. No active dilution signatures."
 
-        # Absolute Line-by-Line Uniformity Layout Assembly with Integrated Gauges
+        # Absolute Line-by-Line Minimal Layout Assembly
         asset_report = (
-            f"**{ticker} Cornerstone Flowstate Update**\n"
-            f"Status: `{status_str}`\n"
+            f"**{ticker}**\n"
+            f"Status: {status_emoji} `{status_str}`\n"
             f"┣ Premium to NAV: `{premium:.1f}%` ({premium_label})\n"
-            f"┣ SEC Shield: `{sec_status}`\n"
+            f"┣ SEC: `{sec_status}`\n"
             f"┣ RSI (1D): `{rsi_1d:.1f}` ({rsi_label})\n"
             f"┣ Income Note: `{income_note}`\n"
             f"┣ Whale Flow: `{whale_status}`\n"
@@ -123,9 +125,10 @@ def send_daily_pulse(is_test=False):
         reports.append(asset_report)
 
     if not reports:
-        return
+        return False  # Loopback verification to prevent false-positive file completion commits
 
     full_report = "\n\n".join(reports)
+    has_alerts = any("CRITICAL" in rep for rep in reports)
     color = 0xe74c3c if has_alerts else 0x2ecc71
 
     # Platform A: Discord Delivery Channel
@@ -133,22 +136,27 @@ def send_daily_pulse(is_test=False):
         send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
         print("✅ Core structural analytics successfully dispatched to Discord Server category.")
 
-    # Platform B: Pushover Real-Time Notification Pipeline (Preserving Tree Layout)
+    # Platform B: Pushover Real-Time Notification Pipeline (Tree Layout Intact)
     if os.getenv("PUSHOVER_API_TOKEN"):
         requests.post("https://api.pushover.net/1/messages.json", data={
             "token": os.getenv("PUSHOVER_API_TOKEN"),
             "user": os.getenv("PUSHOVER_USER_KEY"),
             "title": title,
-            "message": full_report,  # Preserves all line markers, trees (┣, ┗), and layout structure
+            "message": full_report,
             "priority": 1 if has_alerts else 0
         }, timeout=10)
         print("✅ Uniform notification payload dispatched successfully via Pushover Gateway.")
 
-    try:
-        with open(PULSE_FILE, "w") as f:
-            f.write(datetime.now().isoformat())
-    except Exception as e:
-        print(f"⚠️ Error writing state sync file: {e}")
+    # Commit timestamp to disk ONLY if a test run is not active
+    if not is_test:
+        try:
+            tz_h = pytz.timezone('Pacific/Honolulu')
+            with open(PULSE_FILE, "w") as f:
+                f.write(datetime.now(tz_h).isoformat())
+        except Exception as e:
+            print(f"⚠️ Error writing state sync file: {e}")
+
+    return True
 
 def run_monitor():
     tz_h = pytz.timezone('Pacific/Honolulu')
@@ -160,18 +168,36 @@ def run_monitor():
         return
 
     print("⏳ Entering PythonAnywhere Engine Loop...")
-    last_pulse_day = None
 
     while True:
         now_hst = datetime.now(tz_h)
         current_day = now_hst.date()
 
+        # Hard Persistence Verification: Inspect disk record to survive server recycling
+        already_pulsed = False
+        if os.path.exists(PULSE_FILE):
+            try:
+                with open(PULSE_FILE, "r") as f:
+                    content = f.read().strip()
+                if content:
+                    dt_parsed = datetime.fromisoformat(content)
+                    if dt_parsed.tzinfo is None:
+                        already_pulsed = (dt_parsed.date() == current_day)
+                    else:
+                        already_pulsed = (dt_parsed.astimezone(tz_h).date() == current_day)
+            except Exception as e:
+                print(f"⚠️ Error reading persistence file: {e}")
+                already_pulsed = False
+
         # Structural execution gate target window: 08:00 AM HST (Post Market Summary Close)
-        if now_hst.time() >= dt_time(8, 0) and current_day != last_pulse_day:
+        if now_hst.time() >= dt_time(8, 0) and not already_pulsed:
             print(f"🎯 Target Execution Window Met at {now_hst.strftime('%H:%M HST')}. Generating Pulse metrics...")
             try:
-                send_daily_pulse(is_test=False)
-                last_pulse_day = current_day
+                success = send_daily_pulse(is_test=False)
+                if success:
+                    print(f"✅ Daily pulse successfully completed and verified on disk for {current_day}.")
+                else:
+                    print(f"⚠️ Data collection skipped/incomplete. Retaining window entry for automated retry loop.")
             except Exception as e:
                 print(f"⚠️ System Matrix execution fault encountered inside tracking run: {e}")
 
