@@ -14,6 +14,27 @@ def send_pushover_alert(message):
             "token": token, "user": user, "message": message, "title": "Rockefeller Alert"
         })
 
+# Updated send_essentials_embed in essentials_tools.py
+def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
+    # Guard Clause: Prevent crash if webhook is None
+    if not webhook_url or webhook_url == "None":
+        print(f"    [TOOLS] Error: Webhook URL is invalid or None.")
+        return
+
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": description,
+            "color": color,
+            "footer": {"text": "Team ESSENTIALS | Rockefeller Strategic Intelligence"},
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }]
+    }
+    try:
+        requests.post(webhook_url, json=payload, timeout=15)
+    except Exception as e:
+        print(f"    [TOOLS] Discord Broadcast Failed: {e}")
+
 # Correlation Logic
 def calculate_correlation(btc_prices, spy_prices):
     """Calculates rolling correlation between BTC and SPY price lists."""
