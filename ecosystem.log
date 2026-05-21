@@ -73,3 +73,5 @@
 2026-05-20 07:21:45,564 - ERROR - Missing routing target endpoint for OPTIONS channel pipeline.
 2026-05-20 07:21:45,564 - ERROR - Missing routing target endpoint for OPTIONS channel pipeline.
 2026-05-20 07:21:45,564 - ERROR - Missing routing target endpoint for OPTIONS channel pipeline.
+2026-05-20 21:35:18,708 - ERROR - AMT Computation Error for BTC/USD: 'volume'
+2026-05-20 21:35:18,932 - ERROR - AMT Computation Error for ETH/USD: 'volume'

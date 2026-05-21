@@ -111,15 +111,15 @@ def execute_signal_scan(is_test=False):
         
     for symbol in FUTURES_WATCHLIST:
         try:
+            # SURGICAL FIX: Strip leading slash specifically for Twelve Data ingestion
+            api_symbol = symbol.lstrip('/')
+            
             if HAS_ESSENTIALS and not is_test:
-                trend_status, is_bullish = get_trend_alignment(symbol, TD_API_KEY)
-                conv_status, color, is_whale = get_institutional_conviction(symbol, TD_API_KEY)
+                trend_status, is_bullish = get_trend_alignment(api_symbol, TD_API_KEY)
+                conv_status, color, is_whale = get_institutional_conviction(api_symbol, TD_API_KEY)
             else:
                 trend_status, is_bullish = "🟢 BULLISH ALIGNMENT", True
                 conv_status, color, is_whale = "HIGH WHALE VOLUME", 0x2ecc71, True
-
-            if is_test:
-                print(f"  ↳ [{symbol}] Trend: {trend_status} | Order Flow: {conv_status}")
 
             # Suppress repeat tracking frames during standard range chop
             state_key = f"{symbol}_futures_state"

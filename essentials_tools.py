@@ -2,6 +2,37 @@ import requests
 import logging
 import json
 import datetime  # FIXED: Added missing import
+import pandas as pd
+import os
+
+# Pushover Integration
+def send_pushover_alert(message):
+    token = os.getenv("PUSHOVER_APP_TOKEN")
+    user = os.getenv("PUSHOVER_USER_KEY")
+    if token and user:
+        requests.post("https://api.pushover.net/1/messages.json", data={
+            "token": token, "user": user, "message": message, "title": "Rockefeller Alert"
+        })
+
+# Correlation Logic
+def calculate_correlation(btc_prices, spy_prices):
+    """Calculates rolling correlation between BTC and SPY price lists."""
+    df = pd.DataFrame({'BTC': btc_prices, 'SPY': spy_prices})
+    return df['BTC'].corr(df['SPY'])
+
+# Discord Embed Wrapper
+def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
+    payload = {
+        "embeds": [{
+            "title": title, "description": description, "color": color,
+            "footer": {"text": "Team ESSENTIALS | Rockefeller Strategic Intelligence"},
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }]
+    }
+    try:
+        requests.post(webhook_url, json=payload, timeout=15)
+    except Exception as e:
+        print(f"Broadcast Failed: {e}")
 
 def get_trend_alignment(symbol, td_api_key):
     """
