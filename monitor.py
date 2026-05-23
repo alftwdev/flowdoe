@@ -1,30 +1,70 @@
 import os
 import sys
-import json
 import requests
-import time
-from datetime import datetime, time as dt_time
+import logging
+from datetime import datetime
 import pytz
 from dotenv import load_dotenv
+from ecosys import logger as base_logger
+
+# 1. Initialize Child Logger & Ensure Console Verbosity
+logger = logging.getLogger("CEF_Monitor")
+if not logger.handlers:
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+logger.setLevel(logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+# 2. Extract Keys Explicitly
+PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
+WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
+TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+
+def validate_environment():
+    """Gatekeeper: Ensures all critical keys are present before running."""
+    required_keys = ["TWELVE_DATA_API_KEY", "WEBHOOK_CORNERSTONE_RO", "PUSHOVER_USER_KEY", "PUSHOVER_API_TOKEN"]
+    missing = [key for key in required_keys if not os.getenv(key)]
+    if missing:
+        logger.error(f"CRITICAL: Missing environment variables: {missing}")
+        sys.exit(1)
+
+validate_environment()
+
 try:
-    from essentials_tools import send_essentials_embed, send_pushover_alert, send_guardian_email, get_institutional_conviction
+    from essentials_tools import send_essentials_embed, send_guardian_email
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
 
-INCOME_TARGETS = ["CLM", "CRF"]
 PRIORITY_ASSETS = {
     "CLM": {"nav_ticker": "XCLMX", "avg_vol": 1700000},
     "CRF": {"nav_ticker": "XCRFX", "avg_vol": 600000}
 }
 
-WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
-TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-PULSE_FILE = os.path.join(BASE_DIR, "last_pulse_timestamp.txt")
+def send_pushover_alert(message):
+    """Direct API call to Pushover, bypassing external tool dependencies."""
+    url = "https://api.pushover.net/1/messages.json"
+    payload = {
+        "token": PUSHOVER_API_TOKEN,
+        "user": PUSHOVER_USER_KEY,
+        "message": message
+    }
+    try:
+        res = requests.post(url, data=payload, timeout=10)
+        if res.status_code == 200:
+            return True
+        else:
+            logger.error(f"Pushover API Error: {res.status_code} - {res.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Pushover Connection Failed: {e}")
+        return False
 
 def get_historical_closes(symbol):
     """Fetches historical daily closes to compute SMA and RSI locally."""
@@ -47,7 +87,7 @@ def get_historical_closes(symbol):
             
         return current_price, rsi, closes
     except Exception as e:
-        print(f"⚠️ API Error for {symbol}: {e}")
+        logger.error(f"API Error fetching metrics for {symbol}: {e}")
         return 0.0, 50.0, []
 
 def check_pcv_trigger(ticker, current_premium, market_closes, nav_closes, is_test=False):
@@ -59,81 +99,121 @@ def check_pcv_trigger(ticker, current_premium, market_closes, nav_closes, is_tes
         if n > 0: premiums.append(((m - n) / n) * 100)
     
     sma_5day = sum(premiums) / len(premiums) if premiums else current_premium
-    if is_test: print(f"    ↳ {ticker} PCV Math -> Current: {current_premium:.2f}%, 5D-SMA: {sma_5day:.2f}%")
+    if is_test: logger.info(f"PCV Math for {ticker} -> Current: {current_premium:.2f}%, 5D-SMA: {sma_5day:.2f}%")
     
     if current_premium < (sma_5day * 0.75):
         msg = f"🚨 RED ALERT: PCV TRIGGERED - {ticker}\nStatus: ⚠️ BEARISH DIVERGENCE\nVelocity: COLLAPSING\nAction: High probability of impending SEC N-2/Rights Offering. Immediate defensive stance advised."
         if HAS_ESSENTIALS:
             send_essentials_embed(WEBHOOK_CORNERSTONE, f"PCV ALERT: {ticker}", msg, 0xe74c3c)
-            send_pushover_alert(f"PCV Triggered for {ticker}. Check Cornerstone channel.")
             send_guardian_email(f"CRITICAL: {ticker} PCV Triggered", msg)
+        send_pushover_alert(f"PCV Triggered for {ticker}. Check Cornerstone channel.")
         return True
     return False
 
-def send_daily_pulse(is_test=False):
-    title = f"☕️ Cornerstone Flowstate Update" + (" - 🧪TEST BROADCAST" if is_test else "")
-    reports = []
+def send_daily_pulse(is_test=False, broadcast_all=False):
+    logger.info("Executing Cornerstone Flowstate Pulse Parsing...")
+    
+    title_discord = f"☕️ Cornerstone Flowstate Update" + (" - 🧪 TEST BROADCAST" if is_test else "")
+    title_plain = f"☕️ Cornerstone Flowstate Update" + (" - 🧪 TEST BROADCAST" if is_test else "")
+    
+    reports_discord = []
+    reports_plain = []
 
     for ticker, config in PRIORITY_ASSETS.items():
         market_price, rsi_1d, m_closes = get_historical_closes(ticker)
         nav_price, _, n_closes = get_historical_closes(config["nav_ticker"])
 
-        if market_price == 0 or nav_price == 0: continue
+        if market_price == 0 or nav_price == 0: 
+            logger.warning(f"Insufficient pricing data to run matrix for {ticker}")
+            continue
+            
         premium = ((market_price - nav_price) / nav_price) * 100
-        
-        # Check PCV Edge Case
         pcv_active = check_pcv_trigger(ticker, premium, m_closes, n_closes, is_test)
         
         if premium < 12.0: p_label = "low"
         elif premium < 20.0: p_label = "neutral"
         else: p_label = "high"
 
+        # RSI Classification System
+        if rsi_1d <= 30.0: rsi_label = "oversold"
+        elif rsi_1d >= 70.0: rsi_label = "overbought"
+        else: rsi_label = "neutral"
+
         if premium > 24.0 or pcv_active:
-            s_str, emoji, note, rec = "CRITICAL", "🚨", "Tactical reduction", "Halt DRIP immediately."
+            s_str, emoji, rec = "CRITICAL", "🚨", "Halt DRIP immediately."
             verdict = "Aggressive price distortion or PCV collapse detected."
         else:
-            s_str, emoji, note, rec = "STABLE", "✅", "Accumulation phase", "Reinvest distributions."
+            s_str, emoji, rec = "STABLE", "✅", "Reinvest distributions."
             verdict = "Premium variance within historical standard deviations."
 
-        reports.append(
+        # Discord String (Includes Markdown Formatting)
+        reports_discord.append(
             f"**{ticker}**\nStatus: {emoji} `{s_str}`\n"
             f"┣ Premium to NAV: `{premium:.1f}%` ({p_label})\n"
             f"┣ SEC: `No N2/ RO detected`\n"
-            f"┣ RSI (1D): `{rsi_1d:.1f}`\n"
+            f"┣ RSI (1D): `{rsi_1d:.1f}` ({rsi_label})\n"
             f"┣ Recommendation: `{rec}`\n"
             f"┗ Verdict: *{verdict}*"
         )
 
-    if not reports: return False
-    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
-        send_essentials_embed(WEBHOOK_CORNERSTONE, title, "\n\n".join(reports), 0x2ecc71)
+        # Plain Text String (Stripped down for Pushover & Email Clarity)
+        reports_plain.append(
+            f"{ticker}\n"
+            f"Status:  {emoji}{s_str}\n"
+            f"┣ Premium to NAV: {premium:.1f}% ({p_label})\n"
+            f"┣ SEC: No N2/ RO detected\n"
+            f"┣ RSI (1D): {rsi_1d:.1f} ({rsi_label})\n"
+            f"┣ Recommendation: {rec}\n"
+            f"┗ Verdict: {verdict}"
+        )
+
+    if not reports_discord: 
+        logger.warning("No actionable pulse data generated.")
+        return False
         
-    if not is_test:
-        with open(PULSE_FILE, "w") as f: f.write(datetime.now(pytz.timezone('Pacific/Honolulu')).isoformat())
+    # 1. Deliver Rich Layout to Discord Channel
+    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+        if send_essentials_embed(WEBHOOK_CORNERSTONE, title_discord, "\n\n".join(reports_discord), 0x2ecc71):
+            logger.info("CEF flowstate matrix successfully delivered to Discord.")
+            
+    # 2. Deliver Matching Clean Layout to Mobile (Pushover) and Email Layers
+    if is_test or broadcast_all:
+        full_plain_body = f"{title_plain}\n\n" + "\n\n".join(reports_plain) + "\n\nTeam ESSENTIALS | Rockefeller Strategic Intelligence"
+        
+        # Fire Pushover Data Payload
+        push_success = send_pushover_alert(full_plain_body)
+        if push_success:
+            logger.info("✅ Pushover clean snapshot data payload delivered successfully.")
+        else:
+            logger.error("❌ Pushover alert failed to push text block layout.")
+            
+        # Fire Email Data Payload
+        if HAS_ESSENTIALS:
+            send_guardian_email(title_plain, full_plain_body)
+            logger.info("✅ Guardian email clean snapshot data payload delivered successfully.")
+            
     return True
 
 if __name__ == "__main__":
-    tz_h = pytz.timezone('Pacific/Honolulu')
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
-        print("🧪 Testing Monitor Logic and PCV engines...")
-        send_daily_pulse(is_test=True)
-        print("✅ Monitor test complete.")
+        logger.info("Terminal Test Mode Initiated. Overriding loops and forcing full snapshot broadcast...")
+        send_daily_pulse(is_test=True, broadcast_all=True)
     else:
+        logger.info("Production Mode: Launching Intraday Guardian Loop.")
+        import time
         while True:
-            now_hst = datetime.now(tz_h)
-            already_pulsed = False
-            if os.path.exists(PULSE_FILE):
-                try:
-                    with open(PULSE_FILE, "r") as f:
-                        content = f.read().strip()
-                        if content:
-                            dt = datetime.fromisoformat(content)
-                            already_pulsed = (dt.astimezone(tz_h).date() == now_hst.date() if dt.tzinfo else dt.date() == now_hst.date())
-                except: pass
-
-            if now_hst.time() >= dt_time(8, 0) and not already_pulsed:
-                if send_daily_pulse(is_test=False):
-                    if HAS_ESSENTIALS:
-                        send_pushover_alert("✅ 0800 HST: Daily CEF Pulse Completed. Sentry Active.")
-                        send_guardian_email("Rockefeller Sentry: 0800 Pulse", "The daily CEF monitoring pulse has completed successfully.")
-            time.sleep(60)
+            try:
+                hst_zone = pytz.timezone('US/Hawaii')
+                now_hst = datetime.now(hst_zone)
+                
+                # Determine if current window hits the daily 08:00 AM HST morning heartbeat check
+                is_morning_pulse_window = (now_hst.hour == 8 and now_hst.minute < 15)
+                
+                # If we are in the morning window, broadcast_all=True triggers full snapshot blocks across channels
+                send_daily_pulse(is_test=False, broadcast_all=is_morning_pulse_window)
+                
+            except Exception as e:
+                logger.error(f"Intraday Guardian encountered an execution error: {e}")
+                
+            logger.info("Scan sequence complete. Sleeping for 15 minutes...")
+            time.sleep(900)

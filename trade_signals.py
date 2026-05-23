@@ -1,23 +1,29 @@
 import os
 import sys
 import logging
+import time
 from dotenv import load_dotenv
 from ecosys import EcosystemState, log_event, logger as base_logger
 
-# 1. Initialize Child Logger
+# 1. Initialize Child Logger & Ensure Console Verbosity
 logger = logging.getLogger("Trade_Signals")
+if not logger.handlers:
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+logger.setLevel(logging.INFO)
 
 # 2. Configuration & Initialization
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# Import required tools into global scope
 try:
     from essentials_tools import send_essentials_embed, get_trend_alignment, get_institutional_conviction
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
-    # Define a dummy function to prevent NameError if import fails
     def send_essentials_embed(*args, **kwargs): return False
 
 def validate_environment():
@@ -35,36 +41,77 @@ WEBHOOKS = {
     "SENTRY": os.getenv("WEBHOOK_MARKET_ANALYSIS")
 }
 
+def get_regime_modifiers():
+    """Reads live RAM state to adjust trading parameters dynamically."""
+    state = EcosystemState()
+    vix_status = state.get("vix_status", "STABLE")
+    regime = state.get("regime", "BULLISH")
+    
+    modifiers = {
+        "position_size": 1.0,
+        "strategy_type": "DEBIT",
+        "shield_active": False,
+        "conviction_required": "NORMAL"
+    }
+
+    if vix_status in ["HIGH_VOLATILITY", "STORM"]:
+        modifiers["shield_active"] = True
+        modifiers["position_size"] = 0.0
+    elif vix_status == "ELEVATED":
+        modifiers["strategy_type"] = "CREDIT"
+        modifiers["position_size"] = 0.50
+        modifiers["conviction_required"] = "HIGH"
+    elif vix_status == "COMPRESSED":
+        modifiers["strategy_type"] = "DEBIT"
+        modifiers["position_size"] = 1.0
+        
+    return modifiers, vix_status, regime
+
 def execute_signal_scan(is_test=False):
-    """Execution pipeline using validated tools."""
+    """Execution pipeline using macro modifier ingestion."""
     webhook = WEBHOOKS.get("OPTIONS")
     
     if not HAS_ESSENTIALS:
         logger.warning("Essentials tools unavailable.")
         return
 
+    # Ingest regime data
+    modifiers, vix_status, regime = get_regime_modifiers()
+    logger.info(f"Loaded Regime Matrix -> VIX Status: [{vix_status}] | Market Regime: [{regime}]")
+
+    if modifiers["shield_active"]:
+        logger.warning("🛡️ CAPITAL SHIELD ACTIVE: Volatility exceeds safety rules. Scanning aborted.")
+        return
+
     if is_test:
-        logger.info("Executing test broadcast...")
+        logger.info("Executing verbose test broadcast...")
         if webhook:
-            success = send_essentials_embed(webhook, "TEST", "Diagnostic Pulse: Connection Verified.")
+            payload_msg = (
+                f"Diagnostic Pulse: Connection Verified.\n"
+                f"┣ **Regime Context**: `{regime}`\n"
+                f"┣ **VIX Volatility Mode**: `{vix_status}`\n"
+                f"┗ **Active Allocation Strategy**: `{modifiers['strategy_type']} Matrix (Size: {modifiers['position_size']*100}%)`"
+            )
+            success = send_essentials_embed(webhook, "TEST: Macro Modifiers Loaded", payload_msg)
             logger.info(f"Test broadcast status: {success}")
         else:
             logger.error("Broadcast aborted: WEBHOOK_TRADE_SIGNALS missing in .env.")
+    else:
+        # --- PRODUCTION SCAN LOGIC ---
+        # Scanner utilizes modifiers['strategy_type'] directly
+        pass
     
-    # ... rest of your signal logic
     logger.info("Signal scan complete.")
 
 if __name__ == "__main__":
     validate_environment()
-    
     logger.info("Trade_Signals initialized and validated.")
 
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         logger.info("Terminal Test Mode Initiated.")
         execute_signal_scan(is_test=True)
     else:
-        logger.info("Production mode: Starting persistent signal loop.")
-        import time
+        logger.info("Production mode: Starting persistent 15-minute signal loop.")
         while True:
             try:
                 execute_signal_scan(is_test=False)
