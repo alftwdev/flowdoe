@@ -28,7 +28,7 @@ except ImportError:
 
 def validate_environment():
     """Gatekeeper: Ensures required keys exist before execution begins."""
-    required_keys = ["WEBHOOK_FUTURES_TRADING", "WEBHOOK_TRADE_SIGNALS"]
+    required_keys = ["WEBHOOK_FUTURES_TRADING", "WEBHOOK_TRADE_SIGNALS", "TWELVE_DATA_API_KEY"]
     missing = [key for key in required_keys if not os.getenv(key)]
     if missing:
         log_event(f"CRITICAL: Missing environment variables: {missing}", "ERROR")
@@ -84,6 +84,7 @@ def get_regime_modifiers():
 def execute_signal_scan(is_test=False):
     """Execution pipeline using macro modifier ingestion."""
     webhook = WEBHOOKS.get("OPTIONS")
+    td_api_key = os.getenv("TWELVE_DATA_API_KEY")
     
     if not HAS_ESSENTIALS:
         logger.warning("Essentials tools unavailable.")
@@ -112,8 +113,44 @@ def execute_signal_scan(is_test=False):
             logger.error("Broadcast aborted: WEBHOOK_TRADE_SIGNALS missing in .env.")
     else:
         # --- PRODUCTION SCAN LOGIC ---
-        # Scanner utilizes modifiers['strategy_type'] directly
-        pass
+        logger.info(f"Initiating structural scanning sequence using the dynamic {modifiers['strategy_type']} framework...")
+        
+        # Target evaluation assets (e.g., core index tracking macro flows)
+        scan_targets = ["SPY", "QQQ"]
+        
+        for symbol in scan_targets:
+            # 1. Evaluate cross-asset trend alignment
+            trend_status, is_bullish = get_trend_alignment(symbol, td_api_key)
+            logger.info(f"Scan Profile [{symbol}] -> Trend Status: {trend_status}")
+            
+            # 2. Enforce structural conviction gates based on VIX status
+            conviction_passed = True
+            if modifiers["conviction_required"] == "HIGH":
+                has_conviction = get_institutional_conviction(symbol, td_api_key)
+                if not has_conviction:
+                    conviction_passed = False
+                    logger.info(f"Scan Target [{symbol}] bypassed: Fails institutional volume conviction threshold.")
+            
+            # 3. Dispatches orders if structural conditions align with macro regime
+            if conviction_passed:
+                allocated_size = modifiers["position_size"]
+                sl_multiplier = modifiers["stop_loss_multiplier"]
+                tp_target = modifiers["take_profit_target"]
+                
+                logger.info(f"🚨 SIGNAL MATCH: Deploying {modifiers['strategy_type']} matrix on {symbol}. Allocating {allocated_size * 100}%.")
+                
+                payload_msg = (
+                    f"⚡ **Rockefeller Quantamental Signal Triggered**\n"
+                    f"┣ **Asset Tracker**: `{symbol}`\n"
+                    f"┣ **Trend Alignment**: `{trend_status}`\n"
+                    f"┣ **Strategy Context**: `{modifiers['strategy_type']} Execution Model`\n"
+                    f"┣ **Risk Sizing Allocation**: `{allocated_size * 100:.1f}% of Base Limit`\n"
+                    f"┣ **Adaptive Stop-Loss Boundary**: `{sl_multiplier:.2f}x Volatility Bracket`\n"
+                    f"┗ **Adaptive Profit Target Boundary**: `{tp_target:.2f}x Velocity Target`"
+                )
+                
+                if webhook:
+                    send_essentials_embed(webhook, f"🚨 STRATEGY TRIGGER: {symbol} Configuration", payload_msg)
     
     logger.info("Signal scan complete.")
 

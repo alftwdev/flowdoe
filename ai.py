@@ -1,7 +1,10 @@
 import os
 import json
+import logging
 import requests
 from dotenv import load_dotenv
+
+logger = logging.getLogger("AI_Engine")
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -48,5 +51,14 @@ def generate_ai_macro_brief(history_data_string, fred_liquidity_billions, credit
         return json.loads(raw_text)
         
     except Exception as e:
-        print(f"Gemini API failure: {e}")
-        return None
+        logger.error(f"Gemini API link disruption or payload validation failure: {e}")
+        
+        # Fallback Operational Blueprint Schema to prevent downstream script dependency execution crashes
+        fallback_schema = {
+            "macro_regime_outlook": "CHOP",
+            "recommended_position_sizing": 0.25,
+            "sector_rotation_focus": "DEFENSIVE PRESERVATION / CASH ESCROW",
+            "tactical_adjustment_notes": "Automated SRE safety circuit triggered due to an external network API parsing exception. Reverting engine parameters to high-integrity defensive limits.",
+            "discord_embed_brief": "⚠️ **System Boundary Exception:** Macro AI analytics core is temporarily unreachable. The engine has seamlessly engaged internal defensive defaults. System stability remains green."
+        }
+        return fallback_schema
