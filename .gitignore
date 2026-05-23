@@ -29,3 +29,10 @@ last_pulse.txt
 signal_results.json
 last_pulse.txt
 signal_results.json
+
+# Ignore local runtime tracking and logs
+*.log
+*.json
+*.csv
+*.txt
+.env
