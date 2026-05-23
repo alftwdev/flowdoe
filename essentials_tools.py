@@ -7,6 +7,10 @@ import pandas as pd
 import smtplib
 from email.message import EmailMessage
 from dotenv import load_dotenv
+from ecosys import logger as base_logger
+
+# Initialize Child Logger for ecosystem tracking
+logger = logging.getLogger("Essentials_Tools")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -20,8 +24,9 @@ def send_pushover_alert(message):
             requests.post("https://api.pushover.net/1/messages.json", data={
                 "token": token, "user": user, "message": message, "title": "Rockefeller Alert"
             }, timeout=5)
+            logger.info("Pushover alert dispatched successfully.")
         except Exception as e:
-            print(f"    [TOOLS] Pushover Failed: {e}")
+            logger.error(f"Pushover transmission failed: {e}")
 
 def send_guardian_email(subject, body):
     sender = os.getenv("SENDER_EMAIL")
@@ -37,8 +42,9 @@ def send_guardian_email(subject, body):
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(sender, pwd)
                 smtp.send_message(msg)
+            logger.info("Guardian email dispatched successfully.")
         except Exception as e:
-            print(f"    [TOOLS] Guardian Email Failed: {e}")
+            logger.error(f"Guardian Email transmission failed: {e}")
 
 def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
     if not webhook_url or webhook_url == "None": 
@@ -54,7 +60,7 @@ def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
         res = requests.post(webhook_url, json=payload, timeout=10)
         return res.status_code in [200, 204]
     except Exception as e:
-        print(f"    [TOOLS] Discord Broadcast Failed: {e}")
+        logger.error(f"Discord broadcast failed: {e}")
         return False
 
 # --- 2. ANALYTICS & INSTITUTIONAL INDICATORS ---
@@ -76,7 +82,8 @@ def get_trend_alignment(symbol, td_api_key):
         is_bullish = curr_price > trend_val
         status = "🟢 BULLISH ALIGNMENT" if is_bullish else "🔴 BEARISH PRESSURE"
         return status, is_bullish
-    except:
+    except Exception as e:
+        logger.error(f"Trend alignment computation failed for {symbol}: {e}")
         return "NEUTRAL", True
 
 def get_institutional_conviction(symbol, td_api_key):
@@ -84,10 +91,14 @@ def get_institutional_conviction(symbol, td_api_key):
     try:
         r = requests.get(url, timeout=10).json()
         stats = r.get("statistics", {})
+        
+        # Safe extraction preventing the AMT dictionary key crash
         vol = int(stats.get("volume", 0))
         avg_vol = int(stats.get("avg_volume_30_days", 1))
+        
         if vol > (avg_vol * 1.5):
             return "⚡ HIGH (Whale Inflow)", 0x2ecc71, True
         return "NORMAL", 0x95a5a6, False
-    except:
+    except Exception as e:
+        logger.error(f"Institutional conviction scan failed for {symbol}: {e}")
         return "NORMAL", 0x95a5a6, False

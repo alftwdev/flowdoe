@@ -3,12 +3,13 @@ import json
 import threading
 import logging
 
-# Systemic Logging Pipeline Configuration
 logging.basicConfig(
     filename='ecosystem.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+# Create a logger specific to the ecosystem
+logger = logging.getLogger("Rockefeller")
 
 def log_event(message, level="INFO"):
     """Redirects all non-critical metrics to a file stream to save CPU and disk space."""

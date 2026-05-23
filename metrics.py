@@ -1,20 +1,34 @@
 import os
 import sys
 import json
+import logging
 import pandas as pd
 import requests
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
+from ecosys import EcosystemState, log_event, logger as base_logger
+
+# 1. Initialize Child Logger
+logger = logging.getLogger("Metrics_Engine")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+def validate_environment():
+    required_keys = ["TWELVE_DATA_API_KEY", "WEBHOOK_ANNOUNCEMENTS"]
+    missing = [key for key in required_keys if not os.getenv(key)]
+    if missing:
+        logger.error(f"CRITICAL: Missing environment variables: {missing}")
+        sys.exit(1)
 
 try:
     from essentials_tools import send_essentials_embed, send_pushover_alert
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
+
+validate_environment()
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 HISTORY_FILE = os.path.join(BASE_DIR, "macro_history.csv")
@@ -26,10 +40,10 @@ def get_closing_quote(symbol):
     try:
         res = requests.get(url, timeout=10).json()
         return float(res.get("close", res.get("price", 0.0)))
-    except: return 0.0
+    except: 
+        return 0.0
 
 def calculate_true_pnl(is_test=False):
-    """Calculates true PnL% using exit and entry prices strictly from the JSON."""
     if not os.path.exists(SIGNAL_FILE): return 0.0, 100.0
     try:
         with open(SIGNAL_FILE, "r") as f:
@@ -47,17 +61,17 @@ def calculate_true_pnl(is_test=False):
                     total_pnl += pnl_pct
                     total_trades += 1
                     if pnl_pct >= 0: wins += 1
-                except ValueError: pass # Ignore entries that still say "LIVE"
+                except ValueError: pass 
                 
         acc = round((wins / total_trades) * 100, 1) if total_trades > 0 else 100.0
-        if is_test: print(f"    ↳ Calculated Math: {total_trades} trades closed. Net PnL: {total_pnl:.2f}%, Accuracy: {acc}%")
+        if is_test: logger.info(f"Calculated Math: {total_trades} trades. Net PnL: {total_pnl:.2f}%, Acc: {acc}%")
         return round(total_pnl, 2), acc
     except Exception as e:
-        if is_test: print(f"    ↳ Math error: {e}")
+        logger.error(f"Math calculation error in ledger: {e}")
         return 0.0, 100.0
 
 def execute_performance_engine(is_test=False):
-    print("⚙️ Executing Unified Performance Metric Engine...")
+    logger.info("Executing Unified Performance Metric Engine...")
     today_str = datetime.now(pytz.timezone('Pacific/Honolulu')).strftime("%Y-%m-%d")
     
     spy_close = get_closing_quote("SPY")
@@ -70,32 +84,24 @@ def execute_performance_engine(is_test=False):
         if not os.path.exists(HISTORY_FILE): df_new.to_csv(HISTORY_FILE, index=False)
         else: df_new.to_csv(HISTORY_FILE, mode='a', header=False, index=False)
     else:
-        print(f"    ↳ CSV Append Skipped in test mode. Data: SPY {spy_close}, VIX {vix_close}")
+        logger.info(f"CSV Append Skipped in test mode. Data: SPY {spy_close}, VIX {vix_close}")
 
-    # Build Bait
     emoji = "🟢" if acc >= 70.0 else ("🟡" if acc >= 50.0 else "🔴")
     rev_str = f"+{net_rev}%" if net_rev >= 0 else f"{net_rev}%"
     
     title = "📊 Rockefeller Post-Market Performance Review"
-    desc = (
-        f"### **Ecosystem Performance Audit: {today_str}**\n\n"
-        f"┣ **Accuracy Baseline**: `{emoji} {acc}% Win-Rate`\n"
-        f"┣ **Net System Yield**: `{rev_str} Realized Return` *(Ledger Verified.)*\n"
-        f"┗ 🛡️ **Capital Exposure Shield**: `ACTIVE` *(Risk parameters strictly enforced.)*\n\n"
-        f"### **Macro Context Integration**:\n"
-        f"┣ **SPY Close**: `${spy_close:,.2f}`\n"
-        f"┗ **Volatility (VIX)**: `{vix_close}`\n\n"
-        f"***\n"
-        f"**Premium Access Directive**: Unlock live Auction Market Theory logic and intraday institutional setups inside #subscription."
-    )
-    
-    if is_test:
-        print(f"\n{desc}\n")
+    desc = (f"### **Ecosystem Performance Audit: {today_str}**\n\n"
+            f"┣ **Accuracy Baseline**: `{emoji} {acc}% Win-Rate`\n"
+            f"┣ **Net System Yield**: `{rev_str} Realized Return` *(Ledger Verified.)*\n"
+            f"┗ 🛡️ **Capital Exposure Shield**: `ACTIVE`\n\n"
+            f"### **Macro Context Integration**:\n"
+            f"┣ **SPY Close**: `${spy_close:,.2f}`\n"
+            f"┗ **Volatility (VIX)**: `{vix_close}`")
     
     if HAS_ESSENTIALS and WEBHOOK_ANN:
         if send_essentials_embed(WEBHOOK_ANN, title, desc, 0x2ecc71 if net_rev >= 0 else 0xe74c3c):
             if not is_test: send_pushover_alert("✅ Metric Engine executed and ledger updated.")
-            print("✅ Performance bait successfully dispatched.")
+            logger.info("Performance bait successfully dispatched.")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
