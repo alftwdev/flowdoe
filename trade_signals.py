@@ -42,28 +42,42 @@ WEBHOOKS = {
 }
 
 def get_regime_modifiers():
-    """Reads live RAM state to adjust trading parameters dynamically."""
+    """Reads live RAM state to adjust trading parameters and risk limits dynamically."""
     state = EcosystemState()
     vix_status = state.get("vix_status", "STABLE")
     regime = state.get("regime", "BULLISH")
     
+    # Initialize with default conservative-neutral parameters
     modifiers = {
         "position_size": 1.0,
         "strategy_type": "DEBIT",
         "shield_active": False,
-        "conviction_required": "NORMAL"
+        "conviction_required": "NORMAL",
+        "stop_loss_multiplier": 1.0,
+        "take_profit_target": 1.0
     }
 
+    # Logic gates for Volatility Expansion
     if vix_status in ["HIGH_VOLATILITY", "STORM"]:
         modifiers["shield_active"] = True
         modifiers["position_size"] = 0.0
+        modifiers["conviction_required"] = "HIGH"
+        modifiers["stop_loss_multiplier"] = 2.0  # Widen stops to avoid chop out
+        modifiers["take_profit_target"] = 0.5    # Take profits faster in chaos
+        
     elif vix_status == "ELEVATED":
         modifiers["strategy_type"] = "CREDIT"
         modifiers["position_size"] = 0.50
         modifiers["conviction_required"] = "HIGH"
+        modifiers["stop_loss_multiplier"] = 1.5  # Moderate widen
+        modifiers["take_profit_target"] = 0.75   # Moderate acceleration
+        
     elif vix_status == "COMPRESSED":
         modifiers["strategy_type"] = "DEBIT"
         modifiers["position_size"] = 1.0
+        modifiers["conviction_required"] = "NORMAL"
+        modifiers["stop_loss_multiplier"] = 1.0  # Standard risk
+        modifiers["take_profit_target"] = 1.0
         
     return modifiers, vix_status, regime
 

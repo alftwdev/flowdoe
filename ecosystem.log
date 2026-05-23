@@ -230,3 +230,9 @@
 2026-05-23 00:30:23,979 - CEF_Monitor - INFO - ✅ Pushover clean snapshot data payload delivered successfully.
 2026-05-23 00:30:27,104 - Essentials_Tools - INFO - Guardian email dispatched successfully.
 2026-05-23 00:30:27,105 - CEF_Monitor - INFO - ✅ Guardian email clean snapshot data payload delivered successfully.
+2026-05-23 00:34:39,268 - Trade_Signals - INFO - Trade_Signals initialized and validated.
+2026-05-23 00:34:39,269 - Trade_Signals - INFO - Terminal Test Mode Initiated.
+2026-05-23 00:34:39,269 - Trade_Signals - INFO - Loaded Regime Matrix -> VIX Status: [STABLE] | Market Regime: [BULLISH]
+2026-05-23 00:34:39,269 - Trade_Signals - INFO - Executing verbose test broadcast...
+2026-05-23 00:34:39,725 - Trade_Signals - INFO - Test broadcast status: True
+2026-05-23 00:34:39,726 - Trade_Signals - INFO - Signal scan complete.

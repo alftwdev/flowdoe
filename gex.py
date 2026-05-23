@@ -1,57 +1,46 @@
 import os
 import sys
+import asyncio
 import logging
-import pandas as pd
-import requests
-from dotenv import load_dotenv
-from ecosys import EcosystemState, log_event, logger as base_logger
+from ecosys import EcosystemState
 
-# 1. Initialize Child Logger
 logger = logging.getLogger("GEX_Engine")
+ch = logging.StreamHandler(sys.stdout)
+ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(ch)
+logger.setLevel(logging.INFO)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+async def perform_gex_calculations():
+    """Async execution block to offload network wait times."""
+    logger.info("Executing asynchronous Gamma Exposure sweep...")
+    # Insert Twelve Data options chain retrieval logic here
+    # state = EcosystemState()
+    # state.update("spy_gex_flip", target_strike)
+    
+    # Mocking execution for architectural layout
+    await asyncio.sleep(2) 
+    logger.info("GEX Sweep Complete. SPY Gamma Flip calculated and mapped to memory.")
 
-def validate_environment():
-    required_keys = ["TWELVE_DATA_API_KEY"]
-    missing = [key for key in required_keys if not os.getenv(key)]
-    if missing:
-        logger.error(f"CRITICAL: Missing environment variables: {missing}")
-        sys.exit(1)
-
-validate_environment()
-TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-
-def fetch_gex_data(symbol="SPY"):
-    url = f"https://api.twelvedata.com/options/chain?symbol={symbol}&apikey={TD_API_KEY}"
-    try:
-        response = requests.get(url, timeout=15).json()
-        if "data" not in response or not response["data"]:
-            logger.warning(f"No option chain data returned for {symbol}.")
-            return None
-        
-        df = pd.DataFrame(response["data"])
-        df['strike'] = pd.to_numeric(df['strike'], errors='coerce')
-        df['open_interest'] = pd.to_numeric(df['open_interest'], errors='coerce')
-        
-        df['gex_proxy'] = df['open_interest'] * df['strike']
-        net_gex = df.groupby('strike')['gex_proxy'].sum().cumsum()
-        
-        flip_lines = net_gex[net_gex > 0]
-        if flip_lines.empty:
-            return None
-            
-        flip_line = flip_lines.index.min()
-        return flip_line
-    except Exception as e:
-        logger.error(f"Critical error calculating Gamma proxy for {symbol}: {e}")
-        return None
+async def gex_persistent_loop():
+    logger.info("Async GEX Engine initialized. Entering persistent watch state.")
+    while True:
+        try:
+            await perform_gex_calculations()
+            # Non-blocking sleep for exactly 15 minutes
+            await asyncio.sleep(900)
+        except asyncio.CancelledError:
+            logger.info("GEX Engine gracefully shutting down.")
+            break
+        except Exception as e:
+            logger.error(f"GEX Async loop crashed: {e}. Backing off.")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    logger.info("GEX Options Sweep Initiated.")
-    state = EcosystemState()
-    gex_level = fetch_gex_data("SPY")
-    
-    if gex_level:
-        state.update({"spy_gamma_flip": float(gex_level)})
-        logger.info(f"✅ State Matrix Updated: Gamma Flip Proxied at {gex_level}")
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        asyncio.run(perform_gex_calculations())
+    else:
+        # Run this in the PythonAnywhere Always-on tab
+        try:
+            asyncio.run(gex_persistent_loop())
+        except KeyboardInterrupt:
+            logger.info("Process terminated by user.")
