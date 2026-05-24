@@ -8,6 +8,7 @@ import smtplib
 from email.message import EmailMessage
 from dotenv import load_dotenv
 from ecosys import logger as base_logger
+from ocr import generate_generic_payload
 
 # Initialize Child Logger for ecosystem tracking
 logger = logging.getLogger("Essentials_Tools")
@@ -47,20 +48,37 @@ def send_guardian_email(subject, body):
             logger.error(f"Guardian Email transmission failed: {e}")
 
 def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
+    """
+    Globally intercepts text alerts, converts them to heavily branded, 
+    OCR-resistant images, and dispatches them via Discord Webhook.
+    """
     if not webhook_url or webhook_url == "None": 
         return False
-    payload = {
-        "embeds": [{
-            "title": title, "description": description, "color": color,
-            "footer": {"text": "Team ESSENTIALS | Rockefeller Strategic Intelligence"},
-            "timestamp": datetime.datetime.utcnow().isoformat()
-        }]
-    }
+        
     try:
-        res = requests.post(webhook_url, json=payload, timeout=10)
+        # 1. Generate the image entirely in RAM
+        image_buffer = generate_generic_payload(title, description)
+        
+        # 2. Package as a multipart file upload
+        files = {
+            'file': ('ESSENTIALS_ALERT.png', image_buffer.getvalue(), 'image/png')
+        }
+        
+        # 3. Add the searchable text hook
+        payload = {
+            "content": f"**{title}**\n*Rockefeller Guard Loop Verified*"
+        }
+        
+        # 4. Dispatch
+        res = requests.post(webhook_url, data=payload, files=files, timeout=15)
+        
+        # 5. Clear memory
+        image_buffer.close()
+        
         return res.status_code in [200, 204]
+        
     except Exception as e:
-        logger.error(f"Discord broadcast failed: {e}")
+        logger.error(f"Discord visual broadcast failed: {e}")
         return False
 
 # --- 2. ANALYTICS & INSTITUTIONAL INDICATORS ---

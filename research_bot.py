@@ -104,7 +104,7 @@ async def query(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper()
     
     # Defer interaction payload response securely to handle upstream API network wait times
-    await interaction.response.defer(ephemeral=False)
+    await interaction.response.defer(ephemeral=True)
 
     # 1. Fetch Process-Safe Global Ecosystem Parameters
     state = EcosystemState()
