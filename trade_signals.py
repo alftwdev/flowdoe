@@ -3,7 +3,7 @@ import sys
 import logging
 import time
 from dotenv import load_dotenv
-from ecosys import EcosystemState, log_event, logger as base_logger
+from database import EcosystemDatabase
 
 # 1. Initialize Child Logger & Ensure Console Verbosity
 logger = logging.getLogger("Trade_Signals")
@@ -18,6 +18,7 @@ logger.setLevel(logging.INFO)
 # 2. Configuration & Initialization
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+db = EcosystemDatabase()
 
 try:
     from essentials_tools import send_essentials_embed, get_trend_alignment, get_institutional_conviction
@@ -31,10 +32,9 @@ def validate_environment():
     required_keys = ["WEBHOOK_FUTURES_TRADING", "WEBHOOK_TRADE_SIGNALS", "TWELVE_DATA_API_KEY"]
     missing = [key for key in required_keys if not os.getenv(key)]
     if missing:
-        log_event(f"CRITICAL: Missing environment variables: {missing}", "ERROR")
+        db.log_event(f"CRITICAL: Missing environment variables: {missing}", "ERROR")
         sys.exit(1)
 
-STATE_FILE = os.path.join(BASE_DIR, "last_trade_alerts.json")
 WEBHOOKS = {
     "FUTURES": os.getenv("WEBHOOK_FUTURES_TRADING"),
     "OPTIONS": os.getenv("WEBHOOK_TRADE_SIGNALS"),
@@ -43,9 +43,10 @@ WEBHOOKS = {
 
 def get_regime_modifiers():
     """Reads live RAM state to adjust trading parameters and risk limits dynamically."""
-    state = EcosystemState()
-    vix_status = state.get("vix_status", "STABLE")
-    regime = state.get("regime", "BULLISH")
+    # Read directly from SQLite database
+    regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
+    vix_status = regime_data.get("vix_status", "STABLE")
+    regime = regime_data.get("regime", "BULLISH")
     
     # Initialize with default conservative-neutral parameters
     modifiers = {
@@ -62,21 +63,21 @@ def get_regime_modifiers():
         modifiers["shield_active"] = True
         modifiers["position_size"] = 0.0
         modifiers["conviction_required"] = "HIGH"
-        modifiers["stop_loss_multiplier"] = 2.0  # Widen stops to avoid chop out
-        modifiers["take_profit_target"] = 0.5    # Take profits faster in chaos
+        modifiers["stop_loss_multiplier"] = 2.0
+        modifiers["take_profit_target"] = 0.5
         
     elif vix_status == "ELEVATED":
         modifiers["strategy_type"] = "CREDIT"
         modifiers["position_size"] = 0.50
         modifiers["conviction_required"] = "HIGH"
-        modifiers["stop_loss_multiplier"] = 1.5  # Moderate widen
-        modifiers["take_profit_target"] = 0.75   # Moderate acceleration
+        modifiers["stop_loss_multiplier"] = 1.5
+        modifiers["take_profit_target"] = 0.75
         
     elif vix_status == "COMPRESSED":
         modifiers["strategy_type"] = "DEBIT"
         modifiers["position_size"] = 1.0
         modifiers["conviction_required"] = "NORMAL"
-        modifiers["stop_loss_multiplier"] = 1.0  # Standard risk
+        modifiers["stop_loss_multiplier"] = 1.0
         modifiers["take_profit_target"] = 1.0
         
     return modifiers, vix_status, regime
@@ -99,31 +100,35 @@ def execute_signal_scan(is_test=False):
         return
 
     if is_test:
-        logger.info("Executing verbose test broadcast...")
-        if webhook:
-            payload_msg = (
-                f"Diagnostic Pulse: Connection Verified.\n"
-                f"┣ **Regime Context**: `{regime}`\n"
-                f"┣ **VIX Volatility Mode**: `{vix_status}`\n"
-                f"┗ **Active Allocation Strategy**: `{modifiers['strategy_type']} Matrix (Size: {modifiers['position_size']*100}%)`"
-            )
-            success = send_essentials_embed(webhook, "TEST: Macro Modifiers Loaded", payload_msg)
-            logger.info(f"Test broadcast status: {success}")
-        else:
-            logger.error("Broadcast aborted: WEBHOOK_TRADE_SIGNALS missing in .env.")
+        logger.info("Executing verbose test broadcast across all routing channels...")
+        
+        test_webhooks = {
+            "Options / Equities": os.getenv("WEBHOOK_TRADE_SIGNALS"),
+            "Futures / Macro": os.getenv("WEBHOOK_FUTURES_TRADING")
+        }
+        
+        for channel_name, webhook_url in test_webhooks.items():
+            if webhook_url:
+                payload_msg = (
+                    f"Diagnostic Pulse: Connection Verified for {channel_name}.\n"
+                    f"┣ **Regime Context**: `{regime}`\n"
+                    f"┣ **VIX Volatility Mode**: `{vix_status}`\n"
+                    f"┗ **Active Allocation Strategy**: `{modifiers['strategy_type']} Matrix (Size: {modifiers['position_size']*100}%)`"
+                )
+                success = send_essentials_embed(webhook_url, f"TEST: System Link Validated [{channel_name}]", payload_msg)
+                logger.info(f"Test broadcast status for {channel_name}: {'SUCCESS' if success else 'FAILED'}")
+            else:
+                logger.warning(f"Test broadcast aborted for {channel_name}: Webhook missing in .env.")
+        return
     else:
         # --- PRODUCTION SCAN LOGIC ---
         logger.info(f"Initiating structural scanning sequence using the dynamic {modifiers['strategy_type']} framework...")
-        
-        # Target evaluation assets (e.g., core index tracking macro flows)
         scan_targets = ["SPY", "QQQ"]
         
         for symbol in scan_targets:
-            # 1. Evaluate cross-asset trend alignment
             trend_status, is_bullish = get_trend_alignment(symbol, td_api_key)
             logger.info(f"Scan Profile [{symbol}] -> Trend Status: {trend_status}")
             
-            # 2. Enforce structural conviction gates based on VIX status
             conviction_passed = True
             if modifiers["conviction_required"] == "HIGH":
                 has_conviction = get_institutional_conviction(symbol, td_api_key)
@@ -131,13 +136,13 @@ def execute_signal_scan(is_test=False):
                     conviction_passed = False
                     logger.info(f"Scan Target [{symbol}] bypassed: Fails institutional volume conviction threshold.")
             
-            # 3. Dispatches orders if structural conditions align with macro regime
             if conviction_passed:
                 allocated_size = modifiers["position_size"]
                 sl_multiplier = modifiers["stop_loss_multiplier"]
                 tp_target = modifiers["take_profit_target"]
                 
                 logger.info(f"🚨 SIGNAL MATCH: Deploying {modifiers['strategy_type']} matrix on {symbol}. Allocating {allocated_size * 100}%.")
+                db.log_event(f"Trade Signals: Deployed {modifiers['strategy_type']} matrix on {symbol} at {allocated_size * 100}% allocation.")
                 
                 payload_msg = (
                     f"⚡ **Rockefeller Quantamental Signal Triggered**\n"

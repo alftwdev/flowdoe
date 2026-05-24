@@ -8,7 +8,9 @@ import logging
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
-from ecosys import logger as base_logger
+from database import EcosystemDatabase
+
+db = EcosystemDatabase()
 
 logger = logging.getLogger("CEF_Monitor")
 if not logger.handlers:

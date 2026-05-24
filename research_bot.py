@@ -4,15 +4,15 @@ import json
 import logging
 import asyncio
 import requests
+import discord
 from datetime import datetime
 from dotenv import load_dotenv
-
-import discord
 from discord import app_commands
 from discord.ext import commands
-
-# Ingest Ecosystem State and Multi-Process Lock Management
-from ecosys import EcosystemState, log_event
+from database import EcosystemDatabase
+db = EcosystemDatabase()
+# Replace legacy log_event("text") with:
+db.log_event("Your tracking string context message goes here.")
 
 # Initialize System Logger Profile
 logger = logging.getLogger("Rockefeller_Research_Bot")
@@ -20,6 +20,18 @@ ch = logging.StreamHandler(sys.stdout)
 ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(ch)
 logger.setLevel(logging.INFO)
+
+@bot.tree.command(name="query", description="Run institutional Quantamental analysis on any ticker symbol.")
+@app_commands.describe(ticker="Enter asset token or equity ticker symbol")
+async def query(interaction: discord.Interaction, ticker: str):
+    ticker = ticker.upper()
+    await interaction.response.defer(ephemeral=True)
+
+    # Fetch from SQLite
+    regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH", "rsi_shield_limit": 66})
+    vix_status = regime_data.get("vix_status")
+    regime = regime_data.get("regime")
+    rsi_limit = regime_data.get("rsi_shield_limit")
 
 # --- 1. CONFIGURATION & UNITY PATHING ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -99,6 +111,14 @@ async def gather_market_intelligence(ticker: str):
 # --- 3. QUANTAMENTAL ANALYST ENGINE SLASHER ---
 
 @bot.tree.command(name="query", description="Run institutional Quantamental analysis on any ticker symbol.")
+@query.error
+async def query_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    logger.error(f"Command Error: {error}")
+    error_msg = "⚠️ **System Boundary Exception:** Unable to process query due to network latency or API constraints."
+    if interaction.response.is_done():
+        await interaction.followup.send(error_msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(error_msg, ephemeral=True)
 @app_commands.describe(ticker="Enter asset token or equity ticker ticker symbol (e.g., TQQQ, CHPY, MLPI, NVDA)")
 async def query(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper()
@@ -207,5 +227,5 @@ if __name__ == "__main__":
         logger.info("Initializing Sentry Connection Protocols... Booting Discord Gateway Client.")
         bot.run(TOKEN)
     else:
-        log_event("CRITICAL: Failed to launch research bot - DISCORD_TOKEN is empty or missing from configuration enviroment.", "ERROR")
+        log_event("CRITICAL: Failed to launch research bot - DISCORD_TOKEN is empty or missing from configuration environment.", "ERROR")
         logger.error("❌ DISCORD_TOKEN is missing or undefined inside active .env workspace.")

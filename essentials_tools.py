@@ -1,22 +1,50 @@
 import os
+import time
 import json
 import logging
-import requests
-import datetime
-import pandas as pd
 import smtplib
-from email.message import EmailMessage
+import requests
+import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
-from ecosys import logger as base_logger
-from ocr import generate_generic_payload
+from email.message import EmailMessage
 
-# Initialize Child Logger for ecosystem tracking
+from security import encode_canary
+
+# Initialize Logger
 logger = logging.getLogger("Essentials_Tools")
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    logger.addHandler(ch)
+logger.setLevel(logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# --- 1. ALERTS & NOTIFICATIONS ---
+# --- DIAGNOSTICS & GATEKEEPERS ---
+def benchmark_latency(func):
+    """Decorator to track API execution speed for future-proofing."""
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        end = time.perf_counter()
+        logger.info(f"[Latency Benchmark] {func.__name__} executed in {(end - start):.4f} seconds.")
+        return result
+    return wrapper
+
+def validate_payload_integrity(payload, expected_keys):
+    """Ensures API data is intact before the ecosystem uses it."""
+    if not payload or not isinstance(payload, dict):
+        logger.error("Gatekeeper Check Failed: Payload is empty or invalid format.")
+        return False
+    
+    missing_keys = [key for key in expected_keys if key not in payload]
+    if missing_keys:
+        logger.error(f"Gatekeeper Check Failed: Missing expected keys {missing_keys}")
+        return False
+    return True
+
+# --- ALERTS & NOTIFICATIONS ---
 def send_pushover_alert(message):
     token = os.getenv("PUSHOVER_APP_TOKEN")
     user = os.getenv("PUSHOVER_USER_KEY")
@@ -47,41 +75,43 @@ def send_guardian_email(subject, body):
         except Exception as e:
             logger.error(f"Guardian Email transmission failed: {e}")
 
-def send_essentials_embed(webhook_url, title, description, color=0x2ecc71):
-    """
-    Globally intercepts text alerts, converts them to heavily branded, 
-    OCR-resistant images, and dispatches them via Discord Webhook.
-    """
-    if not webhook_url or webhook_url == "None": 
-        return False
-        
+@benchmark_latency
+def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_id="123456789"):
+    """Dispatches a rich-text embed with an attached local thumbnail logo and invisible security canary."""
+    canary_string = encode_canary(int(user_id))
+    secured_description = f"{description}\n{canary_string}"
+    logo_path = os.path.join(BASE_DIR, "ESSENTIALS - FOMO Logo.png")
+    
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": secured_description,
+            "color": color,
+            "footer": {"text": "ESSENTIALS Macro-Quant Architecture | Data Secured"}
+        }]
+    }
+
     try:
-        # 1. Generate the image entirely in RAM
-        image_buffer = generate_generic_payload(title, description)
-        
-        # 2. Package as a multipart file upload
-        files = {
-            'file': ('ESSENTIALS_ALERT.png', image_buffer.getvalue(), 'image/png')
-        }
-        
-        # 3. Add the searchable text hook
-        payload = {
-            "content": f"**{title}**\n*Rockefeller Guard Loop Verified*"
-        }
-        
-        # 4. Dispatch
-        res = requests.post(webhook_url, data=payload, files=files, timeout=15)
-        
-        # 5. Clear memory
-        image_buffer.close()
-        
-        return res.status_code in [200, 204]
-        
+        if os.path.exists(logo_path):
+            payload["embeds"][0]["thumbnail"] = {"url": "attachment://logo.png"}
+            with open(logo_path, "rb") as f:
+                files = {
+                    "payload_json": (None, json.dumps(payload)),
+                    "file": ("logo.png", f, "image/png")
+                }
+                r = requests.post(webhook_url, files=files, timeout=5)
+                r.raise_for_status()
+        else:
+            # Fallback if image doesn't exist locally (prevents catastrophic boundary crashes)
+            r = requests.post(webhook_url, json=payload, timeout=5)
+            r.raise_for_status()
+            
+        return True
     except Exception as e:
-        logger.error(f"Discord visual broadcast failed: {e}")
+        logger.error(f"Discord secure dispatch failed: {e}")
         return False
 
-# --- 2. ANALYTICS & INSTITUTIONAL INDICATORS ---
+# --- ANALYTICS & INSTITUTIONAL INDICATORS ---
 def calculate_correlation(btc_prices, spy_prices):
     if not btc_prices or not spy_prices or len(btc_prices) != len(spy_prices): return 1.0
     df = pd.DataFrame({'BTC': btc_prices, 'SPY': spy_prices})
@@ -109,8 +139,6 @@ def get_institutional_conviction(symbol, td_api_key):
     try:
         r = requests.get(url, timeout=10).json()
         stats = r.get("statistics", {})
-        
-        # Safe extraction preventing the AMT dictionary key crash
         vol = int(stats.get("volume", 0))
         avg_vol = int(stats.get("avg_volume_30_days", 1))
         

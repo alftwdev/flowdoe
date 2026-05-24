@@ -29,8 +29,7 @@ except ImportError:
 validate_environment()
 
 WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
-REGIME_LEDGER = os.path.join(BASE_DIR, "market_regime.json")
-STATE_FILE = os.path.join(BASE_DIR, "last_alert.json")
+db.get_state("market_regime")
 
 def load_crypto_state_context():
     context = {"btc_price": "N/A", "eth_price": "N/A", "has_crypto": False}
@@ -59,6 +58,26 @@ def load_crypto_state_context():
     except Exception as e:
         logger.warning(f"Crypto State Ingestion Omitted: {e}")
         return context
+
+def check_market_status():
+    """Validates if the NYSE is open today."""
+    td_key = os.getenv("TWELVE_DATA_API_KEY")
+    try:
+        res = requests.get(f"https://api.twelvedata.com/market_state?apikey={td_key}", timeout=5).json()
+        for market in res:
+            if market.get("country") == "United States" and market.get("code") == "NYSE":
+                return market.get("is_market_open"), market.get("time_to_open", "Closed")
+    except Exception as e:
+        logger.error(f"Market state fetch failed: {e}")
+    return True, "" # Default to assuming open if API fails
+
+# Inside generate_morning_brief():
+is_open, time_to_open = check_market_status()
+if not is_open:
+    title = "🌅 Rockefeller Morning Intelligence Briefing [MARKET CLOSED]"
+    description = f"### **System Standby: Market Holiday**\nCurrently, markets are closed, enjoy the day & some nature. Normal operations will resume at the next active trading bell."
+    send_essentials_embed(WEBHOOK_MARKET, title, description, 0x95a5a6)
+    return  
 
 def generate_morning_brief():
     tz_h = pytz.timezone('Pacific/Honolulu')

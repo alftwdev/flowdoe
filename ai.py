@@ -15,7 +15,7 @@ def generate_ai_macro_brief(history_data_string, fred_liquidity_billions, credit
     
     prompt = f"""
     SYSTEM: You are the Chief Quantitative Strategist for Rockefeller Strategic Intelligence.
-    Analyze this 30-day snapshot along with today's Federal Reserve metrics, and output ONLY a JSON payload matching the required schema. No markdown wrappers around the JSON.
+    Analyze this 30-day snapshot along with today's Federal Reserve metrics, and output ONLY a JSON payload matching the required schema. No markdown wrappers around the JSON. Additionally, you must draft a 2-sentence 'Alpha Recap' highlighting our ecosystem's performance today. The system achieved a {win_rate}% win rate today, capturing a {points_captured} point move off the Gamma Flip line calculated by our proprietary GEX engine. Format this recap to entice free users to upgrade for real-time access.
     
     FEDERAL RESERVE LIVE STATE:
     - Global Net Liquidity: ${fred_liquidity_billions}B
