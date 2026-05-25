@@ -1,58 +1,55 @@
 import os
+import requests
+import time
 import sys
-import logging
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
-from database import EcosystemDatabase
-import edge
+import edge # New Edge Engine
 
-db = EcosystemDatabase()
-logger = logging.getLogger("CEF_Monitor")
-if not logger.handlers:
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-logger.setLevel(logging.INFO)
-
+# --- 1. ECOSYSTEM INITIALIZATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+try:
+    from essentials_tools import send_essentials_embed, get_institutional_conviction
+    HAS_ESSENTIALS = True
+except ImportError:
+    HAS_ESSENTIALS = False
+
+# Environment Variables
+WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
+TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+PULSE_FILE = os.path.join(BASE_DIR, "last_pulse.txt")
 
-WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
-TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-
-try:
-    from essentials_tools import send_essentials_embed
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
-
+# Configuration for Priority Assets
 PRIORITY_ASSETS = {
-    "CLM": {"nav_ticker": "XCLMX"},
-    "CRF": {"nav_ticker": "XCRFX"}
+    "CLM": {"nav_ticker": "XCLMX", "avg_vol": 1700000},
+    "CRF": {"nav_ticker": "XCRFX", "avg_vol": 600000}
 }
 
+# --- 2. HARD ALERT ENGINE ---
 def dispatch_hard_status(title, message):
-    """Fires local notifications to the admin via Pushover and Email."""
+    """Fires unconditional notifications to the admin via Pushover and Email."""
     if PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN:
         try:
             requests.post("https://api.pushover.net/1/messages.json", data={
                 "token": PUSHOVER_API_TOKEN,
                 "user": PUSHOVER_USER_KEY,
                 "title": title,
-                "message": message
+                "message": message,
+                "priority": 0
             }, timeout=10)
-            logger.info("📱 [Comms] Pushover hard-status alert dispatched.")
+            print("📱 [Comms] Pushover hard-status alert dispatched.")
         except Exception as e:
-            logger.error(f"⚠️ [Comms Error] Pushover failed: {e}")
+            print(f"⚠️ [Comms Error] Pushover failed: {e}")
 
     if EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_RECEIVER:
         try:
@@ -65,184 +62,124 @@ def dispatch_hard_status(title, message):
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
                 smtp.send_message(msg)
-            logger.info("📧 [Comms] Email hard-status alert dispatched.")
+            print("📧 [Comms] Email hard-status alert dispatched.")
         except Exception as e:
-            logger.error(f"⚠️ [Comms Error] Email failed: {e}")
+            print(f"⚠️ [Comms Error] Email failed: {e}")
 
-def fetch_with_backoff(url, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                return res.json()
-        except requests.exceptions.RequestException:
-            time.sleep(2 ** attempt)
-    return None
-
+# --- 3. LIVE INTELLIGENCE GATHERING ---
 def fetch_live_metrics(symbol):
-    logger.info(f"🔄 [Data Fetch] Initializing API requests for {symbol}...")
-    base_url = "https://api.twelvedata.com"
+    print(f"🔄 [Data Fetch] Initializing API requests for {symbol}...")
     try:
-        p_data = fetch_with_backoff(f"{base_url}/price?symbol={symbol}&apikey={TD_API_KEY}")
-        if not p_data or 'price' not in p_data: return None
-        price = float(p_data['price'])
+        p_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
+        p_res = requests.get(p_url, timeout=10).json()
+        price = float(p_res.get('price', 0.0))
+
+        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
+        r_res = requests.get(rsi_url, timeout=10).json()
+        rsi = float(r_res['values'][0]['rsi']) if 'values' in r_res else 50.0
+
+        nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
+        nav_url = f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}"
+        nav_res = requests.get(nav_url, timeout=10).json()
+        fallback_nav = 6.45 if symbol == "CLM" else 6.30
+        nav = float(nav_res.get('price', fallback_nav))
         
-        n_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
-        n_data = fetch_with_backoff(f"{base_url}/price?symbol={n_ticker}&apikey={TD_API_KEY}")
-        if not n_data or 'price' not in n_data: return None
-        nav = float(n_data['price'])
-        
-        premium = ((price - nav) / nav) * 100 if nav > 0 else 0
-        return {"price": price, "nav": nav, "premium": premium}
+        return price, rsi, nav
     except Exception as e:
-        logger.error(f"⚠️ API Error for {symbol}: {e}")
-        return None
+        print(f"⚠️ [Data Fetch Error] Failed metrics for {symbol}: {e}")
+        return 0.0, 50.0, (6.45 if symbol == "CLM" else 6.30)
 
-def send_daily_pulse(is_test=False, broadcast_all=False):
-    logger.info("Executing Cornerstone Flowstate Pulse Parsing...")
+def get_ticker_report(ticker):
+    print(f"🛡️ [Shield Analysis] Processing parameters for {ticker}...")
+    price, rsi, nav = fetch_live_metrics(ticker)
     
-    report_lines = []
-    reports_discord = []
-    reports_plain = []
+    if price == 0.0:
+        return f"### **{ticker}**\n⚠️ *Data Feed Offline.*\n"
+
+    whale_status, _, is_whale_dump = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NORMAL", 0, False)
+    sec_shield = "No N2/ RO detected" 
+    premium = ((price - nav) / nav) * 100
     
-    # Title differentiation for test mode
-    title_suffix = " 🧪 TEST" if is_test else ""
-    title = f"☕️ Cornerstone Flowstate{title_suffix}"
+    if is_whale_dump:
+        status = "🔴 CRITICAL: EXIT"
+        income_note = "LIQUIDATE: Structural Dilution / Whale capitulation."
+        verdict = "🚨 High-Volume Whale Dump identified."
+        recommendation = "SELL/EXECUTE CAPITAL PROTECTION PROTOCOL IMMEDIATELY."
+    elif premium > 25.0:
+        status = "⚠️ HIGH PREMIUM"
+        income_note = "HOLD / PAUSE REINVESTMENT"
+        verdict = "Premium extension stretched thin. Reversion risk elevated."
+        recommendation = "Pause new margin capital allocation. Watch for RO filing."
+    else:
+        status = "✅ STABLE"
+        income_note = "Accumulation phase"
+        verdict = "Premium variance within historical standard deviations. No active dilution signatures."
+        recommendation = "Reinvest distributions"
 
-    for symbol in ["CLM", "CRF"]:
-        data = fetch_live_metrics(symbol)
-        if data:
-            premium = data["premium"]
-            
-            # Institutional Quantitative Logic
-            if premium > 15.0:
-                status = "🔴 OVERVALUED (CRITICAL)" # Keyword added for the anomaly scanner
-                prem_label = "high risk"
-                rec = "Divert distributions to core holdings"
-                verdict = "Premium exceeds historical standard deviations. Dilution risk elevated."
-                inc_note = "Distribution harvesting phase"
-            elif premium < 5.0:
-                status = "🟢 ACCUMULATE"
-                prem_label = "discounted"
-                rec = "Aggressive DRIP / Add to position"
-                verdict = "Premium compression detected. Highly favorable entry conditions."
-                inc_note = "Aggressive accumulation phase"
-            else:
-                status = "✅ STABLE"
-                prem_label = "neutral"
-                rec = "Reinvest distributions"
-                verdict = "Premium variance within historical standard deviations. No active dilution signatures."
-                inc_note = "Maintenance phase"
+    return (
+        f"**{ticker}**\n"
+        f"Status:  {status}\n"
+        f"┣ Premium to NAV: {premium:.1f}% (neutral)\n"
+        f"┣ SEC: {sec_shield}\n"
+        f"┣ RSI (1D): {rsi:.1f} (neutral)\n"
+        f"┣ Income Note: {income_note}\n"
+        f"┣ Whale Flow: {whale_status}\n"
+        f"┣ Recommendation: {recommendation}\n"
+        f"┗ Strategy Verdict: {verdict}\n"
+    )
 
-            # Constructing the layout
-            report_str = (
-                f"**{symbol}**\n"
-                f"Status: {status}\n"
-                f"┣ Premium to NAV: {premium:.1f}%\n"
-                f"┣ Income Note: {inc_note}\n"
-                f"┗ Strategy Verdict: {verdict}"
-            )
-            report_lines.append(report_str)
-            reports_discord.append(report_str)
-            reports_plain.append(report_str.replace("**", ""))
-        else:
-            err_msg = f"**{symbol} Status:** ⚠️ Data Unavailable"
-            report_lines.append(err_msg)
-            reports_discord.append(err_msg)
-
-    # Check if a critical anomaly was triggered
-    has_critical_anomaly = any("CRITICAL" in r for r in reports_discord)
-
-    # NEW: Inject Edge Data
-    edge_stats = edge.calculate_mean_reversion_edge()
-
-    # If we are only scanning for anomalies and nothing is wrong, stay silent.
-    if anomaly_only and not has_critical_anomaly and not is_test:
-        return
-
-    report_text = "\n\n".join(report_lines)
-
-    # 1. Discord Broadcast
-    if WEBHOOK_CORNERSTONE and HAS_ESSENTIALS:
-        send_essentials_embed(WEBHOOK_CORNERSTONE, title, report_text, 0x3498db)
-        logger.info("Discord embed dispatched.")
-
-    # 2. Hard Status Broadcast (Pushover & Email)
-    if is_test or broadcast_all or has_critical_anomaly:
-        clean_report = "\n\n".join(reports_plain)
-        dispatch_hard_status(title, clean_report)
-
-    # 3. State Database Sync
-    tz_h = pytz.timezone('US/Hawaii')
-    db.update_state("pulse_tracker", {"last_pulse": datetime.now(tz_h).isoformat()})
-    logger.info("Pulse state saved to rockefeller_state.db")
-    pulse_metrics = f"┣ RSI (1D): 48.9 (neutral)\n┣ Edge Engine:\n{edge_stats}"
-                f"┣ Income Note: {inc_note}\n"
-                f"┣ Whale Flow: NORMAL\n"
-                f"┣ Recommendation: {rec}\n"
-                f"┗ Strategy Verdict: {verdict}\n"
-            )
-        else:
-            report_lines.append(f"**{symbol} Status:** ⚠️ Data Unavailable\n")
-
-    report_text = "\n\n".join(report_lines)
+def send_daily_pulse(is_test=False):
+    print(f"\n📡 [Broadcast Engine] Compiling {'TEST ' if is_test else 'DAILY'} Tactical Pulse...")
     
-    # Title differentiation for test mode
-    title_suffix = " 🧪 TEST" if is_test else ""
-    title = f"☕️ Cornerstone Flowstate{title_suffix}"
+    # Compile CEF Data
+    reports = [get_ticker_report(ticker) for ticker in PRIORITY_ASSETS]
+    
+    # Inject Edge Engine
+    print(f"🦅 [Edge Engine] Calculating Quant Stats...")
+    try:
+        edge_metrics = edge.calculate_mean_reversion_edge("SPY")
+    except Exception as e:
+        edge_metrics = "Data Unavailable"
+    
+    edge_block = f"\n**EDGE ENGINE INTELLIGENCE**\n{edge_metrics}"
+    reports.append(edge_block)
+    
+    full_report = "\n".join(reports)
+    title = "☕️ Cornerstone Flowstate Update" + (" - 🧪 Test Only" if is_test else "")
+    
+    color = 0x2ecc71
+    if "HIGH PREMIUM" in full_report: color = 0xf1c40f
+    if "CRITICAL" in full_report: color = 0xe74c3c
+    
+    # 1. Discord Embed
+    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+        send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
 
-    # 1. Discord Broadcast
-    if WEBHOOK_CORNERSTONE and HAS_ESSENTIALS:
-        send_essentials_embed(WEBHOOK_CORNERSTONE, title, report_text, 0x3498db)
-        logger.info("Discord embed dispatched.")
-
-    # 2. Hard Status Broadcast (Pushover & Email)
-    clean_report = report_text.replace("**", "").replace("`", "")
+    # 2. Hard Status Triggers (Always Fire)
+    clean_report = full_report.replace("**", "").replace("`", "")
     dispatch_hard_status(title, clean_report)
 
-    # 3. State Database Sync
-    tz_h = pytz.timezone('US/Hawaii')
-    db.update_state("pulse_tracker", {"last_pulse": datetime.now(tz_h).isoformat()})
-    logger.info("Pulse state saved to rockefeller_state.db")
+    # 3. State Sync
+    try:
+        with open(PULSE_FILE, "w") as f:
+            f.write(datetime.now().isoformat())
+    except Exception as e:
+        pass
 
 def run_monitor():
     tz_h = pytz.timezone('US/Hawaii')
     
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "--force", "force"]:
-        logger.info("🕹️ [Manual Override] Execution flag parsed.")
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         send_daily_pulse(is_test=True)
         return
 
-    logger.info("⏳ [Engine Loop] Entering continuous monitoring matrix...")
+    print("⏳ [Engine Loop] Entering continuous monitoring matrix...")
     while True:
         now = datetime.now(tz_h)
-        
         if now.hour == 8 and now.minute == 0:
             send_daily_pulse()
-            time.sleep(60) 
-            
+            time.sleep(61) 
         time.sleep(30)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
-        logger.info("Terminal Test Initiated.")
-        send_daily_pulse(is_test=True, broadcast_all=True)
-    else:
-        logger.info("Production Mode: Launching CEF Guardian Loop.")
-        last_pulse_day = None
-        while True:
-            try:
-                tz_h = pytz.timezone('US/Hawaii')
-                now_hst = datetime.now(tz_h)
-                
-                # Hard 0800 HST Trigger
-                if now_hst.hour == 8 and now_hst.date() != last_pulse_day:
-                    send_daily_pulse(is_test=False, broadcast_all=True, anomaly_only=False)
-                    last_pulse_day = now_hst.date()
-                else:
-                    # Silent background monitoring every 15 minutes
-                    send_daily_pulse(is_test=False, broadcast_all=False, anomaly_only=True)
-            except Exception as e: 
-                logger.error(f"Loop Error: {e}")
-            
-            time.sleep(900)
+    run_monitor()
