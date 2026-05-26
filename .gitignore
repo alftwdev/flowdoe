@@ -36,3 +36,4 @@ signal_results.json
 *.csv
 *.txt
 .env
+rockefeller_state.db
