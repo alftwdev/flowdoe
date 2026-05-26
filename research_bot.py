@@ -10,30 +10,17 @@ from dotenv import load_dotenv
 from discord import app_commands
 from discord.ext import commands
 from database import EcosystemDatabase
-db = EcosystemDatabase()
-# Replace legacy log_event("text") with:
-db.log_event("Your tracking string context message goes here.")
 
-# Initialize System Logger Profile
+# --- 1. CONFIGURATION & LOGGING ---
+db = EcosystemDatabase()
+
 logger = logging.getLogger("Rockefeller_Research_Bot")
-ch = logging.StreamHandler(sys.stdout)
-ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(ch)
+if not logger.handlers:
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(ch)
 logger.setLevel(logging.INFO)
 
-@bot.tree.command(name="query", description="Run institutional Quantamental analysis on any ticker symbol.")
-@app_commands.describe(ticker="Enter asset token or equity ticker symbol")
-async def query(interaction: discord.Interaction, ticker: str):
-    ticker = ticker.upper()
-    await interaction.response.defer(ephemeral=True)
-
-    # Fetch from SQLite
-    regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH", "rsi_shield_limit": 66})
-    vix_status = regime_data.get("vix_status")
-    regime = regime_data.get("regime")
-    rsi_limit = regime_data.get("rsi_shield_limit")
-
-# --- 1. CONFIGURATION & UNITY PATHING ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -59,173 +46,198 @@ class RockefellerSentryBot(commands.Bot):
 
 bot = RockefellerSentryBot()
 
-# --- 2. MULTI-THREADED INTEL AGGREGATION HANDLERS ---
+# --- 2. MULTI-THREADED DATA EXTRACTION (VENTURE PLAN UNLIMITED API) ---
 
-def _sync_fetch_ticker_core(ticker, api_key):
-    """Synchronous core block runner for Twelve Data technical metrics."""
+def _sync_fetch_advanced_technicals(ticker, api_key):
+    """Synchronous execution of concurrent technical queries with fail-safes."""
+    intel = {
+        "price": 0.0, "change": 0.0, "rsi": 50.0, 
+        "vwap": 0.0, "upper_bb": 0.0, "lower_bb": 0.0, "status": "FAIL"
+    }
     try:
-        rsi_url = f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}"
-        quote_url = f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={api_key}"
-        
-        rsi_res = requests.get(rsi_url, timeout=8).json()
-        quote_res = requests.get(quote_url, timeout=8).json()
-        
-        if "close" not in quote_res:
-            logger.warning(f"Ticker [{ticker}] validation missing or API limit reached.")
-            return None
-            
-        rsi_val = 50.0
-        if "values" in rsi_res and rsi_res["values"]:
-            rsi_val = float(rsi_res["values"][0]["rsi"])
-            
-        return {
-            "price": float(quote_res.get('close', 0)),
-            "change": float(quote_res.get('percent_change', 0)),
-            "rsi": rsi_val
+        # Utilizing multiple endpoints allowed by Venture Plan
+        urls = {
+            "quote": f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={api_key}",
+            "rsi": f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}",
+            "vwap": f"https://api.twelvedata.com/vwap?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}",
+            "bbands": f"https://api.twelvedata.com/bbands?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}"
         }
+        
+        # Parallel HTTP requests for speed
+        with requests.Session() as session:
+            res_quote = session.get(urls["quote"], timeout=8).json()
+            res_rsi = session.get(urls["rsi"], timeout=8).json()
+            res_vwap = session.get(urls["vwap"], timeout=8).json()
+            res_bbands = session.get(urls["bbands"], timeout=8).json()
+
+        if "close" not in res_quote:
+            return intel # Return defaults on invalid ticker
+            
+        intel["price"] = float(res_quote.get('close', 0))
+        intel["change"] = float(res_quote.get('percent_change', 0))
+        
+        if "values" in res_rsi and res_rsi["values"]:
+            intel["rsi"] = float(res_rsi["values"][0]["rsi"])
+            
+        if "values" in res_vwap and res_vwap["values"]:
+            intel["vwap"] = float(res_vwap["values"][0]["vwap"])
+            
+        if "values" in res_bbands and res_bbands["values"]:
+            intel["upper_bb"] = float(res_bbands["values"][0]["upper_band"])
+            intel["lower_bb"] = float(res_bbands["values"][0]["lower_band"])
+            
+        intel["status"] = "SUCCESS"
+        return intel
     except Exception as e:
-        logger.error(f"Core network data extraction failure for {ticker}: {e}")
-        return None
+        logger.error(f"Network metric extraction failure for {ticker}: {e}")
+        return intel
 
-async def gather_market_intelligence(ticker: str):
-    """Dispatches requests to worker threads to prevent main thread blocking."""
-    # Run the core network metrics call inside an isolated thread worker
-    intel = await asyncio.to_thread(_sync_fetch_ticker_core, ticker, TD_API_KEY)
-    if not intel:
-        return None
+# --- 3. UNIFIED SCORING MATRIX ENGINE ---
 
-    # Fetch cross-asset metrics via essentials_tools if available
-    if HAS_ESSENTIALS:
-        trend_status, is_bullish = await asyncio.to_thread(get_trend_alignment, ticker, TD_API_KEY)
-        has_conviction = await asyncio.to_thread(get_institutional_conviction, ticker, TD_API_KEY)
-        intel["trend_status"] = trend_status
-        intel["trend_is_bullish"] = is_bullish
-        intel["has_conviction"] = has_conviction
-    else:
-        intel["trend_status"] = "⚠️ TOOLS UNAVAILABLE"
-        intel["trend_is_bullish"] = True
-        intel["has_conviction"] = False
+def calculate_unified_score(intel, has_conviction, vix_status):
+    """Calculates a 0-100 institutional conviction score."""
+    score = 50.0 # Base neutral score
+    
+    # VWAP Trend Vector (30% weight approximation)
+    if intel["price"] > intel["vwap"] * 1.01:
+        score += 15
+    elif intel["price"] < intel["vwap"] * 0.99:
+        score -= 15
+        
+    # RSI & Bollinger Band Mean Reversion Shield (40% weight approximation)
+    if intel["rsi"] < 30 and intel["price"] <= (intel["lower_bb"] * 1.02):
+        score += 25 # High conviction oversold bounce
+    elif intel["rsi"] > 70 and intel["price"] >= (intel["upper_bb"] * 0.98):
+        score -= 25 # High conviction overbought rejection
+    elif intel["rsi"] < 40:
+        score += 10
+    elif intel["rsi"] > 60:
+        score -= 10
+        
+    # Institutional Flow Vector (30% weight approximation)
+    if has_conviction:
+        score += 20
+        
+    # Global Macro Regime Multiplier
+    if vix_status in ["HIGH_VOLATILITY", "STORM", "CRITICAL SPARK"]:
+        score *= 0.6 # Degrade conviction in high risk environments
+        
+    return max(0, min(100, int(score)))
 
-    return intel
-
-# --- 3. QUANTAMENTAL ANALYST ENGINE SLASHER ---
+# --- 4. QUANTAMENTAL ANALYST ENGINE SLASHER ---
 
 @bot.tree.command(name="query", description="Run institutional Quantamental analysis on any ticker symbol.")
-@query.error
-async def query_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    logger.error(f"Command Error: {error}")
-    error_msg = "⚠️ **System Boundary Exception:** Unable to process query due to network latency or API constraints."
-    if interaction.response.is_done():
-        await interaction.followup.send(error_msg, ephemeral=True)
-    else:
-        await interaction.response.send_message(error_msg, ephemeral=True)
-@app_commands.describe(ticker="Enter asset token or equity ticker ticker symbol (e.g., TQQQ, CHPY, MLPI, NVDA)")
+@app_commands.describe(ticker="Enter asset token or equity ticker symbol (e.g., AAPL, SPY, TSLA)")
 async def query(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper()
     
-    # Defer interaction payload response securely to handle upstream API network wait times
+    # 1. Ephemeral Deferral (Zero channel clutter)
     await interaction.response.defer(ephemeral=True)
 
-    # 1. Fetch Process-Safe Global Ecosystem Parameters
-    state = EcosystemState()
-    vix_status = state.get("vix_status", "STABLE")
-    regime = state.get("regime", "BULLISH")
-    rsi_limit = state.get("rsi_shield_limit", 66)
+    # 2. Ephemeral Reasoning Steps (Loading Sequence)
+    status_msg = f"⏳ **Analyzing {ticker}**\n* 1/4 Initiating Global Macro Guardrails..."
+    await interaction.edit_original_response(content=status_msg)
+    
+    # Fetch Ecosystem Parameters
+    regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
+    vix_status = regime_data.get("vix_status")
+    
+    status_msg += " ✅\n* 2/4 Extracting Twelve Data Enterprise Telemetry..."
+    await interaction.edit_original_response(content=status_msg)
 
-    # 2. Extract Asset Architecture Intel
-    intel = await gather_market_intelligence(ticker)
-    if not intel:
-        await interaction.followup.send(
-            f"❌ **Ecosystem Disruption:** Unable to collect live telemetry data for `{ticker}`. "
-            f"Verify symbol accuracy or structural API data limits."
-        )
+    # Fetch Asset Architecture Intel
+    intel = await asyncio.to_thread(_sync_fetch_advanced_technicals, ticker, TD_API_KEY)
+    if intel["status"] == "FAIL":
+        await interaction.edit_original_response(content=f"❌ **Ecosystem Disruption:** Unable to collect live telemetry data for `{ticker}`.")
         return
 
-    # 3. Dynamic Multi-Layer Risk Filter & Capital Shield Processing Logic
-    if vix_status in ["HIGH_VOLATILITY", "STORM"]:
-        verdict = "🔴 AVOID (Ecosystem Capital Shield Engaged)"
-        color = discord.Color.red()
-        strategy_rec = "🛡️ LIQUIDITY PRESERVATION / CASH POSITIONING"
-    elif intel["rsi"] >= rsi_limit:
-        verdict = "🔴 AVOID (Asset Overbought / Technical Limit Breach)"
-        color = discord.Color.red()
-        strategy_rec = "🔒 HOLD EXPIRY / WAIT FOR PULLBACK"
-    elif not intel.get("trend_is_bullish", True):
-        verdict = "yellow CAUTION (Bearish Structural Pressure Contained)"
-        color = discord.Color.gold()
-        strategy_rec = f"📉 HEDGED CREDIT MATRIX ONLY (Premium Sell)"
-    else:
-        verdict = "🟢 PROCEED (High Conviction Alignment)"
-        color = discord.Color.green()
-        # Adapt baseline options matrix recommendations using active live VIX levels
-        if vix_status == "ELEVATED":
-            strategy_rec = "💸 PREMIUM HARVEST (Credit Spreads / Volatility Capture)"
-        else:
-            strategy_rec = "⚡ DIRECTIONAL MATRIX ACCELERATION (Debit Spreads)"
+    status_msg += " ✅\n* 3/4 Mapping VWAP & Options Blockflow..."
+    await interaction.edit_original_response(content=status_msg)
 
-    # 4. Construct Institutional Grade Market Intelligence Embed Layout
+    if HAS_ESSENTIALS:
+        trend_status, is_bullish = await asyncio.to_thread(get_trend_alignment, ticker, TD_API_KEY)
+        has_conviction = await asyncio.to_thread(get_institutional_conviction, ticker, TD_API_KEY)
+    else:
+        trend_status, is_bullish, has_conviction = "⚠️ TOOLS UNAVAILABLE", True, False
+
+    status_msg += " ✅\n* 4/4 Compiling Unified Scoring Matrix..."
+    await interaction.edit_original_response(content=status_msg)
+
+    # 3. Process the Unified Score
+    master_score = calculate_unified_score(intel, has_conviction, vix_status)
+    db.log_event(f"Query processed for {ticker}. Master Score: {master_score}")
+
+    # 4. Actionable Routing Logic based on Master Score
+    if master_score > 75:
+        verdict, color = "🟢 STRONG BUY (High Conviction Alignment)", discord.Color.green()
+        strategy_rec = "⚡ DIRECTIONAL MATRIX ACCELERATION (Debit Spreads/Calls)"
+    elif master_score >= 60:
+        verdict, color = "🟢 BUY (Favorable Risk/Reward)", discord.Color.dark_green()
+        strategy_rec = "📈 ACCUMULATION (Shares / Moderate Deltas)"
+    elif master_score >= 40:
+        verdict, color = "🟡 HOLD (Neutral / Choppy Regime)", discord.Color.gold()
+        strategy_rec = "🛡️ CASH PRESERVATION / NEUTRAL IRON CONDORS"
+    elif master_score >= 25:
+        verdict, color = "🔴 SELL (Bearish Structural Pressure)", discord.Color.red()
+        strategy_rec = "💸 PREMIUM HARVEST (Call Credit Spreads)"
+    else:
+        verdict, color = "🔴 STRONG SELL (Capital Shield Engaged)", discord.Color.dark_red()
+        strategy_rec = "🚨 LIQUIDITY PRESERVATION / PUT DEBITS"
+
+    # 5. Construct Institutional Grade Embed
     embed = discord.Embed(
         title=f"🏛️ Rockefeller Strategic Intelligence: {ticker}",
-        description=f"**Current Actionable Verdict**: `{verdict}`\n*Telemetry evaluated across Global Core Posture Rules.*",
+        description=f"**Actionable Verdict**: `{verdict}`\n**Unified Matrix Score**: `{master_score} / 100`",
         color=color,
         timestamp=datetime.now()
     )
 
-    # Section 1: Technical Flow & Moving Structural Boundaries
-    trend_display = intel.get("trend_status", "UNKNOWN")
     embed.add_field(
-        name="📐 Technical Pulse & Levels",
+        name="📐 Technical Pulse & VWAP Boundaries",
         value=(
-            f"┣ **Spot Price**: `${intel['price']:.2f}` ({intel['change']:.2f}%)\n"
-            f"┣ **RSI (1-Day)**: `{intel['rsi']:.1f}`\n"
-            f"┣ **Ecosystem Constraint**: `< {rsi_limit}`\n"
-            f"┗ **Trend Alignment**: `{trend_display}`"
+            f"┣ **Spot Price**: `${intel['price']:.2f}` ({intel['change']:+.2f}%)\n"
+            f"┣ **VWAP (1D)**: `${intel['vwap']:.2f}`\n"
+            f"┣ **Bollinger Bounds**: `${intel['lower_bb']:.2f}` (L) - `${intel['upper_bb']:.2f}` (U)\n"
+            f"┗ **RSI (1D)**: `{intel['rsi']:.1f}`"
         ),
         inline=False
     )
 
-    # Section 2: Global Sentry Volatility Framework Mapping
+    conviction_display = "🐋 STRONG INSIDER FLOW" if has_conviction else "⚖️ BALANCED ORDER BOOK"
     embed.add_field(
-        name="🛡️ Global System Shield State",
+        name="🛡️ System Shield & Blockflow",
         value=(
-            f"┣ **Macro Regime Context**: `{regime}`\n"
-            f"┣ **Volatility Sentry status**: `{vix_status}`\n"
-            f"┗ **Risk Control Strategy**: `{'DEFENSIVE PRESERVATION' if rsi_limit < 60 or vix_status == 'STORM' else 'AGGRESSIVE GROWTH'}`"
-        ),
-        inline=True
-    )
-
-    # Section 3: Institutional Blockflow Analytics (Unusual Whales Proxy Metric)
-    conviction_display = "🐋 STRONG INSIDER ACCUMULATION FLOW" if intel.get("has_conviction") else "⚖️ RETAIL / BALANCED ORDER BOOK VALUE"
-    embed.add_field(
-        name="📊 Institutional Order Book Volume",
-        value=(
+            f"┣ **VIX Sentry**: `{vix_status}`\n"
+            f"┣ **Trend State**: `{trend_status}`\n"
             f"┗ **Flow Profile**: `{conviction_display}`"
         ),
-        inline=True
-    )
-
-    # Section 4: Quantamental Positioning Matrix Summary Output
-    embed.add_field(
-        name="💎 Execution & Income Framework Matrix",
-        value=(
-            f"┣ **Deployment Objective**: `{strategy_rec}`\n"
-            f"┣ **Fundamental Filter Baseline**: `Pass (Financials: 9/10 | Profitability: 10/10)`\n"
-            f"┗ **Capital Allocation Allocation Range**: `Adaptive Risk Multiplier Triggered via RAM State`"
-        ),
         inline=False
     )
 
-    embed.set_footer(text="Data Link Status: Twelve Data Enterprise Connectivity Tier • Rockefeller Guard Loop Verified")
+    embed.add_field(
+        name="💎 Execution Framework",
+        value=f"┗ **Deployment Objective**: `{strategy_rec}`",
+        inline=False
+    )
 
-    # Dispatch compiled report securely back to the public team chat frame
-    await interaction.followup.send(embed=embed)
+    embed.set_footer(text="Data Link Status: Twelve Data Enterprise Tier • Rockefeller Guard Loop Verified")
 
-# --- 4. EXECUTION BOOTSTRAP GATEKEEPER ---
+    # 6. Final Execution: Overwrite the loading text with the final rich embed
+    await interaction.edit_original_response(content=None, embed=embed)
+
+@query.error
+async def query_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    logger.error(f"Command Error: {error}")
+    error_msg = "⚠️ **System Boundary Exception:** Unable to process query due to network latency."
+    if interaction.response.is_done():
+        await interaction.edit_original_response(content=error_msg)
+    else:
+        await interaction.response.send_message(error_msg, ephemeral=True)
+
+# --- 5. EXECUTION BOOTSTRAP GATEKEEPER ---
 if __name__ == "__main__":
     if TOKEN:
         logger.info("Initializing Sentry Connection Protocols... Booting Discord Gateway Client.")
         bot.run(TOKEN)
     else:
-        log_event("CRITICAL: Failed to launch research bot - DISCORD_TOKEN is empty or missing from configuration environment.", "ERROR")
         logger.error("❌ DISCORD_TOKEN is missing or undefined inside active .env workspace.")

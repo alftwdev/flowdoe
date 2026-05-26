@@ -52,21 +52,18 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
         res.raise_for_status()
         raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
-        
     except Exception as e:
         logger.error(f"Gemini API failure: {e}")
-        fallback_schema = {
+        return {
             "macro_regime_outlook": "CHOP",
             "recommended_position_sizing": 0.25,
-            "sector_rotation_focus": "DEFENSIVE PRESERVATION / CASH ESCROW",
-            "tactical_adjustment_notes": "SRE circuit triggered. Reverting to defensive limits.",
-            "discord_embed_brief": "⚠️ **System Boundary Exception:** Macro AI analytics core is unreachable. Internal defaults engaged."
+            "sector_rotation_focus": "DEFENSIVE PRESERVATION",
+            "tactical_adjustment_notes": "API disruption. Defaults engaged.",
+            "discord_embed_brief": "⚠️ System Boundary Exception. Defaults active."
         }
-        return fallback_schema
 
 def broadcast_public_teaser(is_test=False):
     logger.info("Generating public AI conversion teaser...")
-    
     fred_liquidity = 7000  
     credit_spread = 3.5
     history_data = "Market data nominal."
@@ -76,12 +73,10 @@ def broadcast_public_teaser(is_test=False):
     try:
         from essentials_tools import send_essentials_embed
         WEBHOOK = os.getenv("WEBHOOK_PUBLIC_ANNOUNCEMENTS")
-        
         embed_content = ai_response.get("discord_embed_brief", "Check the server for updates.")
         
         if WEBHOOK:
             send_essentials_embed(WEBHOOK, "🤖 Strategic Market Insight", embed_content, 0x3498db)
             logger.info("Public teaser broadcasted to Discord.")
-            
     except Exception as e:
         logger.error(f"Broadcast failure: {e}")

@@ -17,7 +17,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_FED = os.getenv("WEBHOOK_PUBLIC_ANNOUNCEMENTS") # Or a dedicated FED webhook
+WEBHOOK_FED = os.getenv("WEBHOOK_FED") # Or a dedicated FED webhook
 
 try:
     from essentials_tools import send_essentials_embed, get_trend_alignment

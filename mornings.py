@@ -42,11 +42,8 @@ def get_fear_and_greed():
         response = requests.get(url, timeout=5).json()
         data = response['data'][0]
         return f"{data['value']} ({data['value_classification']})"
-    except Exception as e:
+    except Exception:
         return "N/A"
-
-def load_crypto_state_context():
-    return {"btc_price": "N/A", "eth_price": "N/A", "has_crypto": False}
 
 def generate_morning_brief(is_test=False):
     td_key = os.getenv("TWELVE_DATA_API_KEY")
@@ -56,7 +53,7 @@ def generate_morning_brief(is_test=False):
         if not is_open:
             logger.info("Market Holiday Detected. Issuing standby notice.")
             title = "🌅 Rockefeller Morning Intelligence Briefing [MARKET CLOSED]"
-            description = f"### **System Standby: Market Holiday**\nCurrently, markets are closed. Normal operations will resume at the next active trading bell."
+            description = "### **System Standby: Market Holiday**\nCurrently, markets are closed. Normal operations will resume at the next active trading bell."
             if HAS_ESSENTIALS and WEBHOOK_MARKET:
                 send_essentials_embed(WEBHOOK_MARKET, title, description, 0x95a5a6)
             return
@@ -68,7 +65,7 @@ def generate_morning_brief(is_test=False):
     regime = regime_data.get("regime", "NEUTRAL")
     vix_status = regime_data.get("vix_status", "STABLE")
     rsi_limit = regime_data.get("rsi_shield_limit", 66)
-    
+
     if vix_status == "STORM":
         color = 0xe74c3c 
         posture = "🛡️ DEFENSIVE: Shield is ACTIVE. Capital preservation priority."
@@ -103,7 +100,7 @@ def generate_morning_brief(is_test=False):
 
     if HAS_ESSENTIALS and WEBHOOK_MARKET:
         if send_essentials_embed(WEBHOOK_MARKET, title, description, color):
-            logger.info(f"Morning brief dispatched for {vix_status} regime.")
+            logger.info(f"Cross-Asset Morning Intelligence brief dispatched for {vix_status} regime.")
 
 if __name__ == "__main__":
     is_test_mode = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
