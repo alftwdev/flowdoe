@@ -9,6 +9,15 @@ class EcosystemDatabase:
     _instance = None
     _lock = threading.Lock()
 
+    def __init__(self, db_path='rockefeller_state.db'):
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        
+        # INJECT THIS TO PREVENT LOCK ERRORS:
+        self.cursor.execute('PRAGMA journal_mode=WAL;')
+        self.cursor.execute('PRAGMA synchronous=NORMAL;')
+        self.conn.commit() 
+
     def __new__(cls, db_path="rockefeller_state.db"):
         with cls._lock:
             if cls._instance is None:

@@ -3,11 +3,9 @@ import sys
 import requests
 import logging
 from datetime import datetime, timedelta
-import pytz
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
-# Setup institutional-grade logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("Rockefeller_Income")
 
@@ -16,7 +14,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-# Webhook Priority: Dividend specific > Market Analysis > Fallback
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
 
 try:
@@ -26,6 +23,7 @@ except ImportError:
     HAS_ESSENTIALS = False
 
 def fetch_twelvedata_yield(symbol):
+    # (Original fetch logic preserved entirely)
     base_url = "https://api.twelvedata.com"
     try:
         q_res = requests.get(f"{base_url}/quote?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
@@ -37,7 +35,6 @@ def fetch_twelvedata_yield(symbol):
         
         annual_div = 0.0
         for d in dividends:
-            # Safely get ex_date or date, default to a past date if missing
             div_date_str = d.get('ex_date', d.get('date', '1970-01-01'))
             try:
                 div_date = datetime.strptime(div_date_str, "%Y-%m-%d")
@@ -59,6 +56,10 @@ def process_income_cycle(is_test=False):
     
     logger.info("Initiating Twelve Data Yield Analysis...")
     
+    # Yield Trap Protection Layer
+    vix_iv = db.get_state("vix_iv_index", 20.0)
+    is_yield_trap = vix_iv > 25.0
+    
     for symbol in target_assets:
         data = fetch_twelvedata_yield(symbol)
         if data and data['price'] > 0:
@@ -71,14 +72,18 @@ def process_income_cycle(is_test=False):
         logger.error("No valid yield data captured. Aborting broadcast.")
         return
 
-    # Store to Database so metrics.py can access it
     db.update_state("income_alpha_data", results)
     
-    # Dispatch Broadcast
     if WEBHOOK_INCOME and HAS_ESSENTIALS:
-        report = "\n".join([f"┣ **{s}**: {v['yield']:.2f}% Yield (${v['price']:.2f})" for s, v in results.items()])
+        report = ""
+        if is_yield_trap:
+            logger.warning(f"VIX at {vix_iv} > 25. Yield trap protection activated.")
+            report += f"⚠️ **YIELD TRAP PROTECTION ACTIVE**\nImplied Volatility (VIX) currently reads `{vix_iv}`. High yields may reflect collapsing equity valuations rather than sustainable cash flow. Scale allocations down defensively.\n\n"
+        
+        report += "\n".join([f"┣ **{symbol}**: {v['yield']:.2f}% Yield (${v['price']:.2f})" for symbol, v in results.items()])
+        
         title = "🏦 Institutional Yield Monitor" + (" [TEST]" if is_test else "")
-        send_essentials_embed(WEBHOOK_INCOME, title, report, 0xf1c40f)
+        send_essentials_embed(WEBHOOK_INCOME, title, report, 0xe67e22 if is_yield_trap else 0xf1c40f)
         logger.info("Report dispatched successfully.")
 
 if __name__ == "__main__":

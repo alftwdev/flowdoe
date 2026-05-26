@@ -5,6 +5,7 @@ import logging
 import asyncio
 import requests
 import discord
+import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
 from discord import app_commands
@@ -46,7 +47,7 @@ class RockefellerSentryBot(commands.Bot):
 
 bot = RockefellerSentryBot()
 
-# --- 2. MULTI-THREADED DATA EXTRACTION (VENTURE PLAN UNLIMITED API) ---
+# --- 2. MULTI-THREADED DATA EXTRACTION ---
 
 def _sync_fetch_advanced_technicals(ticker, api_key):
     """Synchronous execution of concurrent technical queries with fail-safes."""
@@ -55,7 +56,6 @@ def _sync_fetch_advanced_technicals(ticker, api_key):
         "vwap": 0.0, "upper_bb": 0.0, "lower_bb": 0.0, "status": "FAIL"
     }
     try:
-        # Utilizing multiple endpoints allowed by Venture Plan
         urls = {
             "quote": f"https://api.twelvedata.com/quote?symbol={ticker}&apikey={api_key}",
             "rsi": f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}",
@@ -63,7 +63,6 @@ def _sync_fetch_advanced_technicals(ticker, api_key):
             "bbands": f"https://api.twelvedata.com/bbands?symbol={ticker}&interval=1day&outputsize=1&apikey={api_key}"
         }
         
-        # Parallel HTTP requests for speed
         with requests.Session() as session:
             res_quote = session.get(urls["quote"], timeout=8).json()
             res_rsi = session.get(urls["rsi"], timeout=8).json()
@@ -71,7 +70,7 @@ def _sync_fetch_advanced_technicals(ticker, api_key):
             res_bbands = session.get(urls["bbands"], timeout=8).json()
 
         if "close" not in res_quote:
-            return intel # Return defaults on invalid ticker
+            return intel
             
         intel["price"] = float(res_quote.get('close', 0))
         intel["change"] = float(res_quote.get('percent_change', 0))
@@ -92,35 +91,57 @@ def _sync_fetch_advanced_technicals(ticker, api_key):
         logger.error(f"Network metric extraction failure for {ticker}: {e}")
         return intel
 
+def _sync_calculate_gbm_var(ticker, api_key, reference_capital=1000, days=1, simulations=5000):
+    """Monte Carlo Geometric Brownian Motion VaR simulation."""
+    url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval=1day&outputsize=252&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=8).json()
+        if "values" not in res or len(res["values"]) < 50: 
+            return 0.0
+
+        closes = [float(day['close']) for day in res['values']]
+        closes.reverse()
+
+        returns = np.diff(closes) / closes[:-1]
+        mu = np.mean(returns)
+        sigma = np.std(returns)
+
+        # Vectorized 1-Day Monte Carlo Euler Approximation
+        dt = days
+        Z = np.random.standard_normal(simulations)
+        simulated_returns = (mu * dt) + (sigma * np.sqrt(dt) * Z)
+        
+        var_99_pct = np.percentile(simulated_returns, 1) # Locate the 1% worst outcome
+        return reference_capital * abs(var_99_pct)
+    except Exception as e:
+        logger.error(f"GBM VaR Error for {ticker}: {e}")
+        return 0.0
+
 # --- 3. UNIFIED SCORING MATRIX ENGINE ---
 
 def calculate_unified_score(intel, has_conviction, vix_status):
     """Calculates a 0-100 institutional conviction score."""
-    score = 50.0 # Base neutral score
+    score = 50.0 
     
-    # VWAP Trend Vector (30% weight approximation)
     if intel["price"] > intel["vwap"] * 1.01:
         score += 15
     elif intel["price"] < intel["vwap"] * 0.99:
         score -= 15
         
-    # RSI & Bollinger Band Mean Reversion Shield (40% weight approximation)
     if intel["rsi"] < 30 and intel["price"] <= (intel["lower_bb"] * 1.02):
-        score += 25 # High conviction oversold bounce
+        score += 25 
     elif intel["rsi"] > 70 and intel["price"] >= (intel["upper_bb"] * 0.98):
-        score -= 25 # High conviction overbought rejection
+        score -= 25 
     elif intel["rsi"] < 40:
         score += 10
     elif intel["rsi"] > 60:
         score -= 10
         
-    # Institutional Flow Vector (30% weight approximation)
     if has_conviction:
         score += 20
         
-    # Global Macro Regime Multiplier
     if vix_status in ["HIGH_VOLATILITY", "STORM", "CRITICAL SPARK"]:
-        score *= 0.6 # Degrade conviction in high risk environments
+        score *= 0.6 
         
     return max(0, min(100, int(score)))
 
@@ -131,21 +152,17 @@ def calculate_unified_score(intel, has_conviction, vix_status):
 async def query(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper()
     
-    # 1. Ephemeral Deferral (Zero channel clutter)
     await interaction.response.defer(ephemeral=True)
 
-    # 2. Ephemeral Reasoning Steps (Loading Sequence)
     status_msg = f"⏳ **Analyzing {ticker}**\n* 1/4 Initiating Global Macro Guardrails..."
     await interaction.edit_original_response(content=status_msg)
     
-    # Fetch Ecosystem Parameters
     regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
     vix_status = regime_data.get("vix_status")
     
     status_msg += " ✅\n* 2/4 Extracting Twelve Data Enterprise Telemetry..."
     await interaction.edit_original_response(content=status_msg)
 
-    # Fetch Asset Architecture Intel
     intel = await asyncio.to_thread(_sync_fetch_advanced_technicals, ticker, TD_API_KEY)
     if intel["status"] == "FAIL":
         await interaction.edit_original_response(content=f"❌ **Ecosystem Disruption:** Unable to collect live telemetry data for `{ticker}`.")
@@ -160,40 +177,41 @@ async def query(interaction: discord.Interaction, ticker: str):
     else:
         trend_status, is_bullish, has_conviction = "⚠️ TOOLS UNAVAILABLE", True, False
 
-    status_msg += " ✅\n* 4/4 Compiling Unified Scoring Matrix..."
+    status_msg += " ✅\n* 4/4 Simulating Geometric Brownian Motion (VaR)..."
     await interaction.edit_original_response(content=status_msg)
 
-    # 3. Process the Unified Score
+    # Execute Monte Carlo VaR Simulation
+    var_99 = await asyncio.to_thread(_sync_calculate_gbm_var, ticker, TD_API_KEY)
+
     master_score = calculate_unified_score(intel, has_conviction, vix_status)
     db.log_event(f"Query processed for {ticker}. Master Score: {master_score}")
 
-    # 4. Actionable Routing Logic based on Master Score
+    # COMPLIANCE: Liability terminology neutralized.
     if master_score > 75:
-        verdict, color = "🟢 STRONG BUY (High Conviction Alignment)", discord.Color.green()
+        verdict, color = "🟢 STRUCTURAL ALIGNMENT (High Conviction)", discord.Color.green()
         strategy_rec = "⚡ DIRECTIONAL MATRIX ACCELERATION (Debit Spreads/Calls)"
     elif master_score >= 60:
-        verdict, color = "🟢 BUY (Favorable Risk/Reward)", discord.Color.dark_green()
+        verdict, color = "🟢 FAVORABLE ASYMMETRY (Positive Risk/Reward)", discord.Color.dark_green()
         strategy_rec = "📈 ACCUMULATION (Shares / Moderate Deltas)"
     elif master_score >= 40:
-        verdict, color = "🟡 HOLD (Neutral / Choppy Regime)", discord.Color.gold()
+        verdict, color = "🟡 NEUTRAL POSTURE (Choppy Regime)", discord.Color.gold()
         strategy_rec = "🛡️ CASH PRESERVATION / NEUTRAL IRON CONDORS"
     elif master_score >= 25:
-        verdict, color = "🔴 SELL (Bearish Structural Pressure)", discord.Color.red()
+        verdict, color = "🔴 DEFENSIVE POSTURE (Structural Headwinds)", discord.Color.red()
         strategy_rec = "💸 PREMIUM HARVEST (Call Credit Spreads)"
     else:
-        verdict, color = "🔴 STRONG SELL (Capital Shield Engaged)", discord.Color.dark_red()
+        verdict, color = "🔴 LIQUIDITY PRESERVATION STATE (Capital Shield)", discord.Color.dark_red()
         strategy_rec = "🚨 LIQUIDITY PRESERVATION / PUT DEBITS"
 
-    # 5. Construct Institutional Grade Embed
     embed = discord.Embed(
         title=f"🏛️ Rockefeller Strategic Intelligence: {ticker}",
-        description=f"**Actionable Verdict**: `{verdict}`\n**Unified Matrix Score**: `{master_score} / 100`",
+        description=f"**Structural State**: `{verdict}`\n**Unified Matrix Score**: `{master_score} / 100`",
         color=color,
         timestamp=datetime.now()
     )
 
     embed.add_field(
-        name="📐 Technical Pulse & VWAP Boundaries",
+        name="📐 Technical Pulse & Boundaries",
         value=(
             f"┣ **Spot Price**: `${intel['price']:.2f}` ({intel['change']:+.2f}%)\n"
             f"┣ **VWAP (1D)**: `${intel['vwap']:.2f}`\n"
@@ -208,6 +226,7 @@ async def query(interaction: discord.Interaction, ticker: str):
         name="🛡️ System Shield & Blockflow",
         value=(
             f"┣ **VIX Sentry**: `{vix_status}`\n"
+            f"┣ **Capital Exposure (99% VaR)**: `-${var_99:.2f} per $1,000 deployed`\n"
             f"┣ **Trend State**: `{trend_status}`\n"
             f"┗ **Flow Profile**: `{conviction_display}`"
         ),
@@ -216,13 +235,15 @@ async def query(interaction: discord.Interaction, ticker: str):
 
     embed.add_field(
         name="💎 Execution Framework",
-        value=f"┗ **Deployment Objective**: `{strategy_rec}`",
+        value=(
+            f"┣ **Deployment Objective**: `{strategy_rec}`\n"
+            f"┗ *Disclaimer: System metrics are for data orientation. Independently manage risk.*"
+        ),
         inline=False
     )
 
     embed.set_footer(text="Data Link Status: Twelve Data Enterprise Tier • Rockefeller Guard Loop Verified")
 
-    # 6. Final Execution: Overwrite the loading text with the final rich embed
     await interaction.edit_original_response(content=None, embed=embed)
 
 @query.error
@@ -234,7 +255,6 @@ async def query_error(interaction: discord.Interaction, error: app_commands.AppC
     else:
         await interaction.response.send_message(error_msg, ephemeral=True)
 
-# --- 5. EXECUTION BOOTSTRAP GATEKEEPER ---
 if __name__ == "__main__":
     if TOKEN:
         logger.info("Initializing Sentry Connection Protocols... Booting Discord Gateway Client.")
