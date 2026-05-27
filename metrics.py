@@ -88,12 +88,15 @@ def audit_loyalty_ledger(is_test=False):
 def generate_weekly_digest(is_test=False):
     logger.info("Compiling Weekly Architecture Performance Digest...")
     results = load_json(RESULTS_FILE)
-    if not isinstance(results, list): results = []
-    
-    total_trades = len(results)
-    winners = sum(1 for v in results if isinstance(v, dict) and v.get("status") == "WIN")
-    losers = total_trades - winners
-    win_rate = (winners / total_trades * 100) if total_trades > 0 else 0.0
+# Locate this inside generate_weekly_digest() in metrics.py and replace the winner calculation:
+     if isinstance(results, dict):
+        winners = sum(1 for v in results.values() if isinstance(v, dict) and v.get("status") == "WIN")
+        total_trades = len(results.keys())
+    elif isinstance(results, list):
+        winners = sum(1 for v in results if isinstance(v, dict) and v.get("status") == "WIN")
+        total_trades = len(results)
+    else:
+        winners, total_trades = 0, 0
     profit_factor = (winners / losers) if losers > 0 else (winners if winners > 0 else 0.0)
 
     regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})

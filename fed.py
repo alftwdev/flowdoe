@@ -64,6 +64,36 @@ def generate_fed_brief(is_test=False):
         send_essentials_embed(WEBHOOK_FED, title, payload, 0x34495e)
         logger.info("Federal TSP brief dispatched successfully.")
 
+def compile_eod_tsp_recap(is_test=False):
+    """Generates an EOD tactical allocation signal for TSP investors."""
+    logger.info("Generating EOD Federal TSP Strategy Summary...")
+    realloc_signal = "🎯 NO ACTION REQUIRED: Maintain current structural configurations."
+    bullish_count = 0
+    report_lines = []
+    
+    for fund, proxy in TSP_MAPPING.items():
+        status, is_bullish = get_trend_alignment(proxy, TD_API_KEY) if HAS_ESSENTIALS else ("NEUTRAL", False)
+        emoji = "🟢" if is_bullish else "🔴"
+        report_lines.append(f"┣ **{fund}** (*{proxy}*): {emoji} `{status}`")
+        if is_bullish: bullish_count += 1
+            
+    if bullish_count >= 3:
+        realloc_signal = "⚡ TACTICAL SHIFT DETECTED: Macro trend alignment supports capital reallocation."
+        
+    payload = (
+        "### 🦅 EOD Federal Sentry Allocation Briefing\n"
+        "Equities closing bell data compiled. Preparing actionable matrices for tomorrow's Interfund Transfer (IFT) window:\n\n"
+        f"**Tactical Tomorrow Guidance:**\n`{realloc_signal}`\n\n"
+        "**Structural Posture Closes:**\n" + "\n".join(report_lines) + "\n\n"
+        "*(Note: Review interfund transfer constraints. Evaluate bond yield curves against these proxies before executing by 12:00 PM EST tomorrow.)*"
+    )
+    
+    if HAS_ESSENTIALS and WEBHOOK_FED:
+        send_essentials_embed(WEBHOOK_FED, "🦅 TSP End-of-Day Strategic Alignment", payload, 0x2c3e50)
+
+# Add to your master loop in fed.py:
+# if 1005 <= int(now.strftime("%H%M")) <= 1010 and current_date != last_eod_date:
+#     compile_eod_tsp_recap()
 if __name__ == "__main__":
     is_test = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
     generate_fed_brief(is_test)

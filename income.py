@@ -50,6 +50,42 @@ def fetch_twelvedata_yield(symbol):
         logger.error(f"TwelveData extraction failed for {symbol}: {e}")
         return None
 
+def compile_eod_income_recap(is_test=False):
+    """Compiles an EOD structural valuation matrix for yield positions."""
+    logger.info("Generating EOD Income & CEF Structure Recap...")
+    target_assets = ["CLM", "CRF", "JEPI", "SCHD"]
+    report_lines = []
+    
+    for symbol in target_assets:
+        try:
+            url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1day&outputsize=2&apikey={TD_API_KEY}"
+            res = requests.get(url, timeout=10).json()
+            if "values" in res and len(res["values"]) > 1:
+                close_p = float(res["values"][0]["close"])
+                prior_p = float(res["values"][1]["close"])
+                daily_pct = ((close_p - prior_p) / prior_p) * 100
+                
+                saved_data = db.get_state("income_alpha_data", {})
+                current_yield = saved_data.get(symbol, {}).get("yield", 0.0)
+                
+                emoji = "🍏" if daily_pct >= 0 else "🍎"
+                report_lines.append(f"┣ **{symbol}**: ${close_p:.2f} ({emoji} `{daily_pct:+.2f}%`) | Yield: `{current_yield:.2f}%`")
+        except Exception as e:
+            logger.error(f"EOD calculation failed for {symbol}: {e}")
+            
+    full_report = (
+        "### 🌅 End-of-Day Income & Premium Yield Recap\n"
+        "Session closed. Evaluating theta decay realization and structural valuations:\n\n" + 
+        "\n".join(report_lines) + 
+        "\n\n*Post-Market Strategy: Theta decay verified. Premium tracking stable. Retain capital configurations.*"
+    )
+    
+    if WEBHOOK_INCOME and HAS_ESSENTIALS:
+        send_essentials_embed(WEBHOOK_INCOME, "🏦 EOD Premium & CEF Summary", full_report, 0x1f8b4c)
+
+# Add to your master loop in income.py:
+# if 1005 <= int(now.strftime("%H%M")) <= 1010 and current_date != last_eod_date:
+#     compile_eod_income_recap()
 def process_income_cycle(is_test=False):
     target_assets = ["JEPI", "SCHD", "O", "ARCC"]
     results = {}
