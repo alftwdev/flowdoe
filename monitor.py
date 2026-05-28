@@ -8,10 +8,8 @@ from email.message import EmailMessage
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
-import edge
 from database import EcosystemDatabase
 
-# --- Centralized Logging to survive Cloud Environments ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("Monitor_Engine")
 
@@ -29,8 +27,8 @@ WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 PRIORITY_ASSETS = {
-    "CLM": {"nav_ticker": "XCLMX", "avg_vol": 1700000},
-    "CRF": {"nav_ticker": "XCRFX", "avg_vol": 600000}
+    "CLM": {"nav_ticker": "XCLMX"},
+    "CRF": {"nav_ticker": "XCRFX"}
 }
 
 def fetch_live_metrics(symbol):
@@ -38,9 +36,11 @@ def fetch_live_metrics(symbol):
         p_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
         price = float(requests.get(p_url, timeout=10).json().get('price', 0.0))
 
-        rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
-        r_res = requests.get(rsi_url, timeout=10).json()
-        rsi = float(r_res['values'][0]['rsi']) if 'values' in r_res else 50.0
+        rsi = 50.0
+        if price > 0:
+            rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
+            r_res = requests.get(rsi_url, timeout=10).json()
+            rsi = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
 
         nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
         nav_url = f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}"
@@ -49,76 +49,92 @@ def fetch_live_metrics(symbol):
         return price, rsi, nav
     except Exception as e:
         logger.error(f"[Data Fetch Error] {e}")
-        return 0.0, 50.0, (6.45 if symbol == "CLM" else 6.30)
+        return 0.0, 50.0, 6.45
 
 def get_ticker_report(ticker):
     price, rsi, nav = fetch_live_metrics(ticker)
     if price == 0.0: 
-        return f"### **Flowstate Check: {ticker}**\n⚠️ *Data Feed Offline.*\n"
+        return f"{ticker}\n⚠️ *Data Feed Offline.*\n"
 
-    whale_status, _, is_whale_dump = get_institutional_conviction(ticker, TD_API_KEY) if HAS_ESSENTIALS else ("NOMINAL Flow", 0, False)
+    # Whale Flow Extraction
+    whale_status = "NORMAL"
+    if HAS_ESSENTIALS:
+        try:
+            whale_res = get_institutional_conviction(ticker, TD_API_KEY)
+            whale_status = whale_res[0] if isinstance(whale_res, tuple) else whale_res
+        except Exception:
+            pass
+
     sec_shield = "No N2/ RO detected" 
-    premium = ((price - nav) / nav) * 100
+    premium = ((price - nav) / nav) * 100 if nav > 0 else 0
     
-    if "No" not in sec_shield or is_whale_dump:
-        status, color = "🔴 CRITICAL: EXIT", 0xe74c3c
-        income_note, verdict = "LIQUIDATE: Structural Dilution.", "🚨 SEC Dilution identified."
-        recommendation = "SELL/EXECUTE CAPITAL PROTECTION PROTOCOL IMMEDIATELY."
-    elif premium > 25.0:
+    # Restored Original Verdict Logic
+    if premium > 25.0:
         status, color = "⚠️ HIGH PREMIUM", 0xf1c40f
-        income_note, verdict = "HOLD / PAUSE REINVESTMENT", "Premium extension stretched."
-        recommendation = "Maintain posture; pause new margin capital allocation."
+        income_note = "HOLD: High yield but risky."
+        verdict = "Premium approaching historical resistance."
+        recommendation = "Pause; Monitor for RO filing."
     else:
         status, color = "✅ STABLE", 0x2ecc71
-        income_note, verdict = "Accumulation phase", "Premium variance nominal."
+        income_note = "Accumulation phase"
+        verdict = "Premium variance within historical standard deviations. No active dilution signatures."
         recommendation = "Reinvest distributions"
 
+    # Formatting neutral tags dynamically
+    rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
+    prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
+
     return (
-        f"**{ticker}**\nStatus:  {status}\n┣ Premium to NAV: {premium:.2f}% (neutral)\n"
-        f"┣ SEC: {sec_shield}\n┣ RSI (1D): {rsi:.1f} (neutral)\n┣ Income Note: {income_note}\n"
-        f"┣ Whale Flow: {whale_status}\n┣ Recommendation: {recommendation}\n┗ Strategy Verdict: {verdict}\n"
+        f"{ticker}\n"
+        f"Status:  {status}\n"
+        f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+        f"┣ SEC: {sec_shield}\n"
+        f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
+        f"┣ Income Note: {income_note}\n"
+        f"┣ Whale Flow: {whale_status}\n"
+        f"┣ Recommendation: {recommendation}\n"
+        f"┗ Strategy Verdict: {verdict}\n"
     )
 
 def send_daily_pulse(is_test=False):
     reports = [get_ticker_report(ticker) for ticker in PRIORITY_ASSETS]
-    try:
-        db.update_state("edge_engine_spy", edge.calculate_mean_reversion_edge("SPY"))
-    except Exception: 
-        pass
-    
     full_report = "\n".join(reports)
+    
     title = "☕️ Cornerstone Flowstate Update" + (" - 🧪 Test Only" if is_test else "")
     color = 0xe74c3c if "CRITICAL" in full_report else (0xf1c40f if "HIGH PREMIUM" in full_report else 0x2ecc71)
     
+    # 1. Discord Dispatch
     if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
         send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
 
-    clean_report = full_report.replace("**", "").replace("`", "").replace("┣", "").replace("┗", "")
+    clean_report = full_report.replace("**", "").replace("`", "")
     
-    # 1. Fortified Pushover Dispatch
-    push_token = os.getenv("PUSHOVER_APP_TOKEN") or os.getenv("PUSHOVER_API_TOKEN")
-    push_user = os.getenv("PUSHOVER_USER_KEY")
-    if push_token and push_user:
+    # 2. Pushover Dispatch (RESTORED)
+    pushover_token = os.getenv("PUSHOVER_API_TOKEN")
+    pushover_user = os.getenv("PUSHOVER_USER_KEY")
+    if pushover_token and pushover_user:
         try:
             requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": push_token, "user": push_user,
-                "title": title, "message": clean_report, "priority": 1 if "CRITICAL" in full_report else 0
-            }, timeout=10)
+                "token": pushover_token,
+                "user": pushover_user,
+                "title": title,
+                "message": clean_report,
+                "priority": 0
+            }, timeout=5)
             logger.info("Pushover notification executed successfully.")
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Pushover transmission failed: {e}")
 
-    # 2. Fortified Email Dispatch
+    # 3. Email Dispatch
     sender = os.getenv("SENDER_EMAIL")
     pwd = os.getenv("EMAIL_APP_PASSWORD")
     if sender and pwd:
-        receiver = f"{sender}, {os.getenv('WORK_EMAIL')}" if os.getenv('WORK_EMAIL') else sender
         try:
             msg = EmailMessage()
             msg.set_content(clean_report)
             msg['Subject'] = title
             msg['From'] = sender
-            msg['To'] = receiver
+            msg['To'] = sender
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
                 smtp.login(sender, pwd)
                 smtp.send_message(msg)
@@ -132,35 +148,24 @@ def run_monitor():
         send_daily_pulse(is_test=True)
         return
 
-    last_dispatched_date = None
-    logger.info("⏳ [Engine Loop] Monitoring active. Firing Boot Sequence Verification...")
-    
-    # STARTUP PING: Prove credentials work immediately upon boot
-    push_token = os.getenv("PUSHOVER_APP_TOKEN") or os.getenv("PUSHOVER_API_TOKEN")
-    push_user = os.getenv("PUSHOVER_USER_KEY")
-    if push_token and push_user:
-        try:
-            requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": push_token, "user": push_user,
-                "title": "SYSTEM BOOT", "message": "Monitor.py successfully connected to Pushover.", "priority": 0
-            }, timeout=10)
-        except Exception: pass
+    logger.info("⏳ [Engine Loop] Monitoring active. Database State tracking enabled.")
 
     while True:
         try:
             now = datetime.now(tz_h)
             current_date = now.strftime("%Y-%m-%d")
-            current_time_val = int(now.strftime("%H%M"))
             
-            # Windowed Execution: 08:00 to 08:05 AM HST
-            if 800 <= current_time_val <= 805 and current_date != last_dispatched_date:
+            last_pulse = db.get_state("last_monitor_pulse_date", "")
+            
+            if now.hour >= 8 and last_pulse != current_date:
+                logger.info("Triggering standard 0800 HST Pulse...")
                 send_daily_pulse()
-                last_dispatched_date = current_date
+                db.update_state("last_monitor_pulse_date", current_date)
                 
         except Exception as e:
             logger.critical(f"FATAL LOOP EXCEPTION CAUGHT: {e}")
             
-        time.sleep(30)
+        time.sleep(300) 
 
 if __name__ == "__main__":
     run_monitor()

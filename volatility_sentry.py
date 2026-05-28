@@ -99,6 +99,7 @@ class ConsolidatedSentry:
         )
         if HAS_ESSENTIALS and WEBHOOK_CRYPTO:
             send_essentials_embed(WEBHOOK_CRYPTO, title, payload, 0xe74c3c if velocity_pct < 0 else 0x2ecc71)
+            db.update_state("last_ping_crypto", time.time())
 
     def on_message(self, ws, message):
         try:

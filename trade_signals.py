@@ -206,6 +206,9 @@ def execute_unified_conviction_scan(is_test=False):
     if HAS_ESSENTIALS and WEBHOOK_MARKET_ANALYSIS:
         send_essentials_embed(WEBHOOK_MARKET_ANALYSIS, title, payload, 0x9b59b6)
         db.log_event("Unified Conviction Matrix successfully dispatched to subscriber network.")
+        # Broadcast acts as a systemic heartbeat for options and macro analysis pipelines
+        db.update_state("last_ping_options", time.time())
+        db.update_state("last_ping_macro", time.time())
     else:
         logger.info(f"[Local Broadcast Print Due to Webhook Absence]:\n{payload}")
 
