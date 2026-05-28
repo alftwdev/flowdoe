@@ -19,11 +19,11 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
 
 # Webhooks and API Keys
-PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
+PUSHOVER_APP_TOKEN = os.getenv("PUSHOVER_API_TOKEN")
 PUSHOVER_USER_KEY = os.getenv("PUSHOVER_USER_KEY")
 
 WEBHOOKS = {
-    "options": os.getenv("WEBHOOK_OPTIONS_SIGNALS"),
+    "options": os.getenv("WEBHOOK_TRADE_SIGNALS"),
     "crypto": os.getenv("WEBHOOK_CRYPTO"),
     "tsp": os.getenv("WEBHOOK_FED"),
     "macro": os.getenv("WEBHOOK_FOREX")
