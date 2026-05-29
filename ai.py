@@ -24,7 +24,6 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
     vix_iv = db.get_state("vix_iv_index", 20.0)
     vrp_regime = "Volatility Harvesting (VRP > 0)" if latest_vrp > 0 else "Underpriced Insurance (VRP < 0)"
 
-    # UPGRADE: Fixed Google Generative AI Endpoint to the stable 'latest' version
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
@@ -64,14 +63,20 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
         res.raise_for_status()
         raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_text)
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Gemini API HTTP Error: {res.text}")
+        return _fallback_response()
     except Exception as e:
         logger.error(f"Gemini API failure: {e}")
-        return {
-            "macro_regime_outlook": "CHOP", "recommended_position_sizing": 0.25,
-            "sector_rotation_focus": "DEFENSIVE PRESERVATION",
-            "tactical_adjustment_notes": "API disruption. Defaults engaged.",
-            "discord_embed_brief": "⚠️ System Boundary Exception. Defaults active."
-        }
+        return _fallback_response()
+
+def _fallback_response():
+    return {
+        "macro_regime_outlook": "CHOP", "recommended_position_sizing": 0.25,
+        "sector_rotation_focus": "DEFENSIVE PRESERVATION",
+        "tactical_adjustment_notes": "API disruption. Defaults engaged.",
+        "discord_embed_brief": "⚠️ System Boundary Exception. Defaults active."
+    }
 
 def broadcast_public_teaser(is_test=False):
     logger.info("Generating public AI conversion teaser...")
