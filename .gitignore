@@ -48,3 +48,9 @@ rockefeller_state.db-wal
 .env
 __pycache__/
 *.pyc
+
+
+# SQLite database and WAL/SHM sidecars
+*.db
+*.db-shm
+*.db-wal
