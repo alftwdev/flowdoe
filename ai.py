@@ -24,7 +24,8 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
     vix_iv = db.get_state("vix_iv_index", 20.0)
     vrp_regime = "Volatility Harvesting (VRP > 0)" if latest_vrp > 0 else "Underpriced Insurance (VRP < 0)"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={GEMINI_API_KEY}"
+    # UPGRADE: Fixed Google Generative AI Endpoint to the stable 'latest' version
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
     SYSTEM: {active_persona}
@@ -74,9 +75,9 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
 
 def broadcast_public_teaser(is_test=False):
     logger.info("Generating public AI conversion teaser...")
-    fred_liquidity = 7000  
-    credit_spread = 3.5
-    history_data = "Market data nominal."
+    fred_liquidity = db.get_state("net_liquidity", 7000.0)
+    credit_spread = db.get_state("credit_spread", 3.5)
+    history_data = "Market data nominal. Continuous quantitative sweep active."
     
     ai_response = generate_ai_macro_brief(history_data, fred_liquidity, credit_spread)
     
@@ -89,4 +90,4 @@ def broadcast_public_teaser(is_test=False):
             send_essentials_embed(WEBHOOK, "🤖 Strategic Market Insight", embed_content, 0x3498db)
             logger.info("Public teaser broadcasted to Discord.")
     except Exception as e:
-        logger.error(f"Broadcast failure: {e}")
+        logger.error(f"Broadcast failure: {e}"

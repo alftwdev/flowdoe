@@ -39,7 +39,6 @@ def load_json(filepath):
         except: return []
 
 def log_trade_context(symbol, side, vrp_reading):
-    """Logs the VRP at the time of execution to prove mathematical advantage."""
     timestamp = datetime.now(pytz.UTC).isoformat()
     try:
         with sqlite3.connect(db.db_path, check_same_thread=False) as conn:
@@ -62,7 +61,6 @@ def log_trade_context(symbol, side, vrp_reading):
     except Exception as e:
         logger.error(f"Failed to log trade context for {symbol}: {e}")
 
-# (Original Gamification & Digest functions below remain unchanged)
 def grant_discord_role(user_id, role_id):
     if not all([DISCORD_BOT_TOKEN, GUILD_ID, role_id]): return False
     url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{role_id}"
@@ -74,10 +72,15 @@ def grant_discord_role(user_id, role_id):
 
 def audit_loyalty_ledger(is_test=False):
     logger.info("Executing Quantitative Loyalty Ledger Audit...")
-    users = db.get_all_users()
+    try:
+        users = db.get_all_users()
+    except AttributeError:
+        logger.warning("get_all_users method missing. Skipping ledger audit.")
+        return
+        
     upgraded_count = 0
     for user in users:
-        user_id, months_active, has_insider = user["user_id"], user["months_active"], user["has_insider_role"]
+        user_id, months_active, has_insider = user.get("user_id"), user.get("months_active"), user.get("has_insider_role")
         if months_active >= 3 and not has_insider:
             if not is_test and grant_discord_role(user_id, INSIDER_ROLE_ID):
                 db.update_user_role(user_id, True)
@@ -88,15 +91,19 @@ def audit_loyalty_ledger(is_test=False):
 def generate_weekly_digest(is_test=False):
     logger.info("Compiling Weekly Architecture Performance Digest...")
     results = load_json(RESULTS_FILE)
-# Locate this inside generate_weekly_digest() in metrics.py and replace the winner calculation:
-     if isinstance(results, dict):
-        winners = sum(1 for v in results.values() if isinstance(v, dict) and v.get("status") == "WIN")
+    
+    # UPGRADE: Case-insensitive parsing to accurately capture win rate metrics
+    if isinstance(results, dict):
+        winners = sum(1 for v in results.values() if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN")
         total_trades = len(results.keys())
     elif isinstance(results, list):
-        winners = sum(1 for v in results if isinstance(v, dict) and v.get("status") == "WIN")
+        winners = sum(1 for v in results if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN")
         total_trades = len(results)
     else:
         winners, total_trades = 0, 0
+        
+    losers = total_trades - winners
+    win_rate = (winners / total_trades * 100) if total_trades > 0 else 0.0
     profit_factor = (winners / losers) if losers > 0 else (winners if winners > 0 else 0.0)
 
     regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
@@ -109,10 +116,13 @@ def generate_weekly_digest(is_test=False):
     else:
         narrative = "Standard flow operations dominated the week. The architecture identified high-conviction order imbalances and executed in alignment with broader macro liquidity trends."
 
+    # UPGRADE: Restored formatting hierarchy
     payload = (
         f"**Rockefeller Architecture: Weekly Quant Recap**\n*{narrative}*\n\n"
-        f"📊 **System Metrics**\n┣ **Total Signals Deployed**: `{total_trades}`\n"
-        f"┣ **System Win Rate**: `{win_rate:.1f}%`\n┗ **Calculated Profit Factor**: `{profit_factor:.2f}x` (Gross Wins/Losses)\n\n"
+        f"📊 **System Metrics**\n"
+        f"┣ **Total Signals Deployed**: `{total_trades}`\n"
+        f"┣ **System Win Rate**: `{win_rate:.1f}%`\n"
+        f"┗ **Calculated Profit Factor**: `{profit_factor:.2f}x` (Gross Wins/Losses)\n\n"
         f"🔒 *Access the live dashboard to view real-time engine states.*"
     )
 
@@ -120,12 +130,6 @@ def generate_weekly_digest(is_test=False):
         title = "📈 Weekly Ecosystem Performance Digest" + (" [TEST]" if is_test else "")
         send_essentials_embed(WEBHOOK_PERFORMANCE, title, payload, 0x2ecc71)
         db.log_event(f"Weekly Digest dispatched. WR: {win_rate:.1f}%, PF: {profit_factor:.2f}")
-
-def get_free_subscriber_bait():
-    data = db.get_state("income_alpha_data", {})
-    if not data: return "Market data processing..."
-    best_yield_symbol = max(data, key=lambda k: data[k]['yield'])
-    return f"🚀 **Top Yield Highlight**: {best_yield_symbol} is currently printing a `{data[best_yield_symbol]['yield']:.2f}%` distribution. *Upgrade to Tier 3 to unlock the full portfolio matrix.*"
 
 if __name__ == "__main__":
     is_test = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]

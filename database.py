@@ -19,14 +19,12 @@ class EcosystemDatabase:
             return cls._instance
 
     def __init__(self, db_path='rockefeller_state.db'):
-        # Prevent secondary modules from overriding the absolute connection path
         if getattr(self, '_initialized', False):
             return
             
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         
-        # Optimize performance and concurrent query threading
         self.cursor.execute('PRAGMA journal_mode=WAL;')
         self.cursor.execute('PRAGMA synchronous=NORMAL;')
         self.conn.commit() 
@@ -48,6 +46,14 @@ class EcosystemDatabase:
                     level TEXT,
                     message TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # NEW: Loyalty Ledger Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    months_active INTEGER DEFAULT 0,
+                    has_insider_role BOOLEAN DEFAULT 0
                 )
             """)
             conn.commit()
@@ -78,4 +84,17 @@ class EcosystemDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
+            conn.commit()
+
+    # --- NEW: Discord Loyalty Ledger Methods ---
+    def get_all_users(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
+            return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
+
+    def update_user_role(self, user_id, has_role):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
             conn.commit()

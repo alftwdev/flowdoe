@@ -37,3 +37,14 @@ signal_results.json
 *.txt
 .env
 rockefeller_state.db
+
+# Database & Runtime State
+rockefeller_state.db
+rockefeller_state.db-journal
+rockefeller_state.db-shm
+rockefeller_state.db-wal
+
+# Local Credentials
+.env
+__pycache__/
+*.pyc

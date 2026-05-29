@@ -22,85 +22,66 @@ try:
 except ImportError:
     HAS_ESSENTIALS = False
 
+def fetch_risk_free_rate():
+    """Fetches the US 10-Year Treasury Yield as the baseline Risk-Free Rate proxy."""
+    try:
+        url = f"https://api.twelvedata.com/price?symbol=US10Y&apikey={TD_API_KEY}"
+        res = requests.get(url, timeout=10).json()
+        price = float(res.get("price", 4.50))
+        return price if price < 10.0 else price / 10.0
+    except Exception:
+        return 4.50  
+
 def fetch_twelvedata_yield(symbol):
-    # (Original fetch logic preserved entirely)
+    """Calculates robust Trailing Twelve Month (TTM) Dividend Yield with frequency fallbacks."""
     base_url = "https://api.twelvedata.com"
     try:
         q_res = requests.get(f"{base_url}/quote?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
         d_res = requests.get(f"{base_url}/dividends?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
         
-        price = float(q_res.get("close", 0))
+        price = float(q_res.get("close", 0) or q_res.get("previous_close", 0))
         dividends = d_res.get("dividends", [])
+        
+        if price <= 0: return None
+
         one_year_ago = datetime.now() - timedelta(days=365)
+        ttm_dividend_sum = 0.0
         
-        annual_div = 0.0
-        for d in dividends:
-            div_date_str = d.get('ex_date', d.get('date', '1970-01-01'))
-            try:
+        for div in dividends:
+            div_date_str = div.get("date")
+            if div_date_str:
                 div_date = datetime.strptime(div_date_str, "%Y-%m-%d")
-                if div_date > one_year_ago:
-                    annual_div += float(d.get('amount', 0))
-            except ValueError:
-                continue
+                if div_date >= one_year_ago:
+                    ttm_dividend_sum += float(div.get("amount", 0))
         
-        yield_pct = (annual_div / price) * 100 if price > 0 else 0
-        return {"price": price, "yield": yield_pct, "annual_div": annual_div}
+        # UPGRADE: Intelligent Fallback Frequency Multiplier
+        if ttm_dividend_sum == 0.0 and dividends:
+            latest_amount = float(dividends[0].get("amount", 0))
+            if symbol in ["JEPI", "O"]:  # Known monthly payers
+                ttm_dividend_sum = latest_amount * 12
+            else:
+                ttm_dividend_sum = latest_amount * 4  # Standard quarterly assumption
+            
+        div_yield = (ttm_dividend_sum / price) * 100 if ttm_dividend_sum > 0 else 0.0
+        return {"price": price, "yield": div_yield}
         
     except Exception as e:
         logger.error(f"TwelveData extraction failed for {symbol}: {e}")
         return None
 
-def compile_eod_income_recap(is_test=False):
-    """Compiles an EOD structural valuation matrix for yield positions."""
-    logger.info("Generating EOD Income & CEF Structure Recap...")
-    target_assets = ["CLM", "CRF", "JEPI", "SCHD"]
-    report_lines = []
-    
-    for symbol in target_assets:
-        try:
-            url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1day&outputsize=2&apikey={TD_API_KEY}"
-            res = requests.get(url, timeout=10).json()
-            if "values" in res and len(res["values"]) > 1:
-                close_p = float(res["values"][0]["close"])
-                prior_p = float(res["values"][1]["close"])
-                daily_pct = ((close_p - prior_p) / prior_p) * 100
-                
-                saved_data = db.get_state("income_alpha_data", {})
-                current_yield = saved_data.get(symbol, {}).get("yield", 0.0)
-                
-                emoji = "🍏" if daily_pct >= 0 else "🍎"
-                report_lines.append(f"┣ **{symbol}**: ${close_p:.2f} ({emoji} `{daily_pct:+.2f}%`) | Yield: `{current_yield:.2f}%`")
-        except Exception as e:
-            logger.error(f"EOD calculation failed for {symbol}: {e}")
-            
-    full_report = (
-        "### 🌅 End-of-Day Income & Premium Yield Recap\n"
-        "Session closed. Evaluating theta decay realization and structural valuations:\n\n" + 
-        "\n".join(report_lines) + 
-        "\n\n*Post-Market Strategy: Theta decay verified. Premium tracking stable. Retain capital configurations.*"
-    )
-    
-    if WEBHOOK_INCOME and HAS_ESSENTIALS:
-        send_essentials_embed(WEBHOOK_INCOME, "🏦 EOD Premium & CEF Summary", full_report, 0x1f8b4c)
-
-# Add to your master loop in income.py:
-# if 1005 <= int(now.strftime("%H%M")) <= 1010 and current_date != last_eod_date:
-#     compile_eod_income_recap()
 def process_income_cycle(is_test=False):
     target_assets = ["JEPI", "SCHD", "O", "ARCC"]
     results = {}
     
-    logger.info("Initiating Twelve Data Yield Analysis...")
-    
-    # Yield Trap Protection Layer
+    logger.info("Initiating Twelve Data TTM Yield Analysis...")
     vix_iv = db.get_state("vix_iv_index", 20.0)
     is_yield_trap = vix_iv > 25.0
+    rf_rate = fetch_risk_free_rate()
     
     for symbol in target_assets:
         data = fetch_twelvedata_yield(symbol)
         if data and data['price'] > 0:
             results[symbol] = data
-            logger.info(f"Captured {symbol}: ${data['price']:.2f} | Yield: {data['yield']:.2f}%")
         else:
             logger.warning(f"Failed to capture valid data for {symbol}.")
     
@@ -113,14 +94,17 @@ def process_income_cycle(is_test=False):
     if WEBHOOK_INCOME and HAS_ESSENTIALS:
         report = ""
         if is_yield_trap:
-            logger.warning(f"VIX at {vix_iv} > 25. Yield trap protection activated.")
-            report += f"⚠️ **YIELD TRAP PROTECTION ACTIVE**\nImplied Volatility (VIX) currently reads `{vix_iv}`. High yields may reflect collapsing equity valuations rather than sustainable cash flow. Scale allocations down defensively.\n\n"
+            report += f"⚠️ **YIELD TRAP PROTECTION ACTIVE**\nImplied Volatility (VIX) currently reads `{vix_iv}`. High yields may reflect collapsing equity valuations rather than sustainable cash flow.\n\n"
         
-        report += "\n".join([f"┣ **{symbol}**: {v['yield']:.2f}% Yield (${v['price']:.2f})" for symbol, v in results.items()])
+        for sym, v in results.items():
+            alpha_spread = v['yield'] - rf_rate
+            report += f"┣ **{sym}**: `{v['yield']:.2f}%` Yield (${v['price']:.2f}) [Spread vs RF: `{alpha_spread:+.2f}%`]\n"
+            
+        # UPGRADE: Restored Discord formatting line breaks
+        report += f"\n\n📈 *Baseline Risk-Free Rate Proxy (10Y/Treasury): {rf_rate:.2f}%*"
         
-        title = "🏦 Institutional Yield Monitor" + (" [TEST]" if is_test else "")
-        send_essentials_embed(WEBHOOK_INCOME, title, report, 0xe67e22 if is_yield_trap else 0xf1c40f)
-        logger.info("Report dispatched successfully.")
+        title = "💰 Institutional Yield Monitor" + (" [TEST]" if is_test else "")
+        send_essentials_embed(WEBHOOK_INCOME, title, report, 0xe67e22 if is_yield_trap else 0x1f8b4c)
 
 if __name__ == "__main__":
     is_test_mode = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
