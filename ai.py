@@ -90,4 +90,4 @@ def broadcast_public_teaser(is_test=False):
             send_essentials_embed(WEBHOOK, "🤖 Strategic Market Insight", embed_content, 0x3498db)
             logger.info("Public teaser broadcasted to Discord.")
     except Exception as e:
-        logger.error(f"Broadcast failure: {e}"
+        logger.error(f"Broadcast failure: {e}")
