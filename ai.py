@@ -24,7 +24,8 @@ def generate_ai_macro_brief(history_data, fred_liquidity, credit_spread, win_rat
     vix_iv = db.get_state("vix_iv_index", 20.0)
     vrp_regime = "Volatility Harvesting (VRP > 0)" if latest_vrp > 0 else "Underpriced Insurance (VRP < 0)"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={GEMINI_API_KEY}"
+    # UPGRADE: Removed "-latest" alias to target the stable, active endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={GEMINI_API_KEY}"
     
     prompt = f"""
     SYSTEM: {active_persona}

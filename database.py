@@ -22,16 +22,18 @@ class EcosystemDatabase:
         if getattr(self, '_initialized', False):
             return
             
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # Added a 15-second timeout to handle high-concurrency locks gracefully
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15.0)
         self.cursor = self.conn.cursor()
         
-        self.cursor.execute('PRAGMA journal_mode=WAL;')
+        # Switched to DELETE mode: Safe for PythonAnywhere's Network File System (NFS)
+        self.cursor.execute('PRAGMA journal_mode=DELETE;')
         self.cursor.execute('PRAGMA synchronous=NORMAL;')
         self.conn.commit() 
         self._initialized = True
 
     def _initialize_tables(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS global_state (
@@ -48,7 +50,6 @@ class EcosystemDatabase:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # NEW: Loyalty Ledger Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
@@ -60,7 +61,7 @@ class EcosystemDatabase:
 
     def update_state(self, key, value):
         val_str = json.dumps(value)
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO global_state (key, value) VALUES (?, ?)
@@ -69,7 +70,7 @@ class EcosystemDatabase:
             conn.commit()
 
     def get_state(self, key, default=None):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM global_state WHERE key = ?", (key,))
             result = cursor.fetchone()
@@ -81,20 +82,19 @@ class EcosystemDatabase:
             return default
 
     def log_event(self, message, level="INFO"):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
             conn.commit()
 
-    # --- NEW: Discord Loyalty Ledger Methods ---
     def get_all_users(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
             return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
 
     def update_user_role(self, user_id, has_role):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
             conn.commit()
