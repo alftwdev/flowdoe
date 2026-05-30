@@ -27,36 +27,34 @@ WEBHOOK_CORNERSTONE = os.getenv("WEBHOOK_CORNERSTONE_RO")
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 PRIORITY_ASSETS = {
-    "CLM": {"nav_ticker": "XCLMX"},
-    "CRF": {"nav_ticker": "XCRFX"}
+    "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.45},
+    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.30}
 }
 
-def fetch_live_metrics(symbol):
+def fetch_live_metrics(session, symbol):
     try:
-        p_url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
-        price = float(requests.get(p_url, timeout=10).json().get('price', 0.0))
+        p_res = session.get(f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
+        price = float(p_res.get('price', 0.0))
 
         rsi = 50.0
         if price > 0:
-            rsi_url = f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}"
-            r_res = requests.get(rsi_url, timeout=10).json()
+            r_res = session.get(f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day&time_period=14&apikey={TD_API_KEY}", timeout=10).json()
             rsi = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
 
         nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
-        nav_url = f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}"
-        nav = float(requests.get(nav_url, timeout=10).json().get('price', 6.45 if symbol == "CLM" else 6.30))
+        nav_res = session.get(f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}", timeout=10).json()
+        nav = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
         
         return price, rsi, nav
     except Exception as e:
         logger.error(f"[Data Fetch Error] {e}")
-        return 0.0, 50.0, 6.45
+        return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
 
-def get_ticker_report(ticker):
-    price, rsi, nav = fetch_live_metrics(ticker)
+def get_ticker_report(session, ticker):
+    price, rsi, nav = fetch_live_metrics(session, ticker)
     if price == 0.0: 
         return f"{ticker}\n⚠️ *Data Feed Offline.*\n"
 
-    # Whale Flow Extraction
     whale_status = "NORMAL"
     if HAS_ESSENTIALS:
         try:
@@ -68,19 +66,17 @@ def get_ticker_report(ticker):
     sec_shield = "No N2/ RO detected" 
     premium = ((price - nav) / nav) * 100 if nav > 0 else 0
     
-    # Restored Original Verdict Logic
     if premium > 25.0:
-        status, color = "⚠️ HIGH PREMIUM", 0xf1c40f
+        status = "⚠️ HIGH PREMIUM"
         income_note = "HOLD: High yield but risky."
         verdict = "Premium approaching historical resistance."
         recommendation = "Pause; Monitor for RO filing."
     else:
-        status, color = "✅ STABLE", 0x2ecc71
+        status = "✅ STABLE"
         income_note = "Accumulation phase"
         verdict = "Premium variance within historical standard deviations. No active dilution signatures."
         recommendation = "Reinvest distributions"
 
-    # Formatting neutral tags dynamically
     rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
     prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
 
@@ -97,11 +93,21 @@ def get_ticker_report(ticker):
     )
 
 def send_daily_pulse(is_test=False):
-    reports = [get_ticker_report(ticker) for ticker in PRIORITY_ASSETS]
+    reports = []
+    # Using connection pooling to prevent API timeouts
+    with requests.Session() as session:
+        for ticker in PRIORITY_ASSETS:
+            reports.append(get_ticker_report(session, ticker))
+            
     full_report = "\n".join(reports)
     
+    # Ecosystem Supplement: CEF Credit Shield Check
+    credit_spread = float(db.get_state("credit_spread", 0.0))
+    if credit_spread > 4.5:
+        full_report += f"\n\n🚨 **SYSTEMIC MACRO OVERRIDE:** High Yield Credit Spreads are elevated ({credit_spread:.2f}%). CEFs face high probability of NAV decay in this regime."
+
     title = "☕️ Cornerstone Flowstate Update" + (" - 🧪 Test Only" if is_test else "")
-    color = 0xe74c3c if "CRITICAL" in full_report else (0xf1c40f if "HIGH PREMIUM" in full_report else 0x2ecc71)
+    color = 0xe74c3c if "CRITICAL" in full_report or credit_spread > 4.5 else (0xf1c40f if "HIGH PREMIUM" in full_report else 0x2ecc71)
     
     # 1. Discord Dispatch
     if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
@@ -109,7 +115,7 @@ def send_daily_pulse(is_test=False):
 
     clean_report = full_report.replace("**", "").replace("`", "")
     
-    # 2. Pushover Dispatch (RESTORED)
+    # 2. Pushover Dispatch
     pushover_token = os.getenv("PUSHOVER_API_TOKEN")
     pushover_user = os.getenv("PUSHOVER_USER_KEY")
     if pushover_token and pushover_user:
@@ -154,7 +160,6 @@ def run_monitor():
         try:
             now = datetime.now(tz_h)
             current_date = now.strftime("%Y-%m-%d")
-            
             last_pulse = db.get_state("last_monitor_pulse_date", "")
             
             if now.hour >= 8 and last_pulse != current_date:
