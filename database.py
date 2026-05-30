@@ -16,29 +16,24 @@ class EcosystemDatabase:
             if cls._instance is None:
                 cls._instance = super(EcosystemDatabase, cls).__new__(cls)
                 cls._instance.db_path = os.path.join(BASE_DIR, db_path)
-                cls._instance._initialized = False
                 cls._instance._initialize_tables()
             return cls._instance
 
     def __init__(self, db_path='rockefeller_state.db'):
-        if getattr(self, '_initialized', False):
-            return
-            
-        try:
-            # Extended timeout to 25s to combat severe NFS latency
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=25.0)
-            self.cursor = self.conn.cursor()
-            self.cursor.execute('PRAGMA journal_mode=DELETE;')
-            self.cursor.execute('PRAGMA synchronous=NORMAL;')
-            self.conn.commit() 
-            self._initialized = True
-        except sqlite3.OperationalError as e:
-            logger.error(f"DB Initialization fault (System likely locked by zombie process): {e}")
-            self._initialized = False
+        # CRITICAL UPGRADE: We strictly FORBID persistent connections (self.conn) here.
+        # Every method opens and cleanly closes its own connection to prevent NFS file locking.
+        pass
+
+    def _get_connection(self):
+        """Helper to safely open an ephemeral connection with the right pragmas."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute('PRAGMA journal_mode=DELETE;')
+        conn.execute('PRAGMA synchronous=NORMAL;')
+        return conn
 
     def _initialize_tables(self):
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS global_state (
@@ -62,14 +57,24 @@ class EcosystemDatabase:
                         has_insider_role BOOLEAN DEFAULT 0
                     )
                 """)
+                # Standardized trade context table added by metrics.py
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_context_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TIMESTAMP,
+                        symbol TEXT,
+                        side TEXT,
+                        vrp_reading REAL
+                    )
+                """)
                 conn.commit()
         except sqlite3.OperationalError as e:
-            logger.error(f"Failed to initialize tables due to lock: {e}")
+            logger.error(f"Failed to initialize tables. Lock detected: {e}")
 
     def update_state(self, key, value):
         val_str = json.dumps(value)
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO global_state (key, value) VALUES (?, ?)
@@ -81,7 +86,7 @@ class EcosystemDatabase:
 
     def get_state(self, key, default=None):
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT value FROM global_state WHERE key = ?", (key,))
                 result = cursor.fetchone()
@@ -92,12 +97,12 @@ class EcosystemDatabase:
                         return result[0]
                 return default
         except sqlite3.OperationalError as e:
-            logger.warning(f"Could not read state for {key}. Yielding default. Error: {e}")
+            logger.warning(f"Could not read state for {key}. DB Locked: {e}")
             return default
 
     def log_event(self, message, level="INFO"):
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
                 conn.commit()
@@ -106,7 +111,7 @@ class EcosystemDatabase:
 
     def get_all_users(self):
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
                 return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
@@ -116,7 +121,7 @@ class EcosystemDatabase:
 
     def update_user_role(self, user_id, has_role):
         try:
-            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
                 conn.commit()

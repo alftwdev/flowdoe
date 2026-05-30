@@ -68,7 +68,6 @@ def fetch_twelvedata_rsi(symbol, interval="1h", time_period=14):
     return 50.0
 
 def fetch_td_indicator(symbol, indicator, interval, **params):
-    """Universal helper for Twelve Data Technical Indicators."""
     url = f"https://api.twelvedata.com/{indicator}?symbol={symbol}&interval={interval}&apikey={TD_API_KEY}"
     for k, v in params.items(): url += f"&{k}={v}"
     try:
@@ -99,16 +98,10 @@ def execute_global_macro_matrix(is_test=False):
     logger.info(f"Global macro alignment pulled: Current regime mode is {regime}")
 
 def execute_forex_tactical_scan():
-    """
-    Intraday execution of the XAU/USD 4-Phase Pullback & EUR/USD Multi-Timeframe Reversal logic.
-    Evaluates indicators to deploy highly actionable math-backed signals.
-    """
     logger.info("Executing Forex & Metals Tactical Scans...")
     if not TD_API_KEY or not WEBHOOK_FOREX: return
 
     report_lines = []
-
-    # Strategy 1: EUR/USD Multi-Timeframe Stochastic Reversal
     d_sma7 = fetch_td_indicator("EUR/USD", "sma", "1day", time_period=7)
     d_sma21 = fetch_td_indicator("EUR/USD", "sma", "1day", time_period=21)
     h_sma50 = fetch_td_indicator("EUR/USD", "sma", "1h", time_period=50)
@@ -125,42 +118,39 @@ def execute_forex_tactical_scan():
                 f"🚨 **EUR/USD TACTICAL ALIGNMENT (LONG SETUP)**\n"
                 f"┣ **Condition:** Daily & Hourly Macro Trend is **BULLISH**.\n"
                 f"┣ **Trigger:** Hourly Stochastic dropped to deeply oversold levels (`{k:.1f}`).\n"
-                f"┗ **Strategy:** High-probability continuation reversal. Prepare for long execution upon upward momentum cross."
+                f"┗ **Strategy:** High-probability continuation reversal."
             )
         elif not macro_bullish and not micro_bullish and k > 80:
             report_lines.append(
                 f"🚨 **EUR/USD TACTICAL ALIGNMENT (SHORT SETUP)**\n"
                 f"┣ **Condition:** Daily & Hourly Macro Trend is **BEARISH**.\n"
                 f"┣ **Trigger:** Hourly Stochastic pushed to deeply overbought levels (`{k:.1f}`).\n"
-                f"┗ **Strategy:** Trend continuation short setup identified. Await momentum cross downward."
+                f"┗ **Strategy:** Trend continuation short setup identified."
             )
 
-    # Strategy 2: XAU/USD Volatility Expansion Channel
     ema14 = fetch_td_indicator("XAU/USD", "ema", "1h", time_period=14)
     ema18 = fetch_td_indicator("XAU/USD", "ema", "1h", time_period=18)
     ema24 = fetch_td_indicator("XAU/USD", "ema", "1h", time_period=24)
-    price_res = requests.get(f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TD_API_KEY}").json()
-    
-    if all([ema14, ema18, ema24]) and "price" in price_res:
-        price = float(price_res["price"])
-        if ema14 > ema18 > ema24: # Armed Uptrend
-            if price <= ema14: # Pullback State
-                report_lines.append(
-                    f"🏆 **XAU/USD VOLATILITY CHANNEL ARMED**\n"
-                    f"┣ **Condition:** Gold is in a confirmed 4-phase uptrend (EMA14 > EMA18 > EMA24).\n"
-                    f"┣ **Trigger:** Price has pulled back into the volatility channel (`${price:,.2f}`).\n"
-                    f"┗ **Strategy:** Do not enter yet. Wait for breakout confirmation above EMA 14 (`${ema14:,.2f}`) for optimal Risk/Reward."
-                )
+    try:
+        price_res = requests.get(f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TD_API_KEY}", timeout=10).json()
+        if all([ema14, ema18, ema24]) and "price" in price_res:
+            price = float(price_res["price"])
+            if ema14 > ema18 > ema24: 
+                if price <= ema14: 
+                    report_lines.append(
+                        f"🏆 **XAU/USD VOLATILITY CHANNEL ARMED**\n"
+                        f"┣ **Condition:** Gold is in a confirmed 4-phase uptrend.\n"
+                        f"┣ **Trigger:** Price has pulled back into the volatility channel (`${price:,.2f}`).\n"
+                        f"┗ **Strategy:** Await breakout confirmation above EMA 14 (`${ema14:,.2f}`)."
+                    )
+    except Exception as e:
+        logger.error(f"XAU/USD Tactical scan failed: {e}")
 
     if report_lines:
         payload = "### 🌐 Forex & Metals Tactical Radar\n" + "\n\n".join(report_lines) + "\n\n*ESSENTIALS Quantitative Architecture*"
         send_essentials_embed(WEBHOOK_FOREX, "Mathematical Setup Detected", payload, 0xf1c40f)
 
 def execute_tsp_tactical_scan():
-    """
-    Intraday execution for Federal TSP Proxies. Evaluates Daily/Weekly moving averages
-    to identify major Interfund Transfer (IFT) pivot points.
-    """
     logger.info("Executing TSP Institutional Moving Average Scan...")
     if not TD_API_KEY or not WEBHOOK_FED: return
     
@@ -168,12 +158,12 @@ def execute_tsp_tactical_scan():
     report_lines = []
 
     for sym, name in proxies.items():
-        d_sma10 = fetch_td_indicator(sym, "sma", "1day", time_period=10) # Proxy for 2-week
-        d_sma50 = fetch_td_indicator(sym, "sma", "1day", time_period=50) # Proxy for 10-week
+        d_sma10 = fetch_td_indicator(sym, "sma", "1day", time_period=10)
+        d_sma50 = fetch_td_indicator(sym, "sma", "1day", time_period=50)
         
         if d_sma10 and d_sma50:
             if d_sma10 < d_sma50:
-                report_lines.append(f"🔴 **{name} ({sym})**: Short-term momentum crossed below Macro Baseline. Defensive reallocation to G-Fund mathematically favored.")
+                report_lines.append(f"🔴 **{name} ({sym})**: Short-term momentum crossed below Macro Baseline. Defensive reallocation favored.")
     
     if report_lines:
         payload = "### 🦅 TSP Tactical IFT Alert\n" + "\n".join(report_lines) + "\n\n*ESSENTIALS Capital Preservation Engine*"
@@ -189,7 +179,6 @@ def execute_unified_conviction_scan(is_test=False):
     regime_mode = db.get_state("market_regime_state", "BULLISH")
     
     report_lines = []
-    
     for symbol in core_assets:
         try:
             p_res = requests.get(f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
@@ -249,7 +238,6 @@ def execute_unified_conviction_scan(is_test=False):
     )
 
     title = "🤖 Unified Strategic Conviction Broadcast" + (" [TEST]" if is_test else "")
-    
     if HAS_ESSENTIALS and WEBHOOK_MARKET_ANALYSIS:
         send_essentials_embed(WEBHOOK_MARKET_ANALYSIS, title, payload, 0x9b59b6)
         db.log_event("Unified Conviction Matrix successfully dispatched to subscriber network.")
@@ -287,21 +275,15 @@ if __name__ == "__main__":
                 current_date = now.strftime("%Y-%m-%d")
                 current_time_val = int(now.strftime("%H%M"))
                 
-                # 1. Standard Intraday Market Scans
                 execute_vrp_signal_scan(is_test=False)
                 execute_pairs_scan(is_test=False)
                 execute_global_macro_matrix(is_test=False)
                 execute_unified_conviction_scan(is_test=False)
-                
-                # 2. Highly Tactical Intraday Engine Scans (The Goldmine)
                 execute_forex_tactical_scan()
                 execute_tsp_tactical_scan()
                 
-                # 3. Timed Institutional Recap (09:30 - 09:35 AM HST)
                 if 930 <= current_time_val <= 935 and current_date != last_eod_date:
                     compile_institutional_macro_recap()
-                
-                # 4. Timed EOD Institutional Matrix (10:05 - 10:10 AM HST)
                 if 1005 <= current_time_val <= 1010 and current_date != last_eod_date:
                     compile_eod_derivatives_matrix(is_test=False)
                     last_eod_date = current_date
