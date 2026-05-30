@@ -17,12 +17,16 @@ async def fetch_options_data(session, symbol):
     url = f"https://api.twelvedata.com/options/chain?symbol={symbol}&apikey={TD_API_KEY}"
     async with session.get(url, timeout=12) as response:
         if response.status != 200:
-            raise Exception(f"Twelve Data API Link Exception: Status {response.status}")
+            # REFINEMENT: Gracefully intercept the 404 (or any API block) instead of crashing
+            logger.warning(f"Twelve Data Options Endpoint Unavailable (Status {response.status}). Triggering baseline fallback.")
+            return {"data": []}
         return await response.json()
         
 async def fetch_spot_price(session, symbol):
     url = f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}"
     async with session.get(url, timeout=10) as response:
+        if response.status != 200:
+            return 0.0
         res = await response.json()
         return float(res.get("price", 0.0))
 
@@ -35,7 +39,7 @@ async def perform_gex_calculations():
             
             contracts = raw_data.get("data", [])
             if not contracts:
-                logger.warning("Empty options matrix fetched. Defaulting back to baseline levels.")
+                logger.info("Empty options matrix detected. Synthesizing GEX from baseline state memory.")
                 target_strike = db.get_state("spy_gex_flip", 500.0)
             else:
                 total_call_oi = 0
