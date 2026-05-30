@@ -41,7 +41,7 @@ def load_json(filepath):
 def log_trade_context(symbol, side, vrp_reading):
     timestamp = datetime.now(pytz.UTC).isoformat()
     try:
-        with sqlite3.connect(db.db_path, check_same_thread=False) as conn:
+        with sqlite3.connect(db.db_path, check_same_thread=False, timeout=15.0) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trade_context_logs (
@@ -74,8 +74,8 @@ def audit_loyalty_ledger(is_test=False):
     logger.info("Executing Quantitative Loyalty Ledger Audit...")
     try:
         users = db.get_all_users()
-    except AttributeError:
-        logger.warning("get_all_users method missing. Skipping ledger audit.")
+    except Exception as e:
+        logger.warning(f"Database access fault during ledger audit: {e}")
         return
         
     upgraded_count = 0
@@ -92,21 +92,30 @@ def generate_weekly_digest(is_test=False):
     logger.info("Compiling Weekly Architecture Performance Digest...")
     results = load_json(RESULTS_FILE)
     
-    # UPGRADE: Case-insensitive parsing to accurately capture win rate metrics
+    # UPGRADE: Formatting standardized to prevent IndentationErrors
+    winners = 0
+    total_trades = 0
+    
     if isinstance(results, dict):
-        winners = sum(1 for v in results.values() if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN")
+        for v in results.values():
+            if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN":
+                winners += 1
         total_trades = len(results.keys())
     elif isinstance(results, list):
-        winners = sum(1 for v in results if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN")
+        for v in results:
+            if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN":
+                winners += 1
         total_trades = len(results)
-    else:
-        winners, total_trades = 0, 0
         
     losers = total_trades - winners
     win_rate = (winners / total_trades * 100) if total_trades > 0 else 0.0
     profit_factor = (winners / losers) if losers > 0 else (winners if winners > 0 else 0.0)
 
-    regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
+    try:
+        regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
+    except Exception:
+        regime_data = {"vix_status": "STABLE", "regime": "BULLISH"}
+        
     vix_status = regime_data.get("vix_status", "STABLE")
     
     if vix_status in ["HIGH_VOLATILITY", "STORM"]:
@@ -116,7 +125,6 @@ def generate_weekly_digest(is_test=False):
     else:
         narrative = "Standard flow operations dominated the week. The architecture identified high-conviction order imbalances and executed in alignment with broader macro liquidity trends."
 
-    # UPGRADE: Restored formatting hierarchy
     payload = (
         f"**Rockefeller Architecture: Weekly Quant Recap**\n*{narrative}*\n\n"
         f"📊 **System Metrics**\n"
@@ -129,18 +137,26 @@ def generate_weekly_digest(is_test=False):
     if HAS_ESSENTIALS and WEBHOOK_PERFORMANCE:
         title = "📈 Weekly Ecosystem Performance Digest" + (" [TEST]" if is_test else "")
         send_essentials_embed(WEBHOOK_PERFORMANCE, title, payload, 0x2ecc71)
+        
+    try:
         db.log_event(f"Weekly Digest dispatched. WR: {win_rate:.1f}%, PF: {profit_factor:.2f}")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     is_test = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
-    try: audit_loyalty_ledger(is_test=is_test)
-    except Exception as e: db.log_event(f"Ledger audit crash: {e}", "ERROR")
+    try: 
+        audit_loyalty_ledger(is_test=is_test)
+    except Exception as e: 
+        logger.error(f"Ledger audit crash: {e}")
 
     tz_h = pytz.timezone('US/Hawaii')
     current_time_hst = datetime.now(tz_h)
     
     if is_test or current_time_hst.weekday() == 4:
-        try: generate_weekly_digest(is_test=is_test)
-        except Exception as e: db.log_event(f"Weekly digest crash: {e}", "ERROR")
+        try: 
+            generate_weekly_digest(is_test=is_test)
+        except Exception as e: 
+            logger.error(f"Weekly digest crash: {e}")
     else:
         logger.info(f"Skipping Weekly Digest. Current day is {current_time_hst.strftime('%A')}.")

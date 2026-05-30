@@ -2,8 +2,10 @@ import sqlite3
 import threading
 import json
 import os
+import logging
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+logger = logging.getLogger("Database_Engine")
 
 class EcosystemDatabase:
     _instance = None
@@ -22,79 +24,101 @@ class EcosystemDatabase:
         if getattr(self, '_initialized', False):
             return
             
-        # Added a 15-second timeout to handle high-concurrency locks gracefully
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=15.0)
-        self.cursor = self.conn.cursor()
-        
-        # Switched to DELETE mode: Safe for PythonAnywhere's Network File System (NFS)
-        self.cursor.execute('PRAGMA journal_mode=DELETE;')
-        self.cursor.execute('PRAGMA synchronous=NORMAL;')
-        self.conn.commit() 
-        self._initialized = True
+        try:
+            # Extended timeout to 25s to combat severe NFS latency
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=25.0)
+            self.cursor = self.conn.cursor()
+            self.cursor.execute('PRAGMA journal_mode=DELETE;')
+            self.cursor.execute('PRAGMA synchronous=NORMAL;')
+            self.conn.commit() 
+            self._initialized = True
+        except sqlite3.OperationalError as e:
+            logger.error(f"DB Initialization fault (System likely locked by zombie process): {e}")
+            self._initialized = False
 
     def _initialize_tables(self):
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS global_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS audit_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    level TEXT,
-                    message TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    months_active INTEGER DEFAULT 0,
-                    has_insider_role BOOLEAN DEFAULT 0
-                )
-            """)
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS global_state (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        level TEXT,
+                        message TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id TEXT PRIMARY KEY,
+                        months_active INTEGER DEFAULT 0,
+                        has_insider_role BOOLEAN DEFAULT 0
+                    )
+                """)
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.error(f"Failed to initialize tables due to lock: {e}")
 
     def update_state(self, key, value):
         val_str = json.dumps(value)
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO global_state (key, value) VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, last_updated=CURRENT_TIMESTAMP
-            """, (key, val_str))
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO global_state (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, last_updated=CURRENT_TIMESTAMP
+                """, (key, val_str))
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning(f"Could not update state for {key}. DB Locked: {e}")
 
     def get_state(self, key, default=None):
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT value FROM global_state WHERE key = ?", (key,))
-            result = cursor.fetchone()
-            if result:
-                try:
-                    return json.loads(result[0])
-                except json.JSONDecodeError:
-                    return result[0]
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT value FROM global_state WHERE key = ?", (key,))
+                result = cursor.fetchone()
+                if result:
+                    try:
+                        return json.loads(result[0])
+                    except json.JSONDecodeError:
+                        return result[0]
+                return default
+        except sqlite3.OperationalError as e:
+            logger.warning(f"Could not read state for {key}. Yielding default. Error: {e}")
             return default
 
     def log_event(self, message, level="INFO"):
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
+                conn.commit()
+        except sqlite3.OperationalError:
+            pass # Silent fail to prevent log cascades from crashing the main system
 
     def get_all_users(self):
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
-            return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
+                return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
+        except sqlite3.OperationalError as e:
+            logger.warning(f"Could not retrieve users. Error: {e}")
+            return []
 
     def update_user_role(self, user_id, has_role):
-        with sqlite3.connect(self.db_path, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=25.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning(f"Could not update user role. Error: {e}")

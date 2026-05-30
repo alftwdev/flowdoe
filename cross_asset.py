@@ -5,7 +5,6 @@ import logging
 import requests
 import pandas as pd
 import numpy as np
-import bt  # Exploiting the backtesting algorithmic module
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 from essentials_tools import send_essentials_embed
@@ -13,11 +12,18 @@ from essentials_tools import send_essentials_embed
 logger = logging.getLogger("Cross_Asset_Expansion")
 logging.basicConfig(level=logging.INFO)
 
+# UPGRADE: Failsafe import to prevent task crashing if module is missing
+try:
+    import bt 
+    HAS_BT = True
+except ImportError:
+    HAS_BT = False
+    logger.error("CRITICAL: 'bt' module missing. Run 'pip3.10 install bt --user' in console.")
+
 load_dotenv()
 db = EcosystemDatabase()
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
-# Distinct Webhook Destinations
 WEBHOOKS = {
     "futures": os.getenv("WEBHOOK_FUTURES_TRADING"),
     "options": os.getenv("WEBHOOK_OPTIONS_SIGNALS"),
@@ -38,7 +44,6 @@ def fetch_twelve_data_close(symbol, interval="1day", outputsize=10):
     return None, None
 
 def broadcast_futures_snapshot():
-    """Tracks pre-market gaps and volume configurations for alpha index contracts."""
     assets = {"/ES": "E-mini S&P 500", "/NQ": "E-mini Nasdaq 100", "/CL": "Crude Oil"}
     payload_lines = ["### 📊 Pre-Market Futures Flow Matrix"]
     
@@ -53,7 +58,6 @@ def broadcast_futures_snapshot():
         db.update_state("last_ping_macro", time.time())
 
 def broadcast_options_signals():
-    """Extracts raw mathematical variance from edge engine allocations for premium harvest notifications."""
     spy_vrp = db.get_state("SPY_vrp_latest", 0.0)
     spy_rv = db.get_state("SPY_rv_latest", 0.15)
     
@@ -72,8 +76,10 @@ def broadcast_options_signals():
         db.update_state("last_ping_options", time.time())
 
 def broadcast_tsp_allocation():
-    """Leverages the mathematical asset tracking mechanics of the bt package to run momentum switches."""
-    # Mapping Thrift Savings Plan components to highly liquid cross-asset proxy funds
+    if not HAS_BT:
+        logger.warning("Skipping TSP Allocation Matrix: 'bt' backtesting module is not installed.")
+        return
+
     proxies = {"SPY": "C Fund", "VXF": "S Fund", "EFA": "I Fund", "AGG": "F Fund"}
     data_dict = {}
     
@@ -89,35 +95,35 @@ def broadcast_tsp_allocation():
 
     price_data = pd.DataFrame(data_dict).dropna()
     
-    # Instantiating the Algorithmic Tree Structures outlined in Source 16
-    strategy = bt.Strategy('tsp_momentum', [
-        bt.algos.RunMonthly(),
-        bt.algos.SelectAll(),
-        bt.algos.SelectMomentum(n=1), # Isolate top performing systematic asset pocket
-        bt.algos.WeighEqually(),
-        bt.algos.Rebalance()
-    ])
-    
-    backtest = bt.Backtest(strategy, price_data)
-    res = bt.run(backtest)
-    
-    # Isolate current mathematical weight distribution allocations
-    weights = res.get_security_weights().iloc[-1]
-    active_allocation = weights[weights > 0].index.tolist()
-    recommended = proxies.get(active_allocation[0], "G Fund (Cash Preservation)") if active_allocation else "G Fund"
-    
-    payload = (
-        f"### 🏛️ Systematic TSP Allocation Directive\n"
-        f"┣ **Top Momentum Cross-Asset Target:** `{recommended}`\n"
-        f"┗ **Algorithmic Model Composition:** Trailing Return Window Optimizer\n\n"
-        f"*Execution Guideline: Reallocate capital blocks strictly inside official portals once per cycle.*"
-    )
-    if WEBHOOKS["tsp"]:
-        send_essentials_embed(WEBHOOKS["tsp"], "Thrift Savings Plan Quantitative Strategy", payload, 0x9b59b6)
-        db.update_state("last_ping_tsp", time.time())
+    try:
+        strategy = bt.Strategy('tsp_momentum', [
+            bt.algos.RunMonthly(),
+            bt.algos.SelectAll(),
+            bt.algos.SelectMomentum(n=1), 
+            bt.algos.WeighEqually(),
+            bt.algos.Rebalance()
+        ])
+        
+        backtest = bt.Backtest(strategy, price_data)
+        res = bt.run(backtest)
+        
+        weights = res.get_security_weights().iloc[-1]
+        active_allocation = weights[weights > 0].index.tolist()
+        recommended = proxies.get(active_allocation[0], "G Fund (Cash Preservation)") if active_allocation else "G Fund"
+        
+        payload = (
+            f"### 🏛️ Systematic TSP Allocation Directive\n"
+            f"┣ **Top Momentum Cross-Asset Target:** `{recommended}`\n"
+            f"┗ **Algorithmic Model Composition:** Trailing Return Window Optimizer\n\n"
+            f"*Execution Guideline: Reallocate capital blocks strictly inside official portals once per cycle.*"
+        )
+        if WEBHOOKS["tsp"]:
+            send_essentials_embed(WEBHOOKS["tsp"], "Thrift Savings Plan Quantitative Strategy", payload, 0x9b59b6)
+            db.update_state("last_ping_tsp", time.time())
+    except Exception as e:
+        logger.error(f"TSP Algorithmic computation failed: {e}")
 
 def broadcast_forex_macro():
-    """Tracks global macro structural health against the Federal Reserve system baseline liquidity."""
     net_liq = db.get_state("net_liquidity", 0.0)
     dxy_price, _ = fetch_twelve_data_close("DXY")
     eur_usd, _ = fetch_twelve_data_close("EUR/USD")
