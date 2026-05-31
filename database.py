@@ -3,6 +3,7 @@ import threading
 import json
 import os
 import logging
+from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger("Database_Engine")
@@ -20,12 +21,9 @@ class EcosystemDatabase:
             return cls._instance
 
     def __init__(self, db_path='rockefeller_state.db'):
-        # CRITICAL UPGRADE: We strictly FORBID persistent connections (self.conn) here.
-        # Every method opens and cleanly closes its own connection to prevent NFS file locking.
         pass
 
     def _get_connection(self):
-        """Helper to safely open an ephemeral connection with the right pragmas."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.execute('PRAGMA journal_mode=DELETE;')
         conn.execute('PRAGMA synchronous=NORMAL;')
@@ -57,7 +55,6 @@ class EcosystemDatabase:
                         has_insider_role BOOLEAN DEFAULT 0
                     )
                 """)
-                # Standardized trade context table added by metrics.py
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS trade_context_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,9 +64,67 @@ class EcosystemDatabase:
                         vrp_reading REAL
                     )
                 """)
+                # The Universal Spam-Gatekeeper Table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS alert_state_manager (
+                        alert_id TEXT PRIMARY KEY,
+                        last_state TEXT,
+                        last_trigger REAL,
+                        broadcast_count INTEGER DEFAULT 0,
+                        last_alert_time TIMESTAMP
+                    )
+                """)
                 conn.commit()
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to initialize tables. Lock detected: {e}")
+
+    def track_and_limit_alerts(self, alert_id, current_state, current_trigger, max_broadcasts=3, threshold_pct=0.001):
+        """
+        Universal Gatekeeper: Allows 3 broadcasts max for the same signal.
+        Resets and broadcasts immediately if the structural state or trigger shifts.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT last_state, last_trigger, broadcast_count FROM alert_state_manager WHERE alert_id = ?", (alert_id,))
+                row = cursor.fetchone()
+
+                now_str = datetime.now().isoformat()
+
+                if row is None:
+                    # New signal entirely
+                    cursor.execute("INSERT INTO alert_state_manager VALUES (?, ?, ?, ?, ?)",
+                                   (alert_id, current_state, current_trigger, 1, now_str))
+                    conn.commit()
+                    return True
+
+                last_state, last_trigger, broadcast_count = row
+
+                # Check if state changed OR price shifted beyond threshold
+                if current_state != last_state or abs(current_trigger - last_trigger) > (last_trigger * threshold_pct):
+                    cursor.execute("""
+                        UPDATE alert_state_manager 
+                        SET last_state = ?, last_trigger = ?, broadcast_count = 1, last_alert_time = ? 
+                        WHERE alert_id = ?
+                    """, (current_state, current_trigger, now_str, alert_id))
+                    conn.commit()
+                    return True
+
+                # Exact same signal parameters
+                if broadcast_count < max_broadcasts:
+                    cursor.execute("""
+                        UPDATE alert_state_manager 
+                        SET broadcast_count = broadcast_count + 1, last_alert_time = ? 
+                        WHERE alert_id = ?
+                    """, (now_str, alert_id))
+                    conn.commit()
+                    return True
+
+                # Threshold met. Silence the engine.
+                return False
+        except sqlite3.OperationalError as e:
+            logger.warning(f"Database lock in alert manager: {e}")
+            return False # Fail silent to prevent accidental spam
 
     def update_state(self, key, value):
         val_str = json.dumps(value)
@@ -81,8 +136,8 @@ class EcosystemDatabase:
                     ON CONFLICT(key) DO UPDATE SET value=excluded.value, last_updated=CURRENT_TIMESTAMP
                 """, (key, val_str))
                 conn.commit()
-        except sqlite3.OperationalError as e:
-            logger.warning(f"Could not update state for {key}. DB Locked: {e}")
+        except sqlite3.OperationalError:
+            pass
 
     def get_state(self, key, default=None):
         try:
@@ -96,34 +151,5 @@ class EcosystemDatabase:
                     except json.JSONDecodeError:
                         return result[0]
                 return default
-        except sqlite3.OperationalError as e:
-            logger.warning(f"Could not read state for {key}. DB Locked: {e}")
-            return default
-
-    def log_event(self, message, level="INFO"):
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO audit_logs (level, message) VALUES (?, ?)", (level, message))
-                conn.commit()
         except sqlite3.OperationalError:
-            pass # Silent fail to prevent log cascades from crashing the main system
-
-    def get_all_users(self):
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_id, months_active, has_insider_role FROM users")
-                return [{"user_id": r[0], "months_active": r[1], "has_insider_role": bool(r[2])} for r in cursor.fetchall()]
-        except sqlite3.OperationalError as e:
-            logger.warning(f"Could not retrieve users. Error: {e}")
-            return []
-
-    def update_user_role(self, user_id, has_role):
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("UPDATE users SET has_insider_role = ? WHERE user_id = ?", (int(has_role), user_id))
-                conn.commit()
-        except sqlite3.OperationalError as e:
-            logger.warning(f"Could not update user role. Error: {e}")
+            return default

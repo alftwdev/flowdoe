@@ -1,162 +1,177 @@
 import os
-import sys
-import json
 import sqlite3
-import logging
-import requests
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
-import pytz
-from dotenv import load_dotenv
-from database import EcosystemDatabase
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-logger = logging.getLogger("Metrics_Gamification")
-if not logger.handlers:
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(ch)
-logger.setLevel(logging.INFO)
-
-db = EcosystemDatabase()
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULTS_FILE = os.path.join(BASE_DIR, "signal_results.json")
-
-load_dotenv()
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-GUILD_ID = os.getenv("DISCORD_GUILD_ID")
-INSIDER_ROLE_ID = os.getenv("ROLE_ID_INSTITUTIONAL_INSIDER")
-WEBHOOK_PERFORMANCE = os.getenv("WEBHOOK_MARKET_ANALYSIS")
-
+# Ensure VADER lexicon is available locally
 try:
-    from essentials_tools import send_essentials_embed
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
+    nltk.data.find('sentiment/vader_lexicon.zip')
+except LookupError:
+    nltk.download('vader_lexicon', quiet=True)
 
-def load_json(filepath):
-    if not os.path.exists(filepath): return []
-    with open(filepath, "r") as f: 
-        try: return json.load(f)
-        except: return []
 
-def log_trade_context(symbol, side, vrp_reading):
-    timestamp = datetime.now(pytz.UTC).isoformat()
-    try:
-        with sqlite3.connect(db.db_path, check_same_thread=False, timeout=15.0) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trade_context_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP,
-                    symbol TEXT,
-                    side TEXT,
-                    vrp_reading REAL
-                )
-            """)
-            cursor.execute(
-                "INSERT INTO trade_context_logs (timestamp, symbol, side, vrp_reading) VALUES (?, ?, ?, ?)",
-                (timestamp, symbol, side, vrp_reading)
+class SystemicSentimentEngine:
+    def __init__(self, db_path="ecosystem.db"):
+        self.db_path = db_path
+        self.sia = SentimentIntensityAnalyzer()
+        # Institutional macro query targeting structural economic risk and policy
+        self.rss_url = "https://news.google.com/rss/search?q=macroeconomics+OR+federal+reserve+OR+liquidity+OR+inflation&hl=en-US&gl=US&ceid=US:en"
+
+    def fetch_rss_headlines(self, limit=20):
+        """
+        Fetches the top institutional macro headlines via Google News RSS 
+        without reliance on heavy external scraping frameworks.
+        """
+        headlines = []
+        try:
+            req = urllib.request.Request(
+                self.rss_url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             )
-            conn.commit()
-        logger.info(f"Logged Trade Context to DB: {symbol} [{side}] | VRP: {vrp_reading:.3f}")
-    except Exception as e:
-        logger.error(f"Failed to log trade context for {symbol}: {e}")
+            with urllib.request.urlopen(req, timeout=10) as response:
+                xml_data = response.read()
+                
+            root = ET.fromstring(xml_data)
+            for item in root.findall('.//item')[:limit]:
+                title = item.find('title')
+                if title is not None:
+                    # Strip source publication tail from title (e.g., " - Bloomberg")
+                    clean_title = title.text.split(' - ')[0].strip()
+                    headlines.append(clean_title)
+        except Exception as e:
+            print(f"[ERROR] RSS Sentiment Fetch Failed: {str(e)}")
+        return headlines
 
-def grant_discord_role(user_id, role_id):
-    if not all([DISCORD_BOT_TOKEN, GUILD_ID, role_id]): return False
-    url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{role_id}"
-    headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-    try:
-        res = requests.put(url, headers=headers, timeout=10)
-        return res.status_code == 204
-    except Exception: return False
+    def analyze_polarity(self):
+        """
+        Processes aggregated headlines through VADER to extract structural 
+        polarity dynamics.
+        """
+        headlines = self.fetch_rss_headlines(limit=20)
+        if not headlines:
+            return {"compound": 0.0, "pos": 0.0, "neg": 0.0, "neu": 1.0, "sample_size": 0}
 
-def audit_loyalty_ledger(is_test=False):
-    logger.info("Executing Quantitative Loyalty Ledger Audit...")
-    try:
-        users = db.get_all_users()
-    except Exception as e:
-        logger.warning(f"Database access fault during ledger audit: {e}")
-        return
+        total_scores = {"compound": 0.0, "pos": 0.0, "neg": 0.0, "neu": 0.0}
         
-    upgraded_count = 0
-    for user in users:
-        user_id, months_active, has_insider = user.get("user_id"), user.get("months_active"), user.get("has_insider_role")
-        if months_active >= 3 and not has_insider:
-            if not is_test and grant_discord_role(user_id, INSIDER_ROLE_ID):
-                db.update_user_role(user_id, True)
-                db.log_event(f"Ledger Audit: Elevated user {user_id} to Insider status.")
-                upgraded_count += 1
-    logger.info(f"Ledger Audit Complete. {upgraded_count} members elevated.")
+        for headline in headlines:
+            scores = self.sia.polarity_scores(headline)
+            for key in total_scores:
+                total_scores[key] += scores[key]
 
-def generate_weekly_digest(is_test=False):
-    logger.info("Compiling Weekly Architecture Performance Digest...")
-    results = load_json(RESULTS_FILE)
-    
-    # UPGRADE: Formatting standardized to prevent IndentationErrors
-    winners = 0
-    total_trades = 0
-    
-    if isinstance(results, dict):
-        for v in results.values():
-            if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN":
-                winners += 1
-        total_trades = len(results.keys())
-    elif isinstance(results, list):
-        for v in results:
-            if isinstance(v, dict) and str(v.get("status", "")).upper() == "WIN":
-                winners += 1
-        total_trades = len(results)
+        count = len(headlines)
+        avg_scores = {key: round(total_scores[key] / count, 4) for key in total_scores}
+        avg_scores["sample_size"] = count
+        return avg_scores
+
+    def compute_macro_calm_gauge(self, polarity_metrics):
+        """
+        Adapts the Bollen Paper 'Calm' metric into an actionable Macro Fear & Greed Index.
+        Maps the compound spectrum (-1.0 to +1.0) into a 0-100 institutional layer.
         
-    losers = total_trades - winners
-    win_rate = (winners / total_trades * 100) if total_trades > 0 else 0.0
-    profit_factor = (winners / losers) if losers > 0 else (winners if winners > 0 else 0.0)
-
-    try:
-        regime_data = db.get_state("market_regime", {"vix_status": "STABLE", "regime": "BULLISH"})
-    except Exception:
-        regime_data = {"vix_status": "STABLE", "regime": "BULLISH"}
+        Formula: Index = (Compound Polarity + 1) * 50
+        """
+        compound = polarity_metrics["compound"]
         
-    vix_status = regime_data.get("vix_status", "STABLE")
-    
-    if vix_status in ["HIGH_VOLATILITY", "STORM"]:
-        narrative = "Despite extreme volatility breaching our VIX thresholds, our Capital Shield logic rotated into credit spreads, locking in structural alpha while avoiding long-delta chop."
-    elif vix_status == "COMPRESSED":
-        narrative = "Volatility remained heavily compressed this week. The system optimized for directional debit matrices, harvesting premium efficiently in a slow-grind environment."
-    else:
-        narrative = "Standard flow operations dominated the week. The architecture identified high-conviction order imbalances and executed in alignment with broader macro liquidity trends."
-
-    payload = (
-        f"**Rockefeller Architecture: Weekly Quant Recap**\n*{narrative}*\n\n"
-        f"📊 **System Metrics**\n"
-        f"┣ **Total Signals Deployed**: `{total_trades}`\n"
-        f"┣ **System Win Rate**: `{win_rate:.1f}%`\n"
-        f"┗ **Calculated Profit Factor**: `{profit_factor:.2f}x` (Gross Wins/Losses)\n\n"
-        f"🔒 *Access the live dashboard to view real-time engine states.*"
-    )
-
-    if HAS_ESSENTIALS and WEBHOOK_PERFORMANCE:
-        title = "📈 Weekly Ecosystem Performance Digest" + (" [TEST]" if is_test else "")
-        send_essentials_embed(WEBHOOK_PERFORMANCE, title, payload, 0x2ecc71)
+        # Calculate base index line
+        fear_greed_index = round((compound + 1) * 50, 1)
         
-    try:
-        db.log_event(f"Weekly Digest dispatched. WR: {win_rate:.1f}%, PF: {profit_factor:.2f}")
-    except Exception:
-        pass
+        # Map to specific multi-dimensional mood states (Calm vs. Anxiety)
+        if fear_greed_index >= 75:
+            state = "EXCESSIVE GREED / COMPLACENT"
+            calm_gauge = "HIGH COMPLACENCY (Anxiety Risk)"
+        elif fear_greed_index >= 55:
+            state = "GREED / EXPANSIVE"
+            calm_gauge = "STABLE / CALM"
+        elif fear_greed_index >= 45:
+            state = "NEUTRAL / BALANCED"
+            calm_gauge = "EQUILIBRIUM"
+        elif fear_greed_index >= 25:
+            state = "FEAR / PROTECTIVE"
+            calm_gauge = "ELEVATED ANXIETY"
+        else:
+            state = "EXTREME FEAR / LIQUIDATION"
+            calm_gauge = "MACRO PANIC (High Distribution Risk)"
+
+        return {
+            "index_value": fear_greed_index,
+            "regime_state": state,
+            "calmness_state": calm_gauge
+        }
+
+    def _get_database_fallbacks(self):
+        """
+        Queries the centralized database to pull calculated states from 
+        the daily tracking engines. Fallbacks map safely if records are empty.
+        """
+        data = {
+            "regime": "N/A", "vrp": "N/A", "vix": "N/A",
+            "net_liq": "N/A", "liq_delta": "N/A", "yield_spread": "N/A"
+        }
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Extract most recent regime data
+                cursor.execute("SELECT regime, vrp, vix FROM market_regimes ORDER BY timestamp DESC LIMIT 1")
+                regime_row = cursor.fetchone()
+                if regime_row:
+                    data["regime"] = regime_row[0]
+                    data["vrp"] = regime_row[1]
+                    data["vix"] = f"{regime_row[2]:.2f}" if isinstance(regime_row[2], (int, float)) else regime_row[2]
+
+                # Extract most recent macro liquidity cluster
+                cursor.execute("SELECT net_liquidity, liquidity_delta, yield_spread FROM macro_liquidity ORDER BY timestamp DESC LIMIT 1")
+                liq_row = cursor.fetchone()
+                if liq_row:
+                    data["net_liq"] = f"${liq_row[0]:,.2f}B" if isinstance(liq_row[0], (int, float)) else liq_row[0]
+                    data["liq_delta"] = f"${liq_row[1]:+,.2f}B" if isinstance(liq_row[1], (int, float)) else liq_row[1]
+                    data["yield_spread"] = f"{liq_row[2]:.2f}%" if isinstance(liq_row[2], (int, float)) else liq_row[2]
+        except Exception as e:
+            print(f"[WARNING] Database context query bypassed: {str(e)}")
+        return data
+
+    def generate_weekend_embed_payload(self):
+        """
+        Compiles structural calculations and external telemetry into the 
+        exact tree-leg formatted Discord payload architecture.
+        """
+        # Compute fresh text-based sentiment models
+        polarity = self.analyze_polarity()
+        gauge = self.compute_macro_calm_gauge(polarity)
+        
+        # Gather trailing metrics from current state storage
+        db_metrics = self._get_database_fallbacks()
+
+        # Build structural tree layout
+        payload = (
+            "====================================================================\n"
+            "Title: ROCKEFELLER STRATEGIC INTELLIGENCE | WEEKEND PREP SUMMARY\n"
+            f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M')} EST\n"
+            "====================================================================\n\n"
+            "## 📊 MARKET REGIME & VOLATILITY LAYERS\n"
+            f"┣ Regime Mode: {db_metrics['regime']}\n"
+            f"┣ Volatility Risk Premium (VRP): {db_metrics['vrp']}\n"
+            f"┗ Trailing Average VIX: {db_metrics['vix']}\n\n"
+            "## 🏦 SYSTEMIC LIQUIDITY MATRIX\n"
+            f"┣ Central Net Liquidity: {db_metrics['net_liq']}\n"
+            f"┣ Weekly Liquidity Delta: {db_metrics['liq_delta']}\n"
+            f"┗ Institutional Yield Spread: {db_metrics['yield_spread']}\n\n"
+            "## 🧠 SYSTEMIC SENTIMENT & CALM GAUGE\n"
+            f"┣ Macro RSS Polarity Score: {polarity['compound']:+.4f} (Sample: {polarity['sample_size']} Headlines)\n"
+            f"┣ Behavioral Calmness Layer: {gauge['calmness_state']}\n"
+            f"┗ Derived Fear & Greed Index: {gauge['index_value']} | {gauge['regime_state']}\n\n"
+            "--------------------------------------------------------------------\n"
+            "🔒 Operational Outlook: Automated quantitative snapshot of backend telemetry. "
+            "Isolate the signals from trading noise before weekly market open.\n"
+            "===================================================================="
+        )
+        return payload
+
 
 if __name__ == "__main__":
-    is_test = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
-    try: 
-        audit_loyalty_ledger(is_test=is_test)
-    except Exception as e: 
-        logger.error(f"Ledger audit crash: {e}")
-
-    tz_h = pytz.timezone('US/Hawaii')
-    current_time_hst = datetime.now(tz_h)
-    
-    if is_test or current_time_hst.weekday() == 4:
-        try: 
-            generate_weekly_digest(is_test=is_test)
-        except Exception as e: 
-            logger.error(f"Weekly digest crash: {e}")
-    else:
-        logger.info(f"Skipping Weekly Digest. Current day is {current_time_hst.strftime('%A')}.")
+    # Local execution test
+    engine = SystemicSentimentEngine()
+    print(engine.generate_weekend_embed_payload())
