@@ -6,7 +6,7 @@ import pytz
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 from essentials_tools import send_essentials_embed
-from ai import generate_ai_macro_brief
+from ai import generate_retail_translation
 
 logger = logging.getLogger("Pulse_Engine")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,37 +45,49 @@ def check_and_dispatch_pulse():
 
     net_liq = float(db.get_state("net_liquidity", 7000.0))
     cred_spread = float(db.get_state("credit_spread", 3.5))
+    vix_iv = float(db.get_state("vix_iv_index", 20.0))
+    vrp = float(db.get_state("SPY_vrp_latest", 0.0))
+    
+    # Mathematical State Hash for the Gatekeeper Shift Detection
+    vix_regime = "HIGH" if vix_iv > 24 else "MED" if vix_iv > 19 else "LOW"
+    vrp_regime = "POS" if vrp > 0 else "NEG"
+    cred_regime = "STRESS" if cred_spread > 4.5 else "STABLE"
+    macro_state_hash = f"{vix_regime}_{vrp_regime}_{cred_regime}"
     
     for sector, webhook in WEBHOOKS.items():
         if not webhook: continue
         
+        # --- 3-Strike Dynamic Gatekeeper Logic ---
+        last_state = db.get_state(f"gatekeeper_state_{sector}", "")
+        strikes = int(db.get_state(f"gatekeeper_strikes_{sector}", 0))
+        
+        if macro_state_hash != last_state:
+            logger.info(f"[{sector.upper()}] Math shifted ({last_state} -> {macro_state_hash}). Resetting Gatekeeper.")
+            strikes = 0
+            db.update_state(f"gatekeeper_state_{sector}", macro_state_hash)
+        
+        if strikes >= 3:
+            continue # Prop-firm silence active
+            
         last_ping = float(db.get_state(f"last_ping_{sector}", 0.0))
         if (current_time - last_ping) > SILENCE_THRESHOLDS[sector]:
-            logger.info(f"Silence threshold breached for {sector}. Generating Quantitative Pulse...")
+            logger.info(f"Dispatching translation pulse for {sector} (Strike {strikes + 1}/3)...")
             
-            ai_intel = generate_ai_macro_brief(fred_liquidity=net_liq, credit_spread=cred_spread)
+            intel = generate_retail_translation(sector, net_liq, cred_spread, vix_iv, vrp)
             
-            supplemental_text = ""
             if sector == "crypto":
                 z_score, z_status = get_crypto_supplements()
-                supplemental_text = f"⚡ **BTC Volatility Z-Score**: `{z_score:.2f}` ({z_status})\n\n"
-            
-            payload = (
-                f"### 📡 Sector Update: {sector.upper()} Matrix\n"
-                f"{ai_intel.get('discord_embed_brief')}\n\n"
-                f"{supplemental_text}"
-                f"**System Status**: `NO ACTIONABLE SETUPS`\n"
-                f"*The quantitative engine is suppressing signals to protect capital during sub-optimal conditions.*"
-            )
+                intel['payload'] += f"\n\n⚡ **BTC Volatility Z-Score**: `{z_score:.2f}` ({z_status})"
             
             try:
-                send_essentials_embed(webhook, f"Sector Pulse & Analysis", payload, 0x34495e)
+                send_essentials_embed(webhook, intel['title'], intel['payload'], intel['color'])
                 db.update_state(f"last_ping_{sector}", current_time)
+                db.update_state(f"gatekeeper_strikes_{sector}", strikes + 1)
             except Exception as e:
                 logger.error(f"Failed to dispatch pulse to {sector}: {e}")
 
 if __name__ == "__main__":
-    logger.info("Quantitative Pulse Engine initialized. Bypassing LLM.")
+    logger.info("Quantitative Pulse Engine initialized. Gatekeeper & Translation Layer Active.")
     while True:
         try:
             check_and_dispatch_pulse()
