@@ -1,5 +1,5 @@
 import os
-import time
+import sys
 import logging
 import requests
 import pandas as pd
@@ -33,20 +33,15 @@ def fetch_price(symbol):
     except: return 0.0
 
 def calculate_point_of_control(symbol):
-    """
-    Synthesizes Market Profile by grouping intraday volume by price to find 
-    the Point of Control (POC) - the highest liquidity node.
-    """
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=78&apikey={TD_API_KEY}"
     try:
         res = requests.get(url, timeout=10).json()
         if "values" not in res: return 0.0
         
         df = pd.DataFrame(res["values"])
-        df['close'] = df['close'].astype(float).round(1) # Round to nearest 10 cents for clustering
+        df['close'] = df['close'].astype(float).round(1) 
         df['volume'] = df['volume'].astype(int)
         
-        # Group volume by price level
         volume_profile = df.groupby('close')['volume'].sum()
         poc_price = volume_profile.idxmax()
         return float(poc_price)
@@ -62,13 +57,8 @@ def broadcast_futures_snapshot(is_test=False):
         "QQQ": {"name": "/NQ (E-mini Nasdaq 100)", "multiplier": 40}
     }
     
-    payload_lines = [
-        "====================================================================",
-        "Title: INSTITUTIONAL INTRADAY FUTURES | MARKET PROFILE MATRIX",
-        "====================================================================\n"
-    ]
-    
     state_hash = "" 
+    payload_lines = []
     
     for sym, config in assets.items():
         price = fetch_price(sym)
@@ -79,44 +69,46 @@ def broadcast_futures_snapshot(is_test=False):
         
         if not price or not vwap: continue
             
-        trend = "🟢 BULLISH REGIME" if price > ema_20 else "🔴 BEARISH REGIME"
-        bias = "Long-Bias Only. Short scalps highly dangerous." if price > ema_20 else "Short-Bias Only. Long scalps disabled."
-        
-        vwap_status = f"Price is ${abs(price-vwap):.2f} ABOVE VWAP." if price > vwap else f"Price is ${abs(price-vwap):.2f} BELOW VWAP."
+        trend = "🟢 BULLISH" if price > ema_20 else "🔴 BEARISH"
+        bias = "Long-Bias Only. Short execution disabled." if price > ema_20 else "Short-Bias Only. Long execution disabled."
+        vwap_status = f"${abs(price-vwap):.2f} ABOVE VWAP" if price > vwap else f"${abs(price-vwap):.2f} BELOW VWAP"
         
         volatility_floor = price - (atr * 0.5)
         gamma_ceiling = price + (atr * 0.5)
 
         payload_lines.extend([
-            f"## 📊 {config['name']}",
-            f"┣ Macro Regime: {trend} ({bias})",
-            f"┣ Institutional VWAP (5m): ${vwap:,.2f} | {vwap_status}",
-            f"┣ 🎯 Point of Control (POC): ${poc:,.2f} (Highest Volume Node)",
-            f"┣ Intraday Volatility Floor: ${volatility_floor:,.2f} (Support Band)",
-            f"┗ Institutional Gamma Ceiling: ${gamma_ceiling:,.2f} (Take-Profit Band)\n"
+            f"### 📊 {config['name']}",
+            f"┣ **Macro Order Flow**: `{trend}` | *{bias}*",
+            f"┣ **Institutional VWAP (5m)**: `${vwap:,.2f}` ({vwap_status})",
+            f"┣ 🎯 **Point of Control (POC)**: `${poc:,.2f}` *(High Volume Node)*",
+            f"┣ **Intraday Liquidity Floor**: `${volatility_floor:,.2f}`",
+            f"┗ **Gamma Resistance Ceiling**: `${gamma_ceiling:,.2f}`\n"
         ])
         
-        state_hash += trend
+        state_hash += f"{sym}_{trend}_{'UP' if price > vwap else 'DN'}"
 
-    payload_lines.append("--------------------------------------------------------------------")
-    payload_lines.append("🧠 Trading Intelligence: Execute entries strictly near VWAP, POC, or Volatility Floors. Do not chase momentum into Gamma Ceilings.")
-    payload_lines.append("====================================================================")
+    full_payload = (
+        f"[EXECUTION POSTURE: INTRADAY MARKET PROFILE MATRIX]\n\n" + 
+        "\n".join(payload_lines) +
+        f"--------------------------------------------------------------------\n"
+        f"🧠 **Tactical Directive**: Execute entries strictly adjacent to VWAP, POC, or Liquidity Floors. Do not chase breakout momentum into Gamma Ceilings."
+    )
     
-    full_payload = "\n".join(payload_lines)
-    
+    # WIDENED: Now requires a 0.7% move in the broad market to reset the gatekeeper
     should_broadcast = db.track_and_limit_alerts(
         alert_id="FUTURES_MARKET_PROFILE_MATRIX",
         current_state=state_hash,
         current_trigger=fetch_price("SPY"), 
         max_broadcasts=3,
-        threshold_pct=0.002 
+        threshold_pct=0.007 
     )
 
     if should_broadcast or is_test:
         if WEBHOOK_FUTURES:
-            send_essentials_embed(WEBHOOK_FUTURES, "Algorithmic Market Profile", full_payload, 0xf39c12)
+            send_essentials_embed(WEBHOOK_FUTURES, "⚡ Algorithmic Market Profile Terminal", full_payload, 0xf39c12)
+            logger.info("Futures Matrix alert successfully pushed down the pipeline.")
     else:
-        logger.info("Futures Matrix silenced by Gatekeeper (Threshold not met).")
+        logger.info("Futures matrix silenced by Gatekeeper (Threshold limit active).")
 
 if __name__ == "__main__":
     is_test_mode = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]

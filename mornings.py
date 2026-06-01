@@ -1,107 +1,99 @@
 import os
-import sys
-import pytz
-import logging
-import datetime
 import requests
+import logging
+from datetime import datetime
+import pytz
 from dotenv import load_dotenv
 from database import EcosystemDatabase
+from visuals import generate_institutional_chart
 
-logger = logging.getLogger("Morning_Brief")
-if not logger.handlers:
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(ch)
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("Morning_Digest")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+WEBHOOK_URL = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 db = EcosystemDatabase()
 
-WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
-
-try:
-    from essentials_tools import send_essentials_embed
-    HAS_ESSENTIALS = True
-except ImportError:
-    HAS_ESSENTIALS = False
-
-def check_market_status(td_key):
-    try:
-        res = requests.get(f"https://api.twelvedata.com/market_state?apikey={td_key}", timeout=5).json()
-        for market in res:
-            if market.get("country") == "United States" and market.get("code") == "NYSE":
-                return market.get("is_market_open", True)
-    except Exception as e:
-        logger.error(f"Market state fetch failed: {e}")
-    return True
-
-def get_fear_and_greed():
-    try:
-        url = "https://api.alternative.me/fng/?limit=1"
-        response = requests.get(url, timeout=5).json()
-        data = response['data'][0]
-        return f"{data['value']} ({data['value_classification']})"
-    except Exception:
-        return "N/A"
-
-def generate_morning_brief(is_test=False):
-    td_key = os.getenv("TWELVE_DATA_API_KEY")
+def send_digest_with_visual(webhook_url, title, payload, color, image_path=None):
+    """Natively handles multipart/form-data to upload the visuals.py chart to Discord."""
+    embed = {
+        "title": title,
+        "description": payload,
+        "color": color,
+        "timestamp": datetime.utcnow().isoformat()
+    }
     
-    if not is_test:
-        is_open = check_market_status(td_key)
-        if not is_open:
-            logger.info("Market Holiday Detected. Issuing standby notice.")
-            title = "🌅 Rockefeller Morning Intelligence Briefing [MARKET CLOSED]"
-            description = "### **System Standby: Market Holiday**\nCurrently, markets are closed. Normal operations will resume at the next active trading bell."
-            if HAS_ESSENTIALS and WEBHOOK_MARKET:
-                send_essentials_embed(WEBHOOK_MARKET, title, description, 0x95a5a6)
-            return
-
-    tz_h = pytz.timezone('US/Hawaii')
-    now = datetime.datetime.now(tz_h)
-    
-    regime_data = db.get_state("market_regime", {"regime": "NEUTRAL", "vix_status": "STABLE", "rsi_shield_limit": 66})
-    regime = regime_data.get("regime", "NEUTRAL")
-    vix_status = regime_data.get("vix_status", "STABLE")
-    rsi_limit = regime_data.get("rsi_shield_limit", 66)
-
-    if vix_status == "STORM":
-        color = 0xe74c3c 
-        posture = "🛡️ DEFENSIVE: Shield is ACTIVE. Capital preservation priority."
-        objectives = ["1. NO NEW ENTRIES: Volatility exceeds safety thresholds.", "2. CASH IS A POSITION: Wait for VIX to mean-revert."]
-    elif vix_status == "ELEVATED":
-        color = 0xf1c40f 
-        posture = "⚖️ MEASURED: Volatility is rising. Size positions at 50%."
-        objectives = ["1. TIGHT SHIELD: Only entries with RSI < 55.", "2. MONITOR VIX: Any spike above 22 triggers lockdown."]
+    if image_path and os.path.exists(image_path):
+        embed["image"] = {"url": f"attachment://{os.path.basename(image_path)}"}
+        
+        with open(image_path, "rb") as f:
+            files = {
+                "file": (os.path.basename(image_path), f, "image/png")
+            }
+            payload_json = {"embeds": [embed]}
+            response = requests.post(
+                webhook_url, 
+                data={"payload_json": __import__('json').dumps(payload_json)},
+                files=files
+            )
     else:
-        color = 0x2ecc71 
-        posture = "🚀 OFFENSIVE: Conditions are STABLE. Execute at full size."
-        objectives = ["1. ALPHA HUNT: Follow signals for high-conviction entries.", "2. RSI LIMIT: Standard < 66 threshold applies."]
+        response = requests.post(webhook_url, json={"embeds": [embed]})
+        
+    if response.status_code in [200, 204]:
+        logger.info("Morning Digest and Visuals successfully dispatched.")
+    else:
+        logger.error(f"Failed to push digest. Status: {response.status_code}, Response: {response.text}")
 
-    title = "🌅 Rockefeller Morning Intelligence Briefing" + (" [TEST]" if is_test else "")
-    objective_text = "\n".join(objectives)
-    fg_status = get_fear_and_greed()
-
-    desc_lines = [
-        f"### **Daily Battle Plan: {now.strftime('%b %d, %Y')}**",
-        f"**Tactical Posture**: {posture}\n",
-        f"📊 **Core Equity Index Metrics**:",
-        f"┣ **Market Regime**: `{regime}`",
-        f"┣ **Volatility Sentry**: `{vix_status}`",
-        f"┣ **Fear & Greed**: `{fg_status}`",
-        f"┗ **RSI Shield**: `Active < {rsi_limit}`\n",
-        f"🛡️ **Tactical Objectives**:", 
-        f"{objective_text}\n", 
-        f"*Generated by Rockefeller Cross-Asset Architecture.*"
-    ]
+def compile_morning_digest():
+    logger.info("Compiling Unified Morning Digest...")
+    tz_h = pytz.timezone('Pacific/Honolulu')
+    now = datetime.now(tz_h)
     
-    description = "\n".join(desc_lines)
+    # Core Data Retrieval
+    net_liq = float(db.get_state("net_liquidity", 0.0))
+    vix_iv = float(db.get_state("vix_iv_index", 0.0))
+    spy_poc = float(db.get_state("SPY_poc", 0.0))
+    vrp = float(db.get_state("SPY_vrp_latest", 0.0))
+    
+    vrp_status = "🔴 NEGATIVE (Risk Off / Tail Risk Underpriced)" if vrp < 0 else "🟢 POSITIVE (Premium Harvesting Active)"
+    
+    payload_lines = [
+        f"### 🌐 SYSTEMIC TELEMETRY",
+        f"┣ **Federal Net Liquidity**: `${net_liq:,.0f}B`",
+        f"┣ **VIX Implied Volatility**: `{vix_iv}`",
+        f"┣ **Volatility Risk Premium**: {vrp_status}",
+        f"┗ **SPY Point of Control (POC)**: `${spy_poc:,.2f}`\n"
+    ]
 
-    if HAS_ESSENTIALS and WEBHOOK_MARKET:
-        if send_essentials_embed(WEBHOOK_MARKET, title, description, color):
-            logger.info(f"Cross-Asset Morning Intelligence brief dispatched for {vix_status} regime.")
+    # Weekend Integration: Triggered on Fridays (Weekday 4)
+    if now.weekday() == 4:
+        logger.info("Friday detected: Appending Weekend Executive Summary & RSS Polarity Framework.")
+        rss_state = "BEARISH DIVERGENCE" if vrp < 0 and vix_iv > 20 else "BULLISH CONVERGENCE"
+        payload_lines.extend([
+            f"--------------------------------------------------------------------",
+            f"### 📊 WEEKEND EXECUTIVE SUMMARY (RSS Polarity Framework)",
+            f"┣ **Macro Regime**: `{rss_state}`",
+            f"┣ **Capital Allocation Bias**: {'Preservation / Cash Heavy' if vrp < 0 else 'Risk-On Expansion'}",
+            f"┗ **Weekly Liquidity Shift**: Review institutional order flow at major POC nodes before Monday open.\n"
+        ])
+
+    payload_lines.append(f"🧠 *Institutional chart generated via ROCKEFELLER VISUAL ENGINE.*")
+    final_payload = "\n".join(payload_lines)
+    
+    # Trigger visuals.py
+    logger.info("Engaging Visual Engine for SPY Matrix...")
+    chart_path = generate_institutional_chart("SPY")
+    
+    if WEBHOOK_URL:
+        send_digest_with_visual(
+            webhook_url=WEBHOOK_URL,
+            title="🌅 ROCKEFELLER STRATEGIC INTELLIGENCE: Morning Matrix",
+            payload=final_payload,
+            color=0x3498db,
+            image_path=chart_path
+        )
 
 if __name__ == "__main__":
-    is_test_mode = len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]
-    generate_morning_brief(is_test=is_test_mode)
+    compile_morning_digest()

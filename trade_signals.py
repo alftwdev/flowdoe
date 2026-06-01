@@ -25,11 +25,33 @@ except ImportError:
     HAS_ESSENTIALS = False
     def send_essentials_embed(*args, **kwargs): pass
 
-# --- Core Webhook & API Routing ---
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 WEBHOOK_OPTIONS_SIGNALS = os.getenv("WEBHOOK_OPTIONS_SIGNALS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_SIGNALS") or os.getenv("WEBHOOK_FUTURES")
+
+# --- Institutional Forex Guidelines Dictionary ---
+FOREX_TACTICAL_DATA = {
+    "XAU/USD": {
+        "setup": "Asian Session Liquidity Sweep (Turtle Soup) or Supply/Demand w/ Higher Timeframe Confluence.",
+        "orders": "Stop: $3 to $5 | Target: $10 to $15 (1:2 to 1:3 RR).",
+        "early_signal": "9-SMA crosses 20-EMA on 4H + Selling Exhaustion (Positive Delta on Dips). Inverse correlation to DXY."
+    },
+    "EUR/USD": {
+        "setup": "Break & Retest or Value Gaps at Heavy Volume Nodes (London/NY overlap).",
+        "orders": "Stop: 15-25 pips | Target: 40-60 pips targeting next structural liquidity.",
+        "early_signal": "RSI (14) dips to 30-40 holding higher lows. Correlated to DXY weakness."
+    },
+    "GBP/USD": {
+        "setup": "London Session Breakouts or S/R Rejection with 61.8% / 71% Fib levels.",
+        "orders": "Stop: 30-40 pips | Target: 80-120 pips.",
+        "early_signal": "9 EMA crossing above 21 EMA (London Session 04:00-07:00 GMT) with RSI 50-70."
+    },
+    "USD/JPY": {
+        "setup": "Yield-Driven Pullbacks via EMA crossovers (20/50) or Heavy Volume Zone Retests on 30m.",
+        "orders": "Stop: 25-35 pips | Target: 70-120 pips (Trailing for 1:3 RR).",
+        "early_signal": "Reversals off key support lines holding structure. Driven by US/Japan yield curve differentials."
+    }
+}
 
 def fetch_td_indicator(symbol, indicator, interval, **params):
     url = f"https://api.twelvedata.com/{indicator}?symbol={symbol}&interval={interval}&apikey={TD_API_KEY}"
@@ -53,43 +75,52 @@ def execute_options_expected_move(is_test=False):
     spy_price = fetch_price("SPY")
     vix_iv = float(db.get_state("vix_iv_index", 15.0))
     max_pain = db.get_state("spy_highest_oi_strike", "N/A")
+    vrp_value = float(db.get_state("SPY_vrp_latest", 0.0))
     
     if spy_price > 0 and vix_iv > 0:
-        # Simplified BSM theoretical expected move
-        expected_move = spy_price * (vix_iv / 100) * math.sqrt(1/252)
+        expected_move = spy_price * (vix_iv / 100) * math.sqrt(1 / 252)
         upper_bound = spy_price + expected_move
         lower_bound = spy_price - expected_move
         
-        state_hash = f"IV_{int(vix_iv)}_OI_{max_pain}" 
+        if vrp_value < 0:
+            vrp_status = "🔴 NEGATIVE VRP (Underpriced Risk)"
+            directive = "🚨 DRAWDOWN WARNING: Market makers are underpricing tail risk. Do NOT sell unhedged or wide premium inside this zone."
+            color_hex = 0xe74c3c  
+        else:
+            vrp_status = "🟢 POSITIVE VRP (Premium Rich)"
+            directive = "✅ SPREAD ALPHA ACTIVE: Yield harvesting parameters authorized outside of calculated bounds."
+            color_hex = 0x2ecc71  
+
+        state_hash = f"IV_{int(vix_iv)}_VRP_{'NEG' if vrp_value < 0 else 'POS'}_OI_{max_pain}"
         
-        # 3-Strike Dynamic Gatekeeper
         should_broadcast = db.track_and_limit_alerts(
             alert_id="OPTIONS_0DTE_SPY",
             current_state=state_hash,
             current_trigger=spy_price,
             max_broadcasts=3,
-            threshold_pct=0.005 
+            threshold_pct=0.012 
         )
 
         if should_broadcast or is_test:
             payload = (
-                f"### 🎯 SPY 0DTE Volatility & Open Interest Boundary\n"
-                f"Institutional pricing models mandate the following 'No-Fly Zones' based on BSM theoretical pricing and Open Interest flows:\n\n"
-                f"┣ **SPY Spot Price:** `${spy_price:,.2f}`\n"
-                f"┣ **Implied Daily Move (BSM Model):** `+/- ${expected_move:.2f}`\n"
-                f"┣ **Upper Expected Boundary:** `${upper_bound:.2f}`\n"
-                f"┣ **Lower Expected Boundary:** `${lower_bound:.2f}`\n"
-                f"┗ **Institutional Open Interest (Max Pain):** `${max_pain}`\n\n"
-                f"⚠️ *Directive: Do not sell naked credit inside this perimeter. Options market makers are pricing in movement to these strikes.*"
+                f"[SYSTEMIC RISK POSTURE: {vrp_status}]\n\n"
+                f"🧠 **Expected Move Boundary (0DTE)**:\n"
+                f"┣ **SPY Spot Price**: `${spy_price:,.2f}`\n"
+                f"┣ **Implied Daily Move**: `+/- ${expected_move:.2f}`\n"
+                f"┣ **Upper Boundary (Ceiling)**: `${upper_bound:.2f}`\n"
+                f"┣ **Lower Boundary (Floor)**: `${lower_bound:.2f}`\n"
+                f"┗ **Max Pain OI Node**: `${max_pain}`\n\n"
+                f"💡 **Tactical Directive**:\n{directive}"
             )
             if HAS_ESSENTIALS and WEBHOOK_OPTIONS_SIGNALS:
-                send_essentials_embed(WEBHOOK_OPTIONS_SIGNALS, "Mathematical Expected Move", payload, 0x9b59b6)
+                send_essentials_embed(WEBHOOK_OPTIONS_SIGNALS, "🎯 SPY Volatility & OI Boundary", payload, color_hex)
 
 def execute_forex_tactical_scan(is_test=False):
     logger.info("Executing Forex ATR Exhaustion & Tactical Scans...")
     if not TD_API_KEY or not WEBHOOK_FOREX: return
 
     pairs = ["EUR/USD", "XAU/USD", "GBP/USD", "USD/JPY"]
+    net_liq = float(db.get_state("net_liquidity", 0.0))
     
     for pair in pairs:
         price = fetch_price(pair)
@@ -100,170 +131,63 @@ def execute_forex_tactical_scan(is_test=False):
         upper_noise = price + (atr_14 * 0.5)
         lower_noise = price - (atr_14 * 0.5)
         
-        state_hash = f"ATR_RANGE_{pair}"
+        state_hash = f"ATR_RANGE_{pair}_LIQ_{int(net_liq)}"
         
-        # 3-Strike Dynamic Gatekeeper
         should_broadcast = db.track_and_limit_alerts(
             alert_id=f"FOREX_{pair}",
             current_state=state_hash,
             current_trigger=price,
             max_broadcasts=3,
-            threshold_pct=0.001 
+            threshold_pct=0.008 
         )
 
         if should_broadcast or is_test:
+            tactics = FOREX_TACTICAL_DATA.get(pair, {})
+            
             payload = (
-                f"### 🌐 {pair} Volatility Matrix\n"
+                f"[MACRO TELEMETRY: Systemic Base Liquidity at ${net_liq:,.0f}B]\n\n"
+                f"🌐 **{pair} Volatility Matrix**:\n"
                 f"┣ **Current Spot**: `{price:,.4f}`\n"
                 f"┣ **Daily ATR (14D)**: `{atr_14:,.4f}`\n"
-                f"┗ **Noise Band Thresholds**: Breakouts must clear `{upper_noise:,.4f}` or `{lower_noise:,.4f}` to negate mathematical noise algorithms.\n\n"
-                f"*Execute inside the noise band at your own statistical peril.*"
+                f"┗ **Noise Band Perimeter**: `{lower_noise:,.4f}` to `{upper_noise:,.4f}`\n\n"
+                f"🛡️ **Institutional Execution Framework**:\n"
+                f"┣ **Golden Setup**: {tactics.get('setup', 'N/A')}\n"
+                f"┣ **Average Orders**: {tactics.get('orders', 'N/A')}\n"
+                f"┗ **Early Signal Model**: {tactics.get('early_signal', 'N/A')}\n\n"
+                f"⚠️ **Risk Management Rule (3-5-7)**: Max 3% loss per trade | 5% weekly drawdown limit | 7% monthly drawdown limit."
             )
-            if HAS_ESSENTIALS:
-                send_essentials_embed(WEBHOOK_FOREX, "Macro Volatility Brief", payload, 0x34495e)
-
-def calculate_wma(series, length):
-    """Calculates Weighted Moving Average."""
-    weights = np.arange(1, length + 1)
-    return series.rolling(length).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
-
-def execute_futures_conviction_scan(is_test=False):
-    """
-    Translates Pine Script WMA crossover and Gaussian momentum logic 
-    to analyze continuous futures order flow.
-    """
-    logger.info("⚡ Initiating Institutional Futures Matrix...")
-    if not TD_API_KEY:
-        logger.error("Aborting Futures Scan: Missing TWELVE_DATA_API_KEY.")
-        return
-
-    futures_assets = {"ES": "S&P 500 Futures", "NQ": "Nasdaq Futures"}
-    report_lines = []
-    regime_states = []
-    es_trigger_price = 0.0
-
-    for symbol, name in futures_assets.items():
-        try:
-            url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1h&outputsize=250&apikey={TD_API_KEY}"
-            res = requests.get(url, timeout=10).json()
-            
-            if "values" not in res:
-                logger.warning(f"Could not fetch time series for {symbol}")
-                continue
-                
-            df = pd.DataFrame(res['values'])
-            df['close'] = df['close'].astype(float)
-            df = df.iloc[::-1].reset_index(drop=True)
-            
-            close_price = df['close'].iloc[-1]
-            if symbol == "ES":
-                es_trigger_price = close_price
-            
-            df['WMA_13'] = calculate_wma(df['close'], 13)
-            df['WMA_48'] = calculate_wma(df['close'], 48)
-            df['WMA_200'] = calculate_wma(df['close'], 200)
-            
-            wma_13 = df['WMA_13'].iloc[-1]
-            wma_48 = df['WMA_48'].iloc[-1]
-            wma_200 = df['WMA_200'].iloc[-1]
-
-            trend_status = "CHOP / CONSOLIDATION"
-            emoji = "⏳"
-            
-            is_up_trend = close_price > wma_200
-            is_down_trend = close_price < wma_200
-            
-            if is_up_trend:
-                if wma_13 > wma_48 and wma_48 > wma_200:
-                    trend_status = "STRONGER UPTREND (MAX CONVICTION)"
-                    emoji = "🔥"
-                elif wma_13 > wma_48:
-                    trend_status = "CONFIRMED UPTREND"
-                    emoji = "🟢"
-                else:
-                    trend_status = "EARLY UPTREND / REVERSAL"
-                    emoji = "🟡"
-            elif is_down_trend:
-                if wma_13 < wma_48 and wma_48 < wma_200:
-                    trend_status = "STRONGER DOWNTREND (MAX CONVICTION)"
-                    emoji = "🚨"
-                elif wma_13 < wma_48:
-                    trend_status = "CONFIRMED DOWNTREND"
-                    emoji = "🔴"
-                else:
-                    trend_status = "EARLY DOWNTREND / DISTRIBUTION"
-                    emoji = "🟠"
-
-            regime_states.append(f"{symbol}:{trend_status}")
-            
-            pct_from_200 = ((close_price - wma_200) / wma_200) * 100
-            exhaustion_warning = ""
-            if pct_from_200 >= 2.5:
-                exhaustion_warning = " ⚠️ LOCAL TOP RISK"
-            elif pct_from_200 <= -2.5:
-                exhaustion_warning = " ⚠️ LOCAL BOTTOM RISK"
-                
-            report_lines.append(
-                f"┣ **{name} ({symbol})**: `{close_price:,.2f}`\n"
-                f"┃  ┣ **Regime**: {emoji} *{trend_status}*{exhaustion_warning}\n"
-                f"┃  ┗ **WMA Structure**: 13:`{wma_13:,.2f}` | 48:`{wma_48:,.2f}` | 200:`{wma_200:,.2f}`"
-            )
-        except Exception as e:
-            logger.error(f"Error compiling futures matrix for {symbol}: {e}")
-
-    if not report_lines:
-        return
-
-    # 3-Strike Dynamic Gatekeeper implementation for Futures
-    combined_state_hash = "|".join(regime_states)
-    should_broadcast = db.track_and_limit_alerts(
-        alert_id="FUTURES_MATRIX_CONVICTION",
-        current_state=combined_state_hash,
-        current_trigger=es_trigger_price,
-        max_broadcasts=3,
-        threshold_pct=0.0015 # Math shifts by 0.15% to reset
-    )
-
-    if should_broadcast or is_test:
-        payload = (
-            f"### 🌐 Institutional Futures Matrix\n"
-            f"Cross-verified structural WMA regime mapping for continuous futures contracts:\n\n"
-            f"**Asset Consensus Profiles:**\n" + "\n".join(report_lines) + "\n\n"
-            f"***\n"
-            f"**Rockefeller Strategic Intelligence** • Futures Order Flow Engine"
-        )
-
-        title = "📈 Futures Strategic Conviction Broadcast" + (" [TEST]" if is_test else "")
-        
-        if HAS_ESSENTIALS and WEBHOOK_FUTURES:
-            send_essentials_embed(WEBHOOK_FUTURES, title, payload, 0xf1c40f)
-            db.log_event("Futures Conviction Matrix successfully dispatched.")
-        else:
-            logger.info(f"[Local Broadcast Print Due to Webhook Absence]:\n{payload}")
+            send_essentials_embed(WEBHOOK_FOREX, f"🌍 Macro Volatility Brief: {pair}", payload, 0x34495e)
 
 if __name__ == "__main__":
-    logger.info("Trade_Signals initialized.")
+    logger.info("Trade_Signals initialized. Always-On Loop Active.")
     tz_h = pytz.timezone('Pacific/Honolulu')
+
+    try:
+        from cross_asset import broadcast_futures_snapshot
+    except ImportError:
+        def broadcast_futures_snapshot(is_test=False): pass
 
     if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         execute_options_expected_move(is_test=True)
         execute_forex_tactical_scan(is_test=True)
-        execute_futures_conviction_scan(is_test=True)
+        broadcast_futures_snapshot(is_test=True)
     else:
+        loop_counter = 0
         while True:
             try:
                 now = datetime.now(tz_h)
                 current_time_val = int(now.strftime("%H%M"))
                 
-                # Active constant monitoring across requested sectors
                 execute_forex_tactical_scan()
-                execute_futures_conviction_scan() 
                 
-                # Time-gated scans (e.g., Options pricing pre-market/close)
+                if loop_counter % 5 == 0:
+                    broadcast_futures_snapshot()
+                
                 if current_time_val == 335:
                     execute_options_expected_move()
                     
-                time.sleep(300) 
+                time.sleep(60) 
+                loop_counter += 1
             except Exception as e:
                 logger.error(f"Ecosystem Main Loop Exception caught: {e}")
                 time.sleep(60)
