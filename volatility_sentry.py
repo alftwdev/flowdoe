@@ -5,194 +5,112 @@ import time
 import logging
 import numpy as np
 import websocket
-import pytz
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
 logger = logging.getLogger("Proximity_Sentry")
-if not logger.handlers:
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(message)s'))
-    logger.addHandler(ch)
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+db = EcosystemDatabase()
 
-TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_OPTIONS_SIGNALS = os.getenv("WEBHOOK_OPTIONS_SIGNALS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
+WEBHOOK_OPTIONS = os.getenv("WEBHOOK_OPTIONS_SIGNALS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
+WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO")
+WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 
 try:
     from essentials_tools import send_essentials_embed
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
-    def send_essentials_embed(*args, **kwargs): return False
-
-db = EcosystemDatabase()
-WS_URL = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TD_API_KEY}"
+    def send_essentials_embed(*args, **kwargs): pass
 
 class ConsolidatedSentry:
     def __init__(self):
-        self.state_memory = {"vix_last": 0.0, "btc_last": 0.0, "eth_last": 0.0, "last_write_time": 0}
+        self.ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={os.getenv('TWELVE_DATA_API_KEY')}"
         self.btc_window = []
-        self.eth_window = []
-        self.last_alert_time = {"BTC": 0, "ETH": 0}
-        self.proximity_cooldowns = {} # Prevents proximity spam
-        self.volatility_threshold = 0.025 
-        self.reconnect_attempts = 0
+        self.strike_tracker = {}
 
-    # --- PROXIMITY EXECUTION ENGINE ---
-    def check_proximity(self, symbol, price):
-        """Event-Driven checker: validates live ticks against DB boundaries."""
-        levels = {}
-        if symbol == "SPY":
-            levels = {
-                "Point of Control (POC)": db.get_state("SPY_poc", 0),
-                "Intraday Liquidity Floor": db.get_state("SPY_vol_floor", 0),
-                "Gamma Resistance Ceiling": db.get_state("SPY_gamma_ceiling", 0),
-                "0DTE Expected Move Ceiling": db.get_state("SPY_expected_upper", 0),
-                "0DTE Expected Move Floor": db.get_state("SPY_expected_lower", 0),
-            }
-        elif symbol == "XAU/USD":
-            levels = {
-                "ATR Exhaustion Ceiling": db.get_state("XAU/USD_upper_noise", 0),
-                "ATR Exhaustion Floor": db.get_state("XAU/USD_lower_noise", 0),
-            }
-
-        for level_name, level_price in levels.items():
-            if not level_price or float(level_price) == 0: continue
+    def enforce_gatekeeper(self, alert_id, key_hash, price):
+        """Standardized 3-Strike Rule with 4-Hour Reset Architecture"""
+        current_time = time.time()
+        tracker = self.strike_tracker.get(alert_id, {"hash": "", "strikes": 0, "time": 0})
+        
+        if tracker["hash"] != key_hash or (current_time - tracker["time"] > 14400):
+            tracker = {"hash": key_hash, "strikes": 1, "time": current_time}
+            self.strike_tracker[alert_id] = tracker
+            return True
             
-            # Trigger threshold: within 0.15% of the boundary
-            proximity_pct = abs(price - float(level_price)) / float(level_price)
-            if proximity_pct <= 0.0015:
-                alert_key = f"{symbol}_{level_name}"
-                last_alert = self.proximity_cooldowns.get(alert_key, 0)
-                current_time = time.time()
+        if tracker["strikes"] < 3:
+            tracker["strikes"] += 1
+            tracker["time"] = current_time
+            self.strike_tracker[alert_id] = tracker
+            return True
+            
+        return False
 
-                # 4-hour cooldown per specific level interaction to prevent chop-spam
-                if current_time - last_alert > 14400:
-                    self.dispatch_proximity_alert(symbol, price, level_name, float(level_price))
-                    self.proximity_cooldowns[alert_key] = current_time
-
-    def dispatch_proximity_alert(self, symbol, price, level_name, level_price):
-        title = f"🚨 TACTICAL PROXIMITY ALERT: {symbol}"
+    def evaluate_proximity_metrics(self, symbol, price):
+        if symbol not in ["SPY", "QQQ", "XAU/USD"]: return
         
-        # Determine actionable bias context natively
-        if "Floor" in level_name or "Lower" in level_name:
-            bias, color = "mean-reversion LONG", 0x2ecc71
-        elif "Ceiling" in level_name or "Upper" in level_name:
-            bias, color = "rejection SHORT", 0xe74c3c
+        if symbol in ["SPY", "QQQ"]:
+            upper = float(db.get_state(f"{symbol}_expected_upper", 0.0))
+            lower = float(db.get_state(f"{symbol}_expected_lower", 0.0))
+            target_webhook = WEBHOOK_OPTIONS
         else:
-            bias, color = "high-volume consolidation", 0xf1c40f
+            upper = float(db.get_state("XAU/USD_upper_noise", 0.0))
+            lower = float(db.get_state("XAU/USD_lower_noise", 0.0))
+            target_webhook = WEBHOOK_FOREX
 
-        payload = (
-            f"**Strategic Boundary Reached**\n"
-            f"The spot price of `{symbol}` is currently at `${price:,.2f}`, testing the mathematically defined **{level_name}** (`${level_price:,.2f}`).\n\n"
-            f"🧠 **Execution Directive**: High probability for {bias} mechanics. Validate order flow and volume before triggering entry."
-        )
-        
-        target_webhook = WEBHOOK_OPTIONS_SIGNALS if symbol == "SPY" else WEBHOOK_FOREX
-        if HAS_ESSENTIALS and target_webhook:
-            send_essentials_embed(target_webhook, title, payload, color)
-            logger.info(f"Proximity Execution Fired: {symbol} at {level_name}")
+        if upper == 0 or lower == 0: return
 
-    # --- CRYPTO & VIX ENGINES (Existing Logic) ---
-    def calculate_volatility_z_score(self, current_vol):
-        hist_vol = db.get_state("btc_historical_volatility", [])
-        hist_vol.append(current_vol)
-        if len(hist_vol) > 90: hist_vol.pop(0)
-        db.update_state("btc_historical_volatility", hist_vol)
-        
-        if len(hist_vol) < 10: return 0.0
-        std_rv = np.std(hist_vol)
-        if std_rv == 0: return 0.0
-        
-        z_score = (current_vol - np.mean(hist_vol)) / std_rv
-        db.update_state("btc_vol_z_score", float(z_score))
-        return z_score
+        # Perimeter Breach Evaluation Mechanics
+        if price >= upper * 0.9985:
+            key_hash = f"{symbol}_CEILING_BREACH"
+            if self.enforce_gatekeeper(symbol, key_hash, price) and target_webhook:
+                payload = f"🎯 **[{symbol} Flowstate]**\n┣ Spot: `${price:,.2f}` | Volatility Ceiling Compression reached.\n┗ *Risk Rule: Confinement boundary active. Momentum longs restricted.*"
+                send_essentials_embed(target_webhook, f"🚨 Boundary Hit: {symbol}", payload, 0xe74c3c)
+                
+        elif price <= lower * 1.0015:
+            key_hash = f"{symbol}_FLOOR_BREACH"
+            if self.enforce_gatekeeper(symbol, key_hash, price) and target_webhook:
+                payload = f"🎯 **[{symbol} Flowstate]**\n┣ Spot: `${price:,.2f}` | Volatility Floor Compression reached.\n┗ *Risk Rule: Potential well base active. Short execution high-risk.*"
+                send_essentials_embed(target_webhook, f"🚨 Boundary Hit: {symbol}", payload, 0x2ecc71)
 
-    def write_to_state(self, btc_price, eth_price):
+    def process_crypto_volatility(self, price):
         current_time = time.time()
-        if current_time - self.state_memory["last_write_time"] > 60:
-            db.update_state("crypto_live_state", {"btc_price": f"${btc_price:,.2f}", "eth_price": f"${eth_price:,.2f}"})
-            self.state_memory["last_write_time"] = current_time
+        self.btc_window.append((current_time, price))
+        while self.btc_window and (current_time - self.btc_window[0][0] > 3600):
+            self.btc_window.pop(0)
+            
+        pct_change = (price - self.btc_window[0][1]) / self.btc_window[0][1]
+        if abs(pct_change) >= 0.025:
+            key_hash = f"BTC_VOL_{round(pct_change, 3)}"
+            if self.enforce_gatekeeper("BTC_VOL_ALERT", key_hash, price) and WEBHOOK_CRYPTO:
+                payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Rolling Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum detected."
+                send_essentials_embed(WEBHOOK_CRYPTO, "⚡ Volatility Sentry Trigger", payload, 0xf39c12)
 
-    def process_vix(self, price):
-        self.state_memory["vix_last"] = price
-        vix_status = "CRITICAL SPARK" if price > 24.0 else "ELEVATED" if price > 19.0 else "NOMINAL"
-        db.update_state("market_regime", {"vix_status": vix_status, "vix_price": price})
-        db.update_state("vix_iv_index", price)
-
-    def process_rolling_volatility(self, symbol, current_price):
-        current_time = time.time()
-        window = self.btc_window if symbol == "BTC" else self.eth_window
-        window.append((current_time, current_price))
-        
-        while window and (current_time - window[0][0] > 3600): window.pop(0)
-        if len(window) < 2: return
-
-        pct_change = (current_price - window[0][1]) / window[0][1]
-        
-        if symbol == "BTC":
-            z_score = self.calculate_volatility_z_score(abs(pct_change))
-            if z_score < -2.0 and current_time - self.last_alert_time.get("BTC_COMPRESSION", 0) > 14400:
-                self.dispatch_compression_alert()
-                self.last_alert_time["BTC_COMPRESSION"] = current_time
-        
-        if abs(pct_change) >= self.volatility_threshold:
-            if current_time - self.last_alert_time[symbol] > 3600:
-                self.last_alert_time[symbol] = current_time
-                self.dispatch_volatility_alert(symbol, current_price, pct_change * 100)
-
-    def dispatch_compression_alert(self):
-        if HAS_ESSENTIALS and WEBHOOK_CRYPTO:
-            send_essentials_embed(WEBHOOK_CRYPTO, "⚡ Crypto Matrix: Extreme Volatility Compression", "⚠️ **Z-Score Boundary Alert**\nBTC realized volatility has fallen over 2 standard deviations below its rolling mean. Historical probability mathematically indicates imminent, violent directional expansion.", 0x9b59b6)
-
-    def dispatch_volatility_alert(self, symbol, current_price, velocity_pct):
-        emoji, direction = ("📈", "EXPANSION") if velocity_pct > 0 else ("📉", "RETRACTION")
-        payload = f"⚠️ **Proprietary Rolling 60-Min Velocity Scan Breached**\n┣ **Asset Class Token**: `{symbol}/USD`\n┣ **Current Spot Rate**: `${current_price:,.2f}`\n┣ **Rolling Hourly Delta**: `{emoji} {velocity_pct:+.2f}%`\n┗ **Structural Vector**: `Momentum {direction} Identified`"
-        if HAS_ESSENTIALS and WEBHOOK_CRYPTO:
-            send_essentials_embed(WEBHOOK_CRYPTO, f"🚨 Volatility Sentry: {symbol}/USD Momentum Trigger", payload, 0xe74c3c if velocity_pct < 0 else 0x2ecc71)
-
-    # --- WEBSOCKET HANDLERS ---
     def on_message(self, ws, message):
         try:
             data = json.loads(message)
-            symbol = data.get('symbol')
-            price = float(data.get('price', 0))
+            symbol = data.get("symbol")
+            price = float(data.get("price", 0.0))
+            if not symbol or price == 0: return
 
-            if symbol == 'VIX': self.process_vix(price)
+            if symbol in ["SPY", "QQQ", "XAU/USD"]:
+                self.evaluate_proximity_metrics(symbol, price)
             elif symbol == "BTC/USD":
-                self.state_memory["btc_last"] = price
-                self.process_rolling_volatility("BTC", price)
-            elif symbol == "ETH/USD":
-                self.state_memory["eth_last"] = price
-                self.process_rolling_volatility("ETH", price)
-                self.write_to_state(self.state_memory["btc_last"], price)
-            elif symbol in ["SPY", "XAU/USD"]:
-                # TRIGGER THE EVENT-DRIVEN PROXIMITY WATCHER
-                self.check_proximity(symbol, price)
+                self.process_crypto_volatility(price)
+            elif symbol == "VIX":
+                db.update_state("vix_iv_index", price)
         except Exception: pass
 
-    def on_error(self, ws, error): logger.error(f"Sentry Boundary encountered: {error}")
-    
-    def on_close(self, ws, close_status_code, close_msg):
-        backoff_time = min(5 * (2 ** self.reconnect_attempts), 300)
-        time.sleep(backoff_time)
-        self.reconnect_attempts += 1
-        self.start_sentry()
-
     def on_open(self, ws):
-        logger.info("Connected to WebSocket. Establishing telemetry for VIX, Crypto, Equities, and Forex...")
-        self.reconnect_attempts = 0 
-        # Added SPY and XAU/USD to the live stream
-        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "VIX,BTC/USD,ETH/USD,SPY,XAU/USD"}}))
+        logger.info("WS Pipeline active. Monitoring SPY, QQQ, VIX, XAU/USD, BTC/USD...")
+        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIX,XAU/USD,BTC/USD"}}))
 
     def start_sentry(self):
-        ws = websocket.WebSocketApp(WS_URL, on_message=self.on_message, on_error=self.on_error, on_close=self.on_close, on_open=self.on_open)
+        ws = websocket.WebSocketApp(self.ws_url, on_message=self.on_message, on_open=self.on_open)
         ws.run_forever()
 
 if __name__ == "__main__":
