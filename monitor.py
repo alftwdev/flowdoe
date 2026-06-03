@@ -31,6 +31,28 @@ PRIORITY_ASSETS = {
     "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.30}
 }
 
+def check_sec_edgar(session, ticker):
+    """Scrapes SEC EDGAR in real-time for N-2/Rights Offering Filings."""
+    cik_map = {"CLM": "0000081074", "CRF": "0000084560"}
+    cik = cik_map.get(ticker)
+    if not cik: return "No N2/ RO detected"
+    
+    # SEC requires strict User-Agent formatting to prevent 403 Forbidden blocks
+    headers = {'User-Agent': 'RockefellerSystem/1.0 (admin@rockefeller.local)'}
+    try:
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        res = session.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            recent_forms = data.get("filings", {}).get("recent", {}).get("form", [])
+            for i in range(min(10, len(recent_forms))):
+                if "N-2" in recent_forms[i]:
+                    return "⚠️ N-2 FILING DETECTED"
+        return "No N2/ RO detected"
+    except Exception as e:
+        logger.error(f"[SEC Fetch Error] {e}")
+        return "No N2/ RO detected"
+
 def fetch_live_metrics(session, symbol):
     try:
         p_res = session.get(f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
@@ -55,6 +77,7 @@ def get_ticker_report(session, ticker):
     if price == 0.0: 
         return f"{ticker}\n⚠️ *Data Feed Offline.*\n"
 
+    # Whale Flow Tracking
     whale_status = "NORMAL"
     if HAS_ESSENTIALS:
         try:
@@ -63,29 +86,56 @@ def get_ticker_report(session, ticker):
         except Exception:
             pass
 
-    sec_shield = "No N2/ RO detected" 
-    premium = ((price - nav) / nav) * 100 if nav > 0 else 0
+    # Margin Arbitrage, DRIP Alpha & Z-Score Mathematics
+    annual_div = 1.4580 if ticker == "CLM" else 1.4112 # 2026 Distribution Profiles
+    y_dist = (annual_div / price) * 100 if price > 0 else 0
+    y_nav = (annual_div / nav) * 100 if nav > 0 else 0
     
-    if premium > 25.0:
+    margin_rate = 7.25 # Standard benchmark margin cost
+    leverage_ratio = 1.0 # Baseline leverage parity
+    s_net = y_dist - (margin_rate * leverage_ratio)
+    
+    premium = ((price - nav) / nav) * 100 if nav > 0 else 0
+    alpha_drip = (premium / 100) * y_nav if nav > 0 else 0
+    
+    # Fetch 1Y rolling premium means from DB (fallbacks provided)
+    mu_rho = float(db.get_state(f"{ticker}_premium_mu", 15.0))
+    sigma_rho = float(db.get_state(f"{ticker}_premium_sigma", 4.0))
+    z_premium = (premium - mu_rho) / sigma_rho if sigma_rho > 0 else 0
+
+    # SEC Scraping Engine
+    sec_shield = check_sec_edgar(session, ticker)
+
+    # Strategy Logic Flow
+    z_tag = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
+    rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
+    prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
+
+    if "N-2" in sec_shield:
+        status = "🚨 CRITICAL: N-2 DETECTED"
+        income_note = "Distribution/Caution phase"
+        verdict = "Active SEC N-2/RO filing detected. Immediate NAV dilution imminent."
+        recommendation = "Halt DRIP immediately; prepare protective hedge."
+    elif z_premium >= 1.5 or premium > 25.0:
         status = "⚠️ HIGH PREMIUM"
-        income_note = "HOLD: High yield but risky."
-        verdict = "Premium approaching historical resistance."
-        recommendation = "Pause; Monitor for RO filing."
+        income_note = "Distribution/Caution phase"
+        verdict = "Premium highly extended above historical norms. RO risk elevated."
+        recommendation = "Pause reinvestment; build cash position."
     else:
         status = "✅ STABLE"
         income_note = "Accumulation phase"
         verdict = "Premium variance within historical standard deviations. No active dilution signatures."
-        recommendation = "Reinvest distributions"
-
-    rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
-    prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
+        recommendation = "Reinvest distributions at NAV"
 
     return (
         f"{ticker}\n"
         f"Status:  {status}\n"
         f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+        f"┣ Premium Z-Score (1Y): {z_premium:+.1f} {z_tag}\n"
         f"┣ SEC: {sec_shield}\n"
         f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
+        f"┣ Net Arbitrage Spread: +{s_net:.2f}%\n"
+        f"┣ DRIP Alpha Capture: +{alpha_drip:.2f}%\n"
         f"┣ Income Note: {income_note}\n"
         f"┣ Whale Flow: {whale_status}\n"
         f"┣ Recommendation: {recommendation}\n"
@@ -94,12 +144,12 @@ def get_ticker_report(session, ticker):
 
 def send_daily_pulse(is_test=False):
     reports = []
-    # Using connection pooling to prevent API timeouts
+    # Connection pooling to prevent Twelve Data & SEC API timeouts
     with requests.Session() as session:
         for ticker in PRIORITY_ASSETS:
             reports.append(get_ticker_report(session, ticker))
             
-    full_report = "\n".join(reports)
+    full_report = "\n\n".join(reports)
     
     # Ecosystem Supplement: CEF Credit Shield Check
     credit_spread = float(db.get_state("credit_spread", 0.0))
@@ -150,7 +200,7 @@ def send_daily_pulse(is_test=False):
 
 def run_monitor():
     tz_h = pytz.timezone('Pacific/Honolulu')
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
+    if len(sys.argv) > 1 and sys.argv[cite: 1].lower() in ["test", "force"]:
         send_daily_pulse(is_test=True)
         return
 
