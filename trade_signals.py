@@ -39,39 +39,43 @@ def fetch_price(symbol):
     except: return 0.0
 
 def execute_forex_intermarket_scan():
-    """Calculates Real-Time Intermarket Divergence against DXY."""
     if not WEBHOOK_FOREX: return
     dxy_rsi = fetch_td_indicator("DXY", "rsi", "1hour", time_period=14)
-    gold_price = fetch_price("XAU/USD")
+    if dxy_rsi == 0.0: return
     
-    if gold_price == 0.0 or dxy_rsi == 0.0: return
+    fx_assets = ["XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]
     
-    # Intermarket Dispersion logic (Inverse correlation mapped)
-    dispersion = (-0.85 * (1.0 - (dxy_rsi / 100.0)))
-    state_hash = f"XAU_DISPERSION_{round(dispersion, 1)}"
-    
-    should_broadcast = db.track_and_limit_alerts(
-        alert_id="FX_XAU_INTERMARKET",
-        current_state=state_hash,
-        current_trigger=gold_price,
-        max_broadcasts=2,  # Strict limit to prevent spam
-        threshold_pct=0.005
-    )
-    
-    if should_broadcast:
-        payload = (
-            f"👑 **Macro Volatility Alert: XAU/USD Intermarket Realignment**\n"
-            f"┣ **XAU/USD Spot Rate**: `${gold_price:,.2f}`\n"
-            f"┣ **DXY Dispersion Vector**: `{dispersion:+.2f}`\n"
-            f"┗ **Tactical Action Plan**: The quantitative engine detects a sharp flush. Look for a classic 'Turtle Soup' liquidity sweep to build high-conviction positions."
+    for symbol in fx_assets:
+        spot_price = fetch_price(symbol)
+        if spot_price == 0.0: continue
+        
+        dispersion = (-0.85 * (1.0 - (dxy_rsi / 100.0)))
+        state_hash = f"{symbol.replace('/', '_')}_DISPERSION_{round(dispersion, 1)}"
+        
+        should_broadcast = db.track_and_limit_alerts(
+            alert_id=f"FX_{symbol.replace('/', '_')}_INTERMARKET",
+            current_state=state_hash,
+            current_trigger=spot_price,
+            max_broadcasts=2,
+            threshold_pct=0.005
         )
-        send_essentials_embed(WEBHOOK_FOREX, "XAU/USD Tactical Telemetry", payload, 0xf1c40f)
+        
+        if should_broadcast:
+            payload = (
+                f"🌍 **Macro Volatility Alert: {symbol} Intermarket Realignment**\n"
+                f"┣ **{symbol} Spot Rate**: `${spot_price:,.4f}`\n"
+                f"┣ **DXY Dispersion Vector**: `{dispersion:+.2f}`\n"
+                f"┗ **Tactical Action Plan**: Quantitative parameters indicate an extreme deviation against the dollar index baseline. Look for high-timeframe structural confluence levels to define trade entry."
+            )
+            send_essentials_embed(WEBHOOK_FOREX, f"{symbol} Tactical Telemetry", payload, 0x34495e)
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     logger.info("Signal Engine Processing Thread Instantiated Successfully. Spam suppressors active.")
+    
     while True:
         try:
-            # Sync options bounds silently
             vix = fetch_price("VIX")
             spot = fetch_price("SPY")
             if spot > 0 and vix > 0:
@@ -81,10 +85,10 @@ if __name__ == "__main__":
                 db.update_state("SPY_expected_upper", spot + variance)
                 db.update_state("SPY_expected_lower", spot - variance)
 
-            # Run tactical scans
             execute_forex_intermarket_scan()
             
-            time.sleep(300) # 5-minute backoff to prevent API & log flooding
+            sys.stdout.flush()
+            time.sleep(300) 
         except Exception as e:
             logger.error(f"Signals Error Loop Exception Trace: {e}")
             time.sleep(60)

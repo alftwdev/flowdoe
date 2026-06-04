@@ -3,13 +3,12 @@ import sys
 import json
 import time
 import logging
-import numpy as np
 import websocket
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
 logger = logging.getLogger("Proximity_Sentry")
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
@@ -30,12 +29,27 @@ class ConsolidatedSentry:
     def __init__(self):
         self.ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={os.getenv('TWELVE_DATA_API_KEY')}"
         self.btc_window = []
+        self.alert_cooldowns = {} 
+
+    def enforce_temporal_gatekeeper(self, asset_key, cooldown_seconds=900, max_strikes=3):
+        current_time = time.time()
+        state = self.alert_cooldowns.get(asset_key, {"last_alert": 0, "strikes": 0})
+        
+        if current_time - state["last_alert"] > cooldown_seconds:
+            state["strikes"] = 0
+            
+        if state["strikes"] >= max_strikes:
+            return False
+            
+        state["last_alert"] = current_time
+        state["strikes"] += 1
+        self.alert_cooldowns[asset_key] = state
+        return True
 
     def evaluate_proximity_metrics(self, symbol, price):
         if symbol not in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]: 
             return
         
-        # Map asset vectors to their proper database keys and targets
         if symbol in ["SPY", "QQQ"]:
             upper = float(db.get_state(f"{symbol}_expected_upper", 0.0))
             lower = float(db.get_state(f"{symbol}_expected_lower", 0.0))
@@ -47,33 +61,15 @@ class ConsolidatedSentry:
             target_webhook = WEBHOOK_FOREX
             precision_pct = 0.0005
 
-        if upper == 0 or lower == 0 or not target_webhook: 
-            return
+        if upper == 0 or lower == 0 or not target_webhook: return
 
-        # Perimeter Breach Evaluation Mechanics
         if price >= upper * (1.0 - precision_pct):
-            state_token = f"{symbol}_CEILING_BREACH_AT_{price:.4f}"
-            should_broadcast = db.track_and_limit_alerts(
-                alert_id=f"SENTRY_{symbol}_UPPER",
-                current_state=state_token,
-                current_trigger=price,
-                max_broadcasts=3,
-                threshold_pct=0.002
-            )
-            if should_broadcast and HAS_ESSENTIALS:
+            if self.enforce_temporal_gatekeeper(f"{symbol}_UPPER"):
                 payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Ceiling Compression reached. Long momentum restricted."
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0xe74c3c)
                 
         elif price <= lower * (1.0 + precision_pct):
-            state_token = f"{symbol}_FLOOR_BREACH_AT_{price:.4f}"
-            should_broadcast = db.track_and_limit_alerts(
-                alert_id=f"SENTRY_{symbol}_LOWER",
-                current_state=state_token,
-                current_trigger=price,
-                max_broadcasts=3,
-                threshold_pct=0.002
-            )
-            if should_broadcast and HAS_ESSENTIALS:
+            if self.enforce_temporal_gatekeeper(f"{symbol}_LOWER"):
                 payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Floor Compression reached. Short execution high-risk."
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0x2ecc71)
 
@@ -85,25 +81,17 @@ class ConsolidatedSentry:
             
         pct_change = (price - self.btc_window[0][1]) / self.btc_window[0][1]
         if abs(pct_change) >= 0.025:
-            state_token = f"BTC_SPEED_{round(pct_change, 4)}"
-            should_broadcast = db.track_and_limit_alerts(
-                alert_id="SENTRY_BTC_VOL",
-                current_state=state_token,
-                current_trigger=price,
-                max_broadcasts=3,
-                threshold_pct=0.01
-            )
-            if should_broadcast and WEBHOOK_CRYPTO and HAS_ESSENTIALS:
-                payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Rolling Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum detected."
-                send_essentials_embed(WEBHOOK_CRYPTO, "⚡ Volatility Sentry Trigger", payload, 0xf39c12)
+            if self.enforce_temporal_gatekeeper("BTC_USD_VOL_STREAM", cooldown_seconds=900, max_strikes=3):
+                if WEBHOOK_CRYPTO and HAS_ESSENTIALS:
+                    payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Rolling Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum detected."
+                    send_essentials_embed(WEBHOOK_CRYPTO, "⚡ Volatility Sentry Trigger", payload, 0xf39c12)
 
     def on_message(self, ws, message):
         try:
             data = json.loads(message)
             symbol = data.get("symbol")
             price = float(data.get("price", 0.0))
-            if not symbol or price == 0: 
-                return
+            if not symbol or price == 0: return
 
             if symbol in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]:
                 self.evaluate_proximity_metrics(symbol, price)
@@ -111,7 +99,7 @@ class ConsolidatedSentry:
                 self.process_crypto_volatility(price)
             elif symbol == "VIX":
                 db.update_state("vix_iv_index", price)
-        except: 
+        except Exception as e:
             pass
 
     def on_open(self, ws):
@@ -123,8 +111,13 @@ class ConsolidatedSentry:
         ws.send(json.dumps(subscription_message))
 
     def start_sentry(self):
-        ws = websocket.WebSocketApp(self.ws_url, on_message=self.on_message, on_open=self.on_open)
-        ws.run_forever()
+        while True:
+            try:
+                ws = websocket.WebSocketApp(self.ws_url, on_message=self.on_message, on_open=self.on_open)
+                ws.run_forever()
+            except Exception as e:
+                logger.error(f"Websocket disconnected. Re-instantiating in 10s... Error: {e}")
+                time.sleep(10)
 
 if __name__ == "__main__":
     sentry = ConsolidatedSentry()
