@@ -1,9 +1,7 @@
 import os
-import sys
 import logging
 import requests
 import pandas as pd
-import numpy as np
 from dotenv import load_dotenv
 from essentials_tools import send_essentials_embed
 from database import EcosystemDatabase
@@ -19,14 +17,23 @@ WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 db = EcosystemDatabase()
 
 def fetch_profile_time_series(symbol):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=78&apikey={TD_API_KEY}"
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=120&apikey={TD_API_KEY}"
     try:
         res = requests.get(url, timeout=12).json()
         if "values" not in res: return None
+        
         df = pd.DataFrame(res["values"])
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(int)
-        return df[::-1].reset_index(drop=True)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df['datetime_est'] = df['datetime'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
+        current_date = df['datetime_est'].dt.date.iloc[0]
+        
+        rth_df = df[(df['datetime_est'].dt.date == current_date) & 
+                    (df['datetime_est'].dt.time >= pd.to_datetime('09:30').time()) & 
+                    (df['datetime_est'].dt.time <= pd.to_datetime('16:00').time())].copy()
+                    
+        rth_df['close'] = rth_df['close'].astype(float)
+        rth_df['volume'] = rth_df['volume'].astype(int)
+        return rth_df[::-1].reset_index(drop=True)
     except Exception as e:
         logger.error(f"Failed to fetch profile series data for {symbol}: {e}")
         return None
@@ -41,8 +48,7 @@ def compute_market_profile_nodes(df):
     prices = price_profile.index.tolist()
     poc_index = prices.index(poc_price)
     
-    left = poc_index
-    right = poc_index
+    left, right = poc_index, poc_index
     current_va_volume = price_profile.iloc[poc_index]
     
     while current_va_volume < value_area_target:
@@ -62,7 +68,6 @@ def compute_market_profile_nodes(df):
 
 def run_intraday_futures_update():
     if not WEBHOOK_FUTURES: return
-    
     assets = {"SPY": "/ES Futures Proxy", "QQQ": "/NQ Futures Proxy"}
     
     for sym, label in assets.items():
@@ -71,7 +76,6 @@ def run_intraday_futures_update():
         
         spot = df['close'].iloc[-1]
         profile = compute_market_profile_nodes(df)
-        
         df['pv'] = df['close'] * df['volume']
         vwap = df['pv'].sum() / df['volume'].sum()
         

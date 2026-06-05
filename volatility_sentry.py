@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import logging
+import asyncio
 import websocket
 from dotenv import load_dotenv
 from database import EcosystemDatabase
@@ -14,9 +15,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
 
-WEBHOOK_OPTIONS = os.getenv("WEBHOOK_OPTIONS_SIGNALS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO")
+WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS") or os.getenv("WEBHOOK_MARKET_ANALYSIS")
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
+# Routing Crypto to Trade Signals due to standard .env architecture
+WEBHOOK_CRYPTO = os.getenv("WEBHOOK_TRADE_SIGNALS")
 
 try:
     from essentials_tools import send_essentials_embed
@@ -38,8 +40,7 @@ class ConsolidatedSentry:
         if current_time - state["last_alert"] > cooldown_seconds:
             state["strikes"] = 0
             
-        if state["strikes"] >= max_strikes:
-            return False
+        if state["strikes"] >= max_strikes: return False
             
         state["last_alert"] = current_time
         state["strikes"] += 1
@@ -47,8 +48,7 @@ class ConsolidatedSentry:
         return True
 
     def evaluate_proximity_metrics(self, symbol, price):
-        if symbol not in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]: 
-            return
+        if symbol not in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]: return
         
         if symbol in ["SPY", "QQQ"]:
             upper = float(db.get_state(f"{symbol}_expected_upper", 0.0))
@@ -104,21 +104,25 @@ class ConsolidatedSentry:
 
     def on_open(self, ws):
         logger.info("Websocket pipeline connected. Initializing unified stream monitor...")
-        subscription_message = {
+        ws.send(json.dumps({
             "action": "subscribe",
             "params": {"symbols": "SPY,QQQ,VIX,XAU/USD,EUR/USD,GBP/USD,USD/JPY,BTC/USD"}
-        }
-        ws.send(json.dumps(subscription_message))
+        }))
 
     def start_sentry(self):
+        backoff = 1.0
         while True:
             try:
                 ws = websocket.WebSocketApp(self.ws_url, on_message=self.on_message, on_open=self.on_open)
                 ws.run_forever()
+                backoff = 1.0 
             except Exception as e:
-                logger.error(f"Websocket disconnected. Re-instantiating in 10s... Error: {e}")
-                time.sleep(10)
+                logger.error(f"Websocket disconnected. Reconnecting in {backoff}s... Error: {e}")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     sentry = ConsolidatedSentry()
     sentry.start_sentry()
