@@ -49,23 +49,6 @@ class EcosystemDatabase:
                     )
                 """)
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id TEXT PRIMARY KEY,
-                        months_active INTEGER DEFAULT 0,
-                        has_insider_role BOOLEAN DEFAULT 0
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS trade_context_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TIMESTAMP,
-                        symbol TEXT,
-                        side TEXT,
-                        vrp_reading REAL
-                    )
-                """)
-                # The Universal Spam-Gatekeeper Table
-                cursor.execute("""
                     CREATE TABLE IF NOT EXISTS alert_state_manager (
                         alert_id TEXT PRIMARY KEY,
                         last_state TEXT,
@@ -76,32 +59,33 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
         except sqlite3.OperationalError as e:
-            logger.error(f"Failed to initialize tables. Lock detected: {e}")
+            logger.error(f"Failed to initialize tables: {e}")
 
     def track_and_limit_alerts(self, alert_id, current_state, current_trigger, max_broadcasts=3, threshold_pct=0.001):
         """
-        Universal Gatekeeper: Allows 3 broadcasts max for the same signal.
-        Resets and broadcasts immediately if the structural state or trigger shifts.
+        Universal 3-Strike Gatekeeper: Accounts for negative-integer tracking math
+        during sharp market declines by normalizing baseline variations.
         """
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT last_state, last_trigger, broadcast_count FROM alert_state_manager WHERE alert_id = ?", (alert_id,))
                 row = cursor.fetchone()
-
                 now_str = datetime.now().isoformat()
 
                 if row is None:
-                    # New signal entirely
                     cursor.execute("INSERT INTO alert_state_manager VALUES (?, ?, ?, ?, ?)",
                                    (alert_id, current_state, current_trigger, 1, now_str))
                     conn.commit()
                     return True
 
                 last_state, last_trigger, broadcast_count = row
+                
+                # Math Correction: wrap last_trigger in abs() to prevent negative threshold calculation locks
+                trigger_delta = abs(current_trigger - last_trigger)
+                allowed_variance = abs(last_trigger) * threshold_pct if last_trigger != 0 else threshold_pct
 
-                # Check if state changed OR price shifted beyond threshold
-                if current_state != last_state or abs(current_trigger - last_trigger) > (last_trigger * threshold_pct):
+                if current_state != last_state or trigger_delta > allowed_variance:
                     cursor.execute("""
                         UPDATE alert_state_manager 
                         SET last_state = ?, last_trigger = ?, broadcast_count = 1, last_alert_time = ? 
@@ -110,7 +94,6 @@ class EcosystemDatabase:
                     conn.commit()
                     return True
 
-                # Exact same signal parameters
                 if broadcast_count < max_broadcasts:
                     cursor.execute("""
                         UPDATE alert_state_manager 
@@ -120,11 +103,10 @@ class EcosystemDatabase:
                     conn.commit()
                     return True
 
-                # Threshold met. Silence the engine.
                 return False
         except sqlite3.OperationalError as e:
             logger.warning(f"Database lock in alert manager: {e}")
-            return False # Fail silent to prevent accidental spam
+            return False
 
     def update_state(self, key, value):
         val_str = json.dumps(value)
