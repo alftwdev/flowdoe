@@ -24,6 +24,7 @@ db = EcosystemDatabase()
 # API and Routing Keys
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_TRADE_SIGNALS = os.getenv("WEBHOOK_TRADE_SIGNALS")
+WEBHOOK_DIVIDEND_CCETFS = os.getenv("WEBHOOK_DIVIDEND_CCETFS")
 
 try:
     from essentials_tools import send_essentials_embed
@@ -177,13 +178,49 @@ class FalseBreakoutSentry:
         if HAS_ESSENTIALS and WEBHOOK_TRADE_SIGNALS:
             send_essentials_embed(WEBHOOK_TRADE_SIGNALS, f"🛑 High Probability False Breakout Trap: {symbol}", payload, 0xe74c3c)
 
+    def run_wheel_discovery(self):
+        """Triggers the Analytics Engine and routes Prime Wheel Candidates."""
+        from analytics import HighFidelityAnalyticsEngine
+        engine = HighFidelityAnalyticsEngine()
+        
+        logger.info("Executing 10-Minute Wheel Discovery Scan...")
+        candidates = engine.generate_wheel_candidates()
+        if not candidates: return
+
+        payload = "### **⚙️ Automated Wheel Strategy Discovery**\n*Highly curated 30-45 DTE Cash-Secured Put setups (~0.40 Delta).*\n\n"
+        
+        for c in candidates:
+            payload += (
+                f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
+                f"┣ **Target Expiration**: `{c['expiration']}` ({c['dte']} DTE)\n"
+                f"┣ **Optimal Strike**: `STO ${c['strike']:.1f} Put`\n"
+                f"┗ **Capital Efficiency**: Est. `{c['annualized_roi']}%` Annualized ROI\n\n"
+            )
+            
+        payload += "💡 *Directive: Sell puts on assets you are willing to own. If assigned, wheel into Covered Calls.*"
+        
+        if HAS_ESSENTIALS and WEBHOOK_DIVIDEND_CCETFS:
+            send_essentials_embed(WEBHOOK_DIVIDEND_CCETFS, "🎡 PRIME WHEEL CANDIDATES", payload, 0x9b59b6)
+
     def execution_loop(self):
-        logger.info("Starting production-grade False Breakout Sentry daemon...")
+        logger.info("Starting Dual-Core Sentry daemon (Breakouts + Wheel Discovery)...")
+        loop_counter = 0
+        
         while True:
+            # 1. False Breakout Sentry (Runs every loop ~ 2 mins)
             for symbol in self.watchlist:
                 self.process_telemetry(symbol)
-                time.sleep(2) # Modest pacing step to safely stay inside limits
-            time.sleep(300) # Re-evaluate structural conditions every 5 minutes
+                time.sleep(2) # API pacing
+            
+            # 2. Wheel Discovery Scanner (Runs every 5th loop ~ 10 mins)
+            if loop_counter % 5 == 0:
+                try:
+                    self.run_wheel_discovery()
+                except Exception as e:
+                    logger.error(f"Wheel Discovery Failed: {e}")
+                
+            loop_counter += 1
+            time.sleep(120) # 2-minute base structural delay
 
 if __name__ == "__main__":
     sentry = FalseBreakoutSentry()

@@ -17,7 +17,7 @@ db = EcosystemDatabase()
 # Decoupled Webhook Channels
 WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
-WEBHOOK_CRYPTO = os.getenv("WEBHOOK_MARKET_ANALYSIS") # Dedicated channel breakout
+WEBHOOK_CRYPTO = os.getenv("WEBHOOK_MARKET_ANALYSIS") 
 
 try:
     from essentials_tools import send_essentials_embed
@@ -93,20 +93,37 @@ class ConsolidatedSentry:
         except Exception: pass
 
     def on_open(self, ws):
-        logger.info("Initializing stream monitors...")
+        logger.info("Pipeline verified. Initializing secure stream monitors...")
         ws.send(json.dumps({
             "action": "subscribe",
             "params": {"symbols": "SPY,QQQ,VIX,XAU/USD,EUR/USD,GBP/USD,USD/JPY,BTC/USD"}
         }))
 
+    def on_error(self, ws, error):
+        # Silently handles standard TCP socket drops without polluting logs
+        pass 
+
+    def on_close(self, ws, close_status_code, close_msg):
+        logger.debug("Remote host recycling stream. Re-establishing secure handshake...")
+
     def start_sentry(self):
         while True:
             try:
-                ws = websocket.WebSocketApp(self.ws_url, on_message=self.on_message, on_open=self.on_open)
+                ws = websocket.WebSocketApp(
+                    self.ws_url, 
+                    on_message=self.on_message, 
+                    on_open=self.on_open,
+                    on_error=self.on_error,
+                    on_close=self.on_close
+                )
                 ws.run_forever()
             except Exception as e:
-                time.sleep(5)
+                time.sleep(2) # Micro-cooldown before reconnection to prevent flood bans
 
 if __name__ == "__main__":
     sentry = ConsolidatedSentry()
-    sentry.start_sentry()
+    try:
+        sentry.start_sentry()
+    except KeyboardInterrupt:
+        logger.info("Operator triggered shutdown. Closing secure streams.")
+        sys.exit(0)

@@ -26,6 +26,112 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"API Execution Failure ({endpoint}): {e}")
             return None
 
+    def generate_wheel_candidates(self, watchlist=["AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]):
+        """
+        Passive Discovery Engine: Scans for 30-45 DTE Cash-Secured Put candidates.
+        Approximates a 0.40 Delta strike and calculates annualized capital efficiency.
+        """
+        candidates = []
+        target_dte_min, target_dte_max = 30, 45
+        
+        for symbol in watchlist:
+            try:
+                spot_data = self._execute_query("price", {"symbol": symbol})
+                spot = float(spot_data.get("price", 0.0))
+                if spot == 0: continue
+
+                chain = self._execute_query("options/chain", {"symbol": symbol})
+                if not chain or "data" not in chain: continue
+
+                # Parse and filter the options chain
+                df = pd.DataFrame(chain["data"])
+                df["expiration_date"] = pd.to_datetime(df["expiration_date"])
+                df["strike"] = df["strike"].astype(float)
+                
+                # Filter for Target DTE
+                today = pd.Timestamp.today()
+                df["dte"] = (df["expiration_date"] - today).dt.days
+                df_filtered = df[(df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & (df["type"] == "put")].copy()
+                
+                if df_filtered.empty: continue
+                
+                # Approximate 0.40 Delta: Typically sits 3-5% OTM depending on IV
+                # We target a strike roughly 4% below the spot price
+                target_strike = spot * 0.96
+                df_filtered["strike_dist"] = abs(df_filtered["strike"] - target_strike)
+                optimal_put = df_filtered.loc[df_filtered["strike_dist"].idxmin()]
+                
+                strike = optimal_put["strike"]
+                dte = optimal_put["dte"]
+                exp_date = optimal_put["expiration_date"].strftime('%Y-%m-%d')
+                
+                # Calculate Capital Efficiency (Proxy Premium)
+                # Assuming 1.5% premium yield on a 0.40 delta put as baseline
+                est_premium = strike * 0.015 
+                capital_required = strike * 100
+                annualized_roi = ((est_premium * 100) / capital_required) * (365 / dte) * 100
+
+                candidates.append({
+                    "symbol": symbol,
+                    "spot": spot,
+                    "strike": strike,
+                    "dte": dte,
+                    "expiration": exp_date,
+                    "premium": round(est_premium, 2),
+                    "annualized_roi": round(annualized_roi, 1)
+                })
+            except Exception as e:
+                logger.error(f"Wheel scan failed for {symbol}: {e}")
+                
+        return candidates
+
+    def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):
+        """
+        Synthesizes Dark Pool / Institutional Block prints by detecting massive
+        anomalies in intraday volume combined with VWAP divergence.
+        """
+        # Fetch 5-minute intraday data
+        data = self._execute_query("time_series", {"symbol": symbol, "interval": "5min", "outputsize": str(lookback + 5)})
+        if not data or "values" not in data: return None
+
+        try:
+            df = pd.DataFrame(data["values"])
+            df["close"] = df["close"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+            
+            # Reverse to chronological order
+            df = df.iloc[::-1].reset_index(drop=True)
+
+            # Calculate Session VWAP proxy (simplified to the rolling window)
+            df["pv"] = df["close"] * df["volume"]
+            vwap = df["pv"].sum() / df["volume"].sum()
+
+            # Analyze the most recent closed candle against the baseline
+            baseline_vol = df["volume"].iloc[-lookback-1:-1].mean()
+            current_vol = df["volume"].iloc[-1]
+            current_close = df["close"].iloc[-1]
+
+            if baseline_vol == 0: return None
+            rvol = current_vol / baseline_vol
+
+            # Gatekeeper threshold: Did volume spike massively beyond the norm?
+            if rvol >= volume_multiplier:
+                # Contextualize the print against the VWAP
+                direction = "🟢 ACCUMULATION (Bullish)" if current_close >= vwap else "🔴 DISTRIBUTION (Bearish)"
+                return {
+                    "symbol": symbol,
+                    "spot": current_close,
+                    "vwap": vwap,
+                    "rvol": rvol,
+                    "current_vol": current_vol,
+                    "baseline_vol": baseline_vol,
+                    "direction": direction
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Dark pool proxy math failed for {symbol}: {e}")
+            return None
+
     def compile_tsp_allocation_matrix(self):
         """
         Calculates dynamic momentum tracking metrics for Thrift Savings Plan weights
