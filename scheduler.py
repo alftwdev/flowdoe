@@ -17,18 +17,38 @@ WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 WEBHOOK_TSP = os.getenv("WEBHOOK_FED")
 WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS") or WEBHOOK_MARKET
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS") or WEBHOOK_MARKET
+WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro"])
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
     logger.info(f"Executing scheduled operational sweep: {args.mode.upper()}")
 
     try:
-        if args.mode == "morning":
+        if args.mode == "macro":
+            # 1. Broad Liquidity (Federal Reserve & Credit Spreads)
+            liq_payload = engine.generate_macro_liquidity_payload()
+            if liq_payload and WEBHOOK_MARKET:
+                send_essentials_embed(WEBHOOK_MARKET, "🏦 Institutional Liquidity Radar", liq_payload, 0x3498db)
+            
+            # 2. Forex Relativity Grid
+            fx_payload = engine.generate_forex_matrix_payload()
+            if fx_payload and WEBHOOK_FOREX:
+                send_essentials_embed(WEBHOOK_FOREX, "💱 Forex Performance Grid", fx_payload, 0x34495e)
+            
+            # 3. Crypto Vector Momentum
+            crypto_payload = engine.generate_crypto_matrix_payload()
+            if crypto_payload and WEBHOOK_OPTIONS:
+                send_essentials_embed(WEBHOOK_OPTIONS, "🪙 Crypto Sector Liquidity Tracker", crypto_payload, 0xf39c12)
+                
+            logger.info("Macro matrix compilation and dispatch completed.")
+
+        elif args.mode == "morning":
+            # Preserved Logic
             spy_matrix = engine.construct_comprehensive_matrix("SPY")
             description = (
                 f"### **📦 Institutional Momentum & Order Flow Delta**\n"
@@ -85,10 +105,8 @@ def main():
 
         elif args.mode == "gex":
             gex_data = engine.calculate_gex_profile("SPY")
-            
-            # QUALITY CONTROL GATEKEEPER: Prevent empty data broadcasts
             if gex_data['current_spot'] == 0.0 or gex_data['flip_strike'] == 0.0:
-                logger.warning("GEX Math returned zeros. Exchange latency or weekend data clearance detected. Suppressing broadcast.")
+                logger.warning("GEX Math returned zeros. Suppressing broadcast.")
                 return 
                 
             payload = (
@@ -96,12 +114,11 @@ def main():
                 f"┣ **Current Spot Price**: `${gex_data['current_spot']:.2f}`\n"
                 f"┣ 🎯 **Systemic Gamma Flip Line**: `${gex_data['flip_strike']:.2f}`\n"
                 f"┗ **Structural Posture Context**: {gex_data['market_state']}\n\n"
-                f"⚠️ *Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms. Prepare for dynamic expansion if the price drops below support.*"
+                f"⚠️ *Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms.*"
             )
             send_essentials_embed(WEBHOOK_MARKET, "🎛️ COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, 0xe67e22)
 
         elif args.mode == "post_market":
-            # BENZINGA PROXY: After-Hours Earnings Sentry
             watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "META", "GOOGL", "AMZN"]
             triggered_assets = []
             
@@ -123,11 +140,10 @@ def main():
                     logger.error(f"Post-Market fetch failed for {sym}: {e}")
 
             if triggered_assets:
-                payload = "**Institutional Extended-Hours Liquidity Sweep**\n\n" + "\n".join(triggered_assets) + "\n\n💡 *Context: Abnormal post-market volatility usually signals an earnings release, guidance revision, or breaking structural news.*"
+                payload = "**Institutional Extended-Hours Liquidity Sweep**\n\n" + "\n".join(triggered_assets) + "\n\n💡 *Context: Abnormal post-market volatility usually signals an earnings release or breaking structural news.*"
                 send_essentials_embed(WEBHOOK_MARKET, "🌙 POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0x8e44ad)
 
         elif args.mode == "darkpool":
-            # TIER 1: The Sieve - Broad institutional liquidity universe (Single lightweight batch call)
             broad_universe = "SPY,QQQ,IWM,AAPL,NVDA,MSFT,META,TSLA,AMD,AMZN,NFLX,BA,DIS,JPM,V,WMT,COST,AVGO,SMCI,COIN"
             trending_symbols = []
             
@@ -136,7 +152,6 @@ def main():
                 for sym, data in batch_quotes.items():
                     if "percent_change" in data:
                         pct_chg = abs(float(data["percent_change"]))
-                        # If the stock is moving more than 1.2% today, it is trending. Add to deep scan list.
                         if pct_chg >= 1.2:
                             trending_symbols.append(sym)
             except Exception as e:
@@ -144,25 +159,18 @@ def main():
                 return
 
             if not trending_symbols:
-                logger.info("Dark Pool Scan: Market is flat. No assets met the trending volatility threshold.")
                 return
 
-            # TIER 2: The Deep Scan - Run heavy math only on active movers
             for sym in trending_symbols:
                 block_data = engine.detect_institutional_block_proxy(sym)
                 if not block_data: continue
                 
-                # Prop-Firm 3-Strike Gatekeeper Implementation
                 alert_id = f"dp_proxy_{sym}"
                 state_str = f"DP_{block_data['direction']}_RVOL_{round(block_data['rvol'], 1)}"
                 
-                # Allows max 2 broadcasts per level, requires a 0.2% price deviation to reset
                 if engine.db.track_and_limit_alerts(
-                    alert_id=alert_id,
-                    current_state=state_str,
-                    current_trigger=block_data['spot'],
-                    max_broadcasts=2,
-                    threshold_pct=0.002 
+                    alert_id=alert_id, current_state=state_str, current_trigger=block_data['spot'],
+                    max_broadcasts=2, threshold_pct=0.002 
                 ):
                     payload = (
                         f"🐋 **Institutional Footprint: Block Trade Proxy Detected**\n"
@@ -170,12 +178,10 @@ def main():
                         f"┣ **Abnormal Candle Volume**: `{int(block_data['current_vol']):,}` shares\n"
                         f"┣ **Trailing Benchmark Average**: `{int(block_data['baseline_vol']):,}` shares\n"
                         f"┗ **Volume Multiplier Velocity**: `{block_data['rvol']:.1f}x` spike above baseline\n\n"
-                        f"**Ecosystem Context**: A hidden institutional transaction or dark pool order allocation has just cleared. Watch the immediate order book depth for massive trend continuation.\n"
+                        f"**Ecosystem Context**: A hidden institutional transaction or dark pool order allocation has just cleared.\n"
                         f"**VWAP Positioning**: {block_data['direction']} (VWAP: `${block_data['vwap']:,.2f}`)"
                     )
                     send_essentials_embed(WEBHOOK_OPTIONS, f"🌊 DARK POOL RADAR: {sym}", payload, 0x9b59b6)
-            
-            logger.info(f"Dark Pool Proxy scan complete. Evaluated {len(trending_symbols)} trending assets.")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

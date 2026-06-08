@@ -14,6 +14,7 @@ class HighFidelityAnalyticsEngine:
     def __init__(self):
         self.db = EcosystemDatabase()
         self.api_key = os.getenv("TWELVE_DATA_API_KEY")
+        self.fred_api_key = os.getenv("FRED_API_KEY")
         self.base_url = "https://api.twelvedata.com"
 
     def _execute_query(self, endpoint, params):
@@ -26,14 +27,120 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"API Execution Failure ({endpoint}): {e}")
             return None
 
+    def _fetch_fred_metric(self, series_id):
+        url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={self.fred_api_key}&file_type=json&sort_order=desc&limit=1"
+        try:
+            res = requests.get(url, timeout=12)
+            res.raise_for_status()
+            return float(res.json()['observations'][0]['value'])
+        except Exception as e:
+            logger.error(f"FRED failure for {series_id}: {e}")
+            return 0.0
+
+    def _fetch_twelve_data_quotes(self, symbols_list):
+        if not self.api_key: return {}
+        url = f"https://api.twelvedata.com/quote?symbol={','.join(symbols_list)}&apikey={self.api_key}"
+        try:
+            res = requests.get(url, timeout=15).json()
+            if len(symbols_list) == 1:
+                return {symbols_list[0]: res} if "symbol" in res else {}
+            return res
+        except Exception as e:
+            logger.error(f"Twelve Data batch error: {e}")
+            return {}
+
+    # --- MACRO PIPELINE METHODS (Migrated from macro.py) ---
+    def generate_macro_liquidity_payload(self, is_test=False):
+        fed_assets = self._fetch_fred_metric("WALCL") / 1000 
+        tga = self._fetch_fred_metric("WTREGEN")
+        rev_repo = self._fetch_fred_metric("RRPONTSYD")
+        credit_spread = self._fetch_fred_metric("BAMLH0A0HYM2")
+
+        if fed_assets == 0.0 or tga == 0.0: return None
+
+        net_liquidity = fed_assets - tga - rev_repo
+        historical_liq = self.db.get_state("historical_net_liquidity", [])
+        historical_liq.append(net_liquidity)
+        if len(historical_liq) > 5: historical_liq.pop(0)
+        self.db.update_state("historical_net_liquidity", historical_liq)
+        
+        liv = 0.0
+        liv_alert = "⚖️ **NOMINAL**: Velocity stable."
+        if len(historical_liq) == 5:
+            liv = ((net_liquidity - historical_liq[0]) / historical_liq[0]) * 100
+            if liv <= -1.5: liv_alert = "⚠️ **SEVERE WITHDRAWAL**: Systemic liquidity drain."
+            elif liv >= 1.5: liv_alert = "🌊 **INJECTION**: Liquidity influx detected."
+
+        self.db.update_state("net_liquidity", net_liquidity)
+        self.db.update_state("credit_spread", credit_spread)
+        
+        should_broadcast = self.db.track_and_limit_alerts(
+            alert_id="macro_liquidity_state",
+            current_state=f"LIQ_{int(net_liquidity)}_SPREAD_{credit_spread}",
+            current_trigger=net_liquidity,
+            max_broadcasts=3,
+            threshold_pct=0.002
+        )
+        
+        if not should_broadcast and not is_test: return None
+
+        risk_emoji, regime_alert = ("🚨", "CREDIT STRESS DETECTED") if credit_spread > 4.5 else ("🟢", "Credit markets stable.")
+        return (
+            f"**Federal Reserve System Liquidity Snapshot**\n"
+            f"┣ **Fed Balance Sheet:** `${fed_assets:,.0f}B`\n"
+            f"┣ **Global Net Liquidity:** `${net_liquidity:,.0f}B`\n"
+            f"┣ **Liquidity Velocity (5D):** `{liv:+.2f}%`\n"
+            f"┗ **High Yield Credit Spread:** `{credit_spread:.2f}%`\n\n"
+            f"**System Interpretation:**\n{risk_emoji} *{regime_alert}*\n{liv_alert}"
+        )
+
+    def generate_forex_matrix_payload(self):
+        fx_universe = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF"]
+        quotes = self._fetch_twelve_data_quotes(fx_universe)
+        if not quotes: return None
+            
+        table_rows, composite_trigger = [], 0.0
+        for symbol in fx_universe:
+            s_data = quotes.get(symbol, {})
+            if "close" in s_data:
+                price = float(s_data.get("close", 0.0))
+                pct_change = float(s_data.get("percent_change", 0.0))
+                composite_trigger += abs(pct_change)
+                table_rows.append(f"{symbol:<9} {price:<9.4f} {pct_change:+.2f}%")
+                
+        if not table_rows: return None
+        if not self.db.track_and_limit_alerts("matrix_forex_state", f"FX_VAR_{round(composite_trigger, 2)}", composite_trigger, max_broadcasts=3, threshold_pct=0.05):
+            return None
+
+        matrix_body = "\n".join(table_rows)
+        return f"**1-Day Cross-Sectional Relative Performance**\n```js\nPair      Price     Daily Change\n────────────────────────────────\n{matrix_body}\n```"
+
+    def generate_crypto_matrix_payload(self):
+        crypto_universe = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "LINK/USD"]
+        quotes = self._fetch_twelve_data_quotes(crypto_universe)
+        if not quotes: return None
+            
+        table_rows, composite_trigger = [], 0.0
+        for symbol in crypto_universe:
+            s_data = quotes.get(symbol, {})
+            if "close" in s_data:
+                price = float(s_data.get("close", 0.0))
+                pct_change = float(s_data.get("percent_change", 0.0))
+                composite_trigger += pct_change
+                display_name = symbol.split("/")[0]
+                table_rows.append(f"{display_name:<7} ${price:<10.2f} {pct_change:+.2f}%")
+
+        if not table_rows: return None
+        if not self.db.track_and_limit_alerts("matrix_crypto_state", f"CRYPTO_VAR_{round(composite_trigger, 1)}", composite_trigger, max_broadcasts=3, threshold_pct=0.15):
+            return None
+
+        matrix_body = "\n".join(table_rows)
+        return f"**1-Day Relative Performance Index**\n```js\nTicker  Spot Price  Daily Change\n────────────────────────────────\n{matrix_body}\n```"
+
+    # --- EXISTING WHEEL/TSP/OPTIONS METHODS ---
     def generate_wheel_candidates(self, watchlist=["AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]):
-        """
-        Passive Discovery Engine: Scans for 30-45 DTE Cash-Secured Put candidates.
-        Approximates a 0.40 Delta strike and calculates annualized capital efficiency.
-        """
         candidates = []
         target_dte_min, target_dte_max = 30, 45
-        
         for symbol in watchlist:
             try:
                 spot_data = self._execute_query("price", {"symbol": symbol})
@@ -43,70 +150,46 @@ class HighFidelityAnalyticsEngine:
                 chain = self._execute_query("options/chain", {"symbol": symbol})
                 if not chain or "data" not in chain: continue
 
-                # Parse and filter the options chain
                 df = pd.DataFrame(chain["data"])
                 df["expiration_date"] = pd.to_datetime(df["expiration_date"])
                 df["strike"] = df["strike"].astype(float)
                 
-                # Filter for Target DTE
                 today = pd.Timestamp.today()
                 df["dte"] = (df["expiration_date"] - today).dt.days
                 df_filtered = df[(df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & (df["type"] == "put")].copy()
                 
                 if df_filtered.empty: continue
                 
-                # Approximate 0.40 Delta: Typically sits 3-5% OTM depending on IV
-                # We target a strike roughly 4% below the spot price
                 target_strike = spot * 0.96
                 df_filtered["strike_dist"] = abs(df_filtered["strike"] - target_strike)
                 optimal_put = df_filtered.loc[df_filtered["strike_dist"].idxmin()]
                 
-                strike = optimal_put["strike"]
-                dte = optimal_put["dte"]
+                strike, dte = optimal_put["strike"], optimal_put["dte"]
                 exp_date = optimal_put["expiration_date"].strftime('%Y-%m-%d')
                 
-                # Calculate Capital Efficiency (Proxy Premium)
-                # Assuming 1.5% premium yield on a 0.40 delta put as baseline
                 est_premium = strike * 0.015 
                 capital_required = strike * 100
                 annualized_roi = ((est_premium * 100) / capital_required) * (365 / dte) * 100
 
                 candidates.append({
-                    "symbol": symbol,
-                    "spot": spot,
-                    "strike": strike,
-                    "dte": dte,
-                    "expiration": exp_date,
-                    "premium": round(est_premium, 2),
+                    "symbol": symbol, "spot": spot, "strike": strike,
+                    "dte": dte, "expiration": exp_date, "premium": round(est_premium, 2),
                     "annualized_roi": round(annualized_roi, 1)
                 })
-            except Exception as e:
-                logger.error(f"Wheel scan failed for {symbol}: {e}")
-                
+            except Exception as e: logger.error(f"Wheel scan failed for {symbol}: {e}")
         return candidates
 
     def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):
-        """
-        Synthesizes Dark Pool / Institutional Block prints by detecting massive
-        anomalies in intraday volume combined with VWAP divergence.
-        """
-        # Fetch 5-minute intraday data
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "5min", "outputsize": str(lookback + 5)})
         if not data or "values" not in data: return None
-
         try:
             df = pd.DataFrame(data["values"])
-            df["close"] = df["close"].astype(float)
-            df["volume"] = df["volume"].astype(float)
-            
-            # Reverse to chronological order
+            df["close"], df["volume"] = df["close"].astype(float), df["volume"].astype(float)
             df = df.iloc[::-1].reset_index(drop=True)
 
-            # Calculate Session VWAP proxy (simplified to the rolling window)
             df["pv"] = df["close"] * df["volume"]
             vwap = df["pv"].sum() / df["volume"].sum()
 
-            # Analyze the most recent closed candle against the baseline
             baseline_vol = df["volume"].iloc[-lookback-1:-1].mean()
             current_vol = df["volume"].iloc[-1]
             current_close = df["close"].iloc[-1]
@@ -114,35 +197,17 @@ class HighFidelityAnalyticsEngine:
             if baseline_vol == 0: return None
             rvol = current_vol / baseline_vol
 
-            # Gatekeeper threshold: Did volume spike massively beyond the norm?
             if rvol >= volume_multiplier:
-                # Contextualize the print against the VWAP
                 direction = "🟢 ACCUMULATION (Bullish)" if current_close >= vwap else "🔴 DISTRIBUTION (Bearish)"
-                return {
-                    "symbol": symbol,
-                    "spot": current_close,
-                    "vwap": vwap,
-                    "rvol": rvol,
-                    "current_vol": current_vol,
-                    "baseline_vol": baseline_vol,
-                    "direction": direction
-                }
+                return {"symbol": symbol, "spot": current_close, "vwap": vwap, "rvol": rvol, "current_vol": current_vol, "baseline_vol": baseline_vol, "direction": direction}
             return None
-        except Exception as e:
-            logger.error(f"Dark pool proxy math failed for {symbol}: {e}")
-            return None
+        except Exception as e: return None
 
     def compile_tsp_allocation_matrix(self):
-        """
-        Calculates dynamic momentum tracking metrics for Thrift Savings Plan weights
-        by checking data across real equity/bond asset classes[cite: 1].
-        """
-        # Fetch underlying benchmark asset profiles
-        spy_quote = self._execute_query("quote", {"symbol": "SPY"})  # C-Fund Proxy
-        vxf_quote = self._execute_query("quote", {"symbol": "VXF"})  # S-Fund Proxy
-        agg_quote = self._execute_query("quote", {"symbol": "AGG"})  # F-Fund Proxy
+        spy_quote = self._execute_query("quote", {"symbol": "SPY"})
+        vxf_quote = self._execute_query("quote", {"symbol": "VXF"})
+        agg_quote = self._execute_query("quote", {"symbol": "AGG"})
         us10y_data = self._execute_query("price", {"symbol": "US10Y"})
-        
         ten_year_yield = float(us10y_data.get("price", 4.45)) if us10y_data else 4.45
         
         def parse_status(quote_data):
@@ -150,48 +215,26 @@ class HighFidelityAnalyticsEngine:
             chg = float(quote_data["percent_change"])
             if chg > 0.5: return f"🟢 BULLISH | Inflow Strength ({chg:+.2f}%)"
             if chg < -0.5: return f"🔴 BEARISH | Liquidity Outflow ({chg:+.2f}%)"
-            return f" Luxembourg 🟡 NEUTRAL | Compression ({chg:+.2f}%)"
+            return f"🟡 NEUTRAL | Compression ({chg:+.2f}%)"
 
-        c_fund_status = parse_status(spy_quote)
-        s_fund_status = parse_status(vxf_quote)
-        f_fund_status = parse_status(agg_quote)
-        
-        payload = (
+        return (
             f"**Thrift Savings Plan Dynamic Allocation Matrix**\n"
-            f"┣ **C-Fund (Large Cap ETF Proxy)**: {c_fund_status}\n"
-            f"┣ **S-Fund (Small Cap Completion Proxy)**: {s_fund_status}\n"
-            f"┗ **F-Fund (Aggregate Bond Proxy)**: {f_fund_status}\n\n"
+            f"┣ **C-Fund (Large Cap ETF Proxy)**: {parse_status(spy_quote)}\n"
+            f"┣ **S-Fund (Small Cap Completion Proxy)**: {parse_status(vxf_quote)}\n"
+            f"┗ **F-Fund (Aggregate Bond Proxy)**: {parse_status(agg_quote)}\n\n"
             f"**Macro Reference Yield (US10Y)**: `{ten_year_yield}%` \n"
             f"💡 *Directive: Allocate to funds with positive underlying market momentum.*"
         )
-        return payload
 
     def calculate_clean_yield(self, ticker: str, latest_dividend: float, current_price: float) -> float:
         if current_price <= 0: return 0.0
         ticker_upper = ticker.upper()
         if ticker_upper in ["SCHD", "O", "JEPI", "JEPQ"]:
             frequency = 12 if ticker_upper == "O" else 4
-            calculated_yield = (latest_dividend * frequency) / current_price
-            if ticker_upper == "SCHD" and calculated_yield > 0.045:
-                return 0.0352 
-            return calculated_yield
+            calc_yield = (latest_dividend * frequency) / current_price
+            if ticker_upper == "SCHD" and calc_yield > 0.045: return 0.0352 
+            return calc_yield
         return (latest_dividend * 52) / current_price
-
-    def run_dynamic_dividend_lookup(self, symbol="SCHD"):
-        """Fetches dynamic corporate dividend variables via Twelve Data integration endpoints[cite: 1]."""
-        div_data = self._execute_query("dividends", {"symbol": symbol, "outputsize": "1"})
-        price_data = self._execute_query("price", {"symbol": symbol})
-        
-        if not div_data or "data" not in div_data or not price_data:
-            return {"amount": 0.72, "yield": 0.035} # Fail-safe architecture baseline
-            
-        try:
-            latest_div = float(div_data["data"][0]["amount"])
-            spot_price = float(price_data["price"])
-            clean_yield = self.calculate_clean_yield(symbol, latest_div, spot_price)
-            return {"amount": latest_div, "yield": clean_yield, "price": spot_price}
-        except Exception:
-            return {"amount": 0.72, "yield": 0.035, "price": 82.10}
 
     def calculate_historical_volatility(self, symbol, lookback=30):
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": str(lookback + 1)})
@@ -226,8 +269,7 @@ class HighFidelityAnalyticsEngine:
         try:
             spot = float(spot_data.get("price", 0.0))
             df = pd.DataFrame(chain["data"])
-            df["strike"] = df["strike"].astype(float)
-            df["open_interest"] = df["open_interest"].astype(float)
+            df["strike"], df["open_interest"] = df["strike"].astype(float), df["open_interest"].astype(float)
             df = df[(df["strike"] >= spot * 0.95) & (df["strike"] <= spot * 1.05)]
             calls = df[df["type"] == "call"].set_index("strike")["open_interest"]
             puts = df[df["type"] == "put"].set_index("strike")["open_interest"]
