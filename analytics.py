@@ -3,6 +3,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
@@ -49,7 +50,149 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"Twelve Data batch error: {e}")
             return {}
 
-    # --- MACRO PIPELINE METHODS (Migrated from macro.py) ---
+    # --- NEW: THE QUANTITATIVE ENGINE (PHASE A) ---
+
+    def calculate_ohlcv_matrix(self, symbol="SPY", lookback=20):
+        """
+        Replicates the mathematical logic of the J.P. Morgan CNN.
+        Analyzes Price-Volume divergence over a 20-day rolling window to detect accumulation/distribution.
+        """
+        data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": str(lookback + 5)})
+        if not data or "values" not in data: 
+            return {"status": "NEUTRAL", "sigma": 0.0, "volume_surge": False}
+        
+        try:
+            df = pd.DataFrame(data["values"])
+            df["close"] = df["close"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+            df = df.iloc[::-1].reset_index(drop=True)
+            
+            avg_vol = df["volume"].iloc[:-1].mean()
+            current_vol = df["volume"].iloc[-1]
+            vol_surge = current_vol > (avg_vol * 1.5)
+            
+            df["returns"] = df["close"].pct_change()
+            sigma = df["returns"].std()
+            current_return = df["returns"].iloc[-1]
+            z_score = current_return / sigma if sigma > 0 else 0
+            
+            if vol_surge and z_score > 1.0:
+                status = "🟢 HEAVY ACCUMULATION (Institutional Buying)"
+            elif vol_surge and z_score < -1.0:
+                status = "🔴 HEAVY DISTRIBUTION (Institutional Selling)"
+            else:
+                status = "⚖️ CHOP / RANGE-BOUND (Low Conviction)"
+                
+            return {"status": status, "sigma": round(z_score, 2), "volume_surge": vol_surge}
+        except Exception as e:
+            logger.error(f"OHLCV Matrix calculation failed: {e}")
+            return {"status": "ERROR", "sigma": 0.0, "volume_surge": False}
+
+    def generate_premarket_primer(self, symbol="SPY"):
+        """
+        Calculates Overnight Inventory, VIX Expected Moves, and Actionable IF/THEN Scenarios.
+        Engineered to run safely with fallback zero-values to prevent infinite loops.
+        """
+        try:
+            # Fetch Spot and VIX
+            quote_data = self._fetch_twelve_data_quotes([symbol, "VIX"])
+            if not quote_data or symbol not in quote_data: return None
+            
+            sym_quote = quote_data.get(symbol, {})
+            vix_quote = quote_data.get("VIX", {})
+            
+            spot = float(sym_quote.get("close", 0.0))
+            prev_close = float(sym_quote.get("previous_close", spot))
+            vix_spot = float(vix_quote.get("close", 15.0))  # Fallback VIX
+            
+            if spot == 0.0: return None
+            
+            # 1. Overnight Inventory (Gap Context)
+            gap_pct = ((spot - prev_close) / prev_close) * 100
+            inventory = "🟢 OVERNIGHT LONG" if gap_pct > 0 else "🔴 OVERNIGHT SHORT"
+            
+            # 2. Daily Expected Move (Rule of 16 Math)
+            expected_move_pct = vix_spot / 16.0 
+            expected_move_dollars = spot * (expected_move_pct / 100)
+            upper_bound = spot + expected_move_dollars
+            lower_bound = spot - expected_move_dollars
+            
+            # Cache boundaries in DB for real-time tick agent to use later
+            self.db.update_state(f"{symbol}_expected_upper", upper_bound)
+            self.db.update_state(f"{symbol}_expected_lower", lower_bound)
+
+            # 3. Compile IF/THEN Scenarios
+            payload = (
+                f"🌅 **PRE-MARKET PRIMER & TACTICAL BATTLE PLAN ({symbol})**\n\n"
+                f"**Macro Positioning (Overnight Inventory)**\n"
+                f"┣ **Pre-Market Spot**: `${spot:,.2f}`\n"
+                f"┣ **Overnight Gap**: `{gap_pct:+.2f}%` ({inventory})\n"
+                f"┗ **Implied VIX Volatility**: `{vix_spot}%`\n\n"
+                f"🎯 **MATHEMATICAL EXPECTED MOVES (1 Standard Deviation)**\n"
+                f"┣ 🔼 **Ceiling (Call Resistance)**: `${upper_bound:,.2f}`\n"
+                f"┗ 🔽 **Floor (Put Support)**: `${lower_bound:,.2f}`\n\n"
+                f"⚙️ **SYSTEMIC IF/THEN SCENARIOS**\n"
+                f"┣ **IF BULLISH**: If price holds above `${spot:,.2f}` and volume expands, target `${upper_bound:,.2f}`.\n"
+                f"┗ **IF BEARISH**: If price rejects `${spot:,.2f}` and slips into the overnight gap, target `${lower_bound:,.2f}`.\n\n"
+                f"⚠️ *Directive: Do not front-run the first 30 minutes. Let institutional order flow establish the true VWAP.*"
+            )
+            return payload
+        except Exception as e:
+            logger.error(f"Pre-Market Primer failed: {e}")
+            return None
+
+    def generate_eod_reconciliation(self, symbol="SPY"):
+        """
+        Audits the daily price action against the morning's mathematical expected move.
+        Cross-references with the OHLCV matrix to determine closing momentum.
+        """
+        try:
+            data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "1"})
+            if not data or "values" not in data: return None
+            
+            today_candle = data["values"][0]
+            high = float(today_candle["high"])
+            low = float(today_candle["low"])
+            close = float(today_candle["close"])
+            
+            # Retrieve morning bounds from DB
+            expected_upper = float(self.db.get_state(f"{symbol}_expected_upper", close * 1.01))
+            expected_lower = float(self.db.get_state(f"{symbol}_expected_lower", close * 0.99))
+            
+            # Determine Containment
+            breached_upper = high > expected_upper
+            breached_lower = low < expected_lower
+            
+            if breached_upper and not breached_lower:
+                containment = "🔥 SIGMA EVENT: Bullish Volatility Breakout (Call walls breached)."
+            elif breached_lower and not breached_upper:
+                containment = "🩸 SIGMA EVENT: Bearish Volatility Breakdown (Put walls breached)."
+            elif breached_upper and breached_lower:
+                containment = "🌪️ WHIPSAW DAY: Bi-directional structural destruction."
+            else:
+                containment = "🔒 CONTAINED: Options sellers won. Premium decay realized."
+                
+            # Run OHLCV Audit
+            matrix = self.calculate_ohlcv_matrix(symbol)
+
+            payload = (
+                f"🏦 **END-OF-DAY RECONCILIATION & TAPE AUDIT ({symbol})**\n\n"
+                f"**Systemic Boundary Audit**\n"
+                f"┣ **Closing Spot Price**: `${close:,.2f}`\n"
+                f"┣ **High of Day**: `${high:,.2f}` | Expected Ceiling: `${expected_upper:,.2f}`\n"
+                f"┣ **Low of Day**: `${low:,.2f}` | Expected Floor: `${expected_lower:,.2f}`\n"
+                f"┗ **Verdict**: {containment}\n\n"
+                f"🧬 **OHLCV ALGORITHMIC MATRIX (Institutional Footprint)**\n"
+                f"┣ **Closing Profile**: {matrix['status']}\n"
+                f"┗ **Order Flow Z-Score**: `{matrix['sigma']:+.2f}σ`\n\n"
+                f"💡 *Cache cleared. System will recalculate liquidity matrices overnight.*"
+            )
+            return payload
+        except Exception as e:
+            logger.error(f"EOD Reconciliation failed: {e}")
+            return None
+
+    # --- EXISTING MACRO PIPELINE METHODS (Migrated from macro.py) ---
     def generate_macro_liquidity_payload(self, is_test=False):
         fed_assets = self._fetch_fred_metric("WALCL") / 1000 
         tga = self._fetch_fred_metric("WTREGEN")

@@ -48,30 +48,20 @@ def main():
             logger.info("Macro matrix compilation and dispatch completed.")
 
         elif args.mode == "morning":
-            # Preserved Logic
-            spy_matrix = engine.construct_comprehensive_matrix("SPY")
-            description = (
-                f"### **📦 Institutional Momentum & Order Flow Delta**\n"
-                f"┣ **Relative Volume ($RVOL$)**: `{spy_matrix['volume_velocity']['rvol']}x`\n"
-                f"┗ **Order Flow Variance**: `{spy_matrix['volume_velocity']['sigma_deviation']}\\sigma` deviations\n\n"
-                f"### **🎯 Technical Mean Reversion Boundaries**\n"
-                f"┣ **Current Daily RSI (14)**: `{spy_matrix['technical_reversion']['rsi']}`\n"
-                f"┗ **Bollinger Support Limit**: `${spy_matrix['technical_reversion']['lower_band']}`\n\n"
-                f"**Ecosystem Directive**: " + 
-                ("🚨 UNUSUAL RETAIL INFLOW DETECTED - Avoid counter-trend shorts." if spy_matrix['volume_velocity']['spike_detected'] else "⚖️ Order book delta stable.")
-            )
-            send_essentials_embed(WEBHOOK_MARKET, "🌅 ROCKEFELLER STRATEGIC INTELLIGENCE: Morning Matrix", description, 0x00ffff)
+            # UPGRADED: Phase A Pre-Market Primer Engine
+            for ticker in ["SPY", "QQQ"]:
+                primer_payload = engine.generate_premarket_primer(ticker)
+                if primer_payload and WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, f"🌅 STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
+            logger.info("Morning primers successfully compiled and dispatched.")
 
         elif args.mode == "eod":
-            bps_data = engine.verify_session_containment("SPY")
-            score = bps_data.get('precision', 0.0) if bps_data else "N/A"
-            description = (
-                f"📊 **Systemic EOD Performance & Boundary Reconciliation**\n\n"
-                f"**Ecosystem Precision Rating**: 🎯 `{score}%` Accuracy\n"
-                f"*The macro-quant architecture successfully contained today's internal index rotation.*\n\n"
-                f"**Engine Verdict**: VALIDATED. Tactical parameters for tomorrow's open are caching."
-            )
-            send_essentials_embed(WEBHOOK_MARKET, "🏦 ROCKEFELLER STRATEGIC INTELLIGENCE: EOD Reconciliation", description, 0x2ecc71)
+            # UPGRADED: Phase A End-Of-Day Reconciliation & Audit
+            for ticker in ["SPY", "QQQ"]:
+                eod_payload = engine.generate_eod_reconciliation(ticker)
+                if eod_payload and WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, f"🏦 SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
+            logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
         elif args.mode == "tsp":
             tsp_payload = engine.compile_tsp_allocation_matrix()
