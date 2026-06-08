@@ -50,13 +50,23 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"Twelve Data batch error: {e}")
             return {}
 
-    # --- NEW: THE QUANTITATIVE ENGINE (PHASE A) ---
+    def calculate_accuracy_rating(self, predicted_move, actual_close):
+        """
+        Computes the mathematical variance between the algorithmic opening projection
+        and actual session institutional closing data.
+        """
+        try:
+            predicted_move = float(predicted_move)
+            actual_close = float(actual_close)
+            if predicted_move == 0: return 0.0
+            error_pct = abs(actual_close - predicted_move) / predicted_move
+            accuracy = max(0.0, 100.0 - (error_pct * 100.0))
+            return round(accuracy, 2)
+        except Exception as e:
+            logger.error(f"Accuracy calculation error: {e}")
+            return 0.0
 
     def calculate_ohlcv_matrix(self, symbol="SPY", lookback=20):
-        """
-        Replicates the mathematical logic of the J.P. Morgan CNN.
-        Analyzes Price-Volume divergence over a 20-day rolling window to detect accumulation/distribution.
-        """
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": str(lookback + 5)})
         if not data or "values" not in data: 
             return {"status": "NEUTRAL", "sigma": 0.0, "volume_surge": False}
@@ -89,12 +99,7 @@ class HighFidelityAnalyticsEngine:
             return {"status": "ERROR", "sigma": 0.0, "volume_surge": False}
 
     def generate_premarket_primer(self, symbol="SPY"):
-        """
-        Calculates Overnight Inventory, VIX Expected Moves, and Actionable IF/THEN Scenarios.
-        Engineered to run safely with fallback zero-values to prevent infinite loops.
-        """
         try:
-            # Fetch Spot and VIX
             quote_data = self._fetch_twelve_data_quotes([symbol, "VIX"])
             if not quote_data or symbol not in quote_data: return None
             
@@ -103,25 +108,27 @@ class HighFidelityAnalyticsEngine:
             
             spot = float(sym_quote.get("close", 0.0))
             prev_close = float(sym_quote.get("previous_close", spot))
-            vix_spot = float(vix_quote.get("close", 15.0))  # Fallback VIX
+            vix_spot = float(vix_quote.get("close", 15.0))  
             
             if spot == 0.0: return None
             
-            # 1. Overnight Inventory (Gap Context)
             gap_pct = ((spot - prev_close) / prev_close) * 100
             inventory = "🟢 OVERNIGHT LONG" if gap_pct > 0 else "🔴 OVERNIGHT SHORT"
             
-            # 2. Daily Expected Move (Rule of 16 Math)
             expected_move_pct = vix_spot / 16.0 
             expected_move_dollars = spot * (expected_move_pct / 100)
             upper_bound = spot + expected_move_dollars
             lower_bound = spot - expected_move_dollars
             
-            # Cache boundaries in DB for real-time tick agent to use later
+            # Cache boundaries in DB
             self.db.update_state(f"{symbol}_expected_upper", upper_bound)
             self.db.update_state(f"{symbol}_expected_lower", lower_bound)
 
-            # 3. Compile IF/THEN Scenarios
+            # EOD Tracking: Store directional prediction based on gap
+            predicted_target = upper_bound if gap_pct > 0 else lower_bound
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            self.db.update_state(f"market_prediction_{symbol}_{today_str}", predicted_target)
+
             payload = (
                 f"🌅 **PRE-MARKET PRIMER & TACTICAL BATTLE PLAN ({symbol})**\n\n"
                 f"**Macro Positioning (Overnight Inventory)**\n"
@@ -142,10 +149,6 @@ class HighFidelityAnalyticsEngine:
             return None
 
     def generate_eod_reconciliation(self, symbol="SPY"):
-        """
-        Audits the daily price action against the morning's mathematical expected move.
-        Cross-references with the OHLCV matrix to determine closing momentum.
-        """
         try:
             data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "1"})
             if not data or "values" not in data: return None
@@ -155,11 +158,9 @@ class HighFidelityAnalyticsEngine:
             low = float(today_candle["low"])
             close = float(today_candle["close"])
             
-            # Retrieve morning bounds from DB
             expected_upper = float(self.db.get_state(f"{symbol}_expected_upper", close * 1.01))
             expected_lower = float(self.db.get_state(f"{symbol}_expected_lower", close * 0.99))
             
-            # Determine Containment
             breached_upper = high > expected_upper
             breached_lower = low < expected_lower
             
@@ -172,7 +173,6 @@ class HighFidelityAnalyticsEngine:
             else:
                 containment = "🔒 CONTAINED: Options sellers won. Premium decay realized."
                 
-            # Run OHLCV Audit
             matrix = self.calculate_ohlcv_matrix(symbol)
 
             payload = (
@@ -192,7 +192,6 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"EOD Reconciliation failed: {e}")
             return None
 
-    # --- EXISTING MACRO PIPELINE METHODS (Migrated from macro.py) ---
     def generate_macro_liquidity_payload(self, is_test=False):
         fed_assets = self._fetch_fred_metric("WALCL") / 1000 
         tga = self._fetch_fred_metric("WTREGEN")
@@ -280,7 +279,6 @@ class HighFidelityAnalyticsEngine:
         matrix_body = "\n".join(table_rows)
         return f"**1-Day Relative Performance Index**\n```js\nTicker  Spot Price  Daily Change\n────────────────────────────────\n{matrix_body}\n```"
 
-    # --- EXISTING WHEEL/TSP/OPTIONS METHODS ---
     def generate_wheel_candidates(self, watchlist=["AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]):
         candidates = []
         target_dte_min, target_dte_max = 30, 45

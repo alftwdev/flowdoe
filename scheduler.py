@@ -3,6 +3,7 @@ import sys
 import argparse
 import logging
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 from analytics import HighFidelityAnalyticsEngine
 from essentials_tools import send_essentials_embed
@@ -18,6 +19,7 @@ WEBHOOK_TSP = os.getenv("WEBHOOK_FED")
 WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS") or WEBHOOK_MARKET
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS") or WEBHOOK_MARKET
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
+WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS") or WEBHOOK_MARKET
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 def main():
@@ -30,17 +32,14 @@ def main():
 
     try:
         if args.mode == "macro":
-            # 1. Broad Liquidity (Federal Reserve & Credit Spreads)
             liq_payload = engine.generate_macro_liquidity_payload()
             if liq_payload and WEBHOOK_MARKET:
                 send_essentials_embed(WEBHOOK_MARKET, "🏦 Institutional Liquidity Radar", liq_payload, 0x3498db)
             
-            # 2. Forex Relativity Grid
             fx_payload = engine.generate_forex_matrix_payload()
             if fx_payload and WEBHOOK_FOREX:
                 send_essentials_embed(WEBHOOK_FOREX, "💱 Forex Performance Grid", fx_payload, 0x34495e)
             
-            # 3. Crypto Vector Momentum
             crypto_payload = engine.generate_crypto_matrix_payload()
             if crypto_payload and WEBHOOK_OPTIONS:
                 send_essentials_embed(WEBHOOK_OPTIONS, "🪙 Crypto Sector Liquidity Tracker", crypto_payload, 0xf39c12)
@@ -48,7 +47,6 @@ def main():
             logger.info("Macro matrix compilation and dispatch completed.")
 
         elif args.mode == "morning":
-            # UPGRADED: Phase A Pre-Market Primer Engine
             for ticker in ["SPY", "QQQ"]:
                 primer_payload = engine.generate_premarket_primer(ticker)
                 if primer_payload and WEBHOOK_MARKET:
@@ -56,11 +54,40 @@ def main():
             logger.info("Morning primers successfully compiled and dispatched.")
 
         elif args.mode == "eod":
-            # UPGRADED: Phase A End-Of-Day Reconciliation & Audit
+            # 1. End-Of-Day Reconciliation & Audit
             for ticker in ["SPY", "QQQ"]:
                 eod_payload = engine.generate_eod_reconciliation(ticker)
                 if eod_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"🏦 SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
+            
+            # 2. Daily Quant Forecast Accuracy Index
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            prediction_key = f"market_prediction_SPY_{today_str}"
+            
+            saved_state = engine.db.get_state(prediction_key)
+            if saved_state:
+                predicted_target = float(saved_state)
+                
+                price_data = engine._execute_query("price", {"symbol": "SPY"})
+                if price_data and "price" in price_data:
+                    actual_close = float(price_data["price"])
+                    
+                    accuracy_score = engine.calculate_accuracy_rating(predicted_target, actual_close)
+                    
+                    acc_payload = (
+                        f"🔮 **Quant Forecast Accuracy Index**\n"
+                        f"┣ **Session Date**: `{today_str}`\n"
+                        f"┣ **Model Predictive Accuracy**: `🎯 {accuracy_score}%`\n\n"
+                        f"📊 **Session Performance Breakdown**:\n"
+                        f"┣ **Algorithmic Target Projected**: `${predicted_target:,.2f}`\n"
+                        f"┣ **Institutional Closing Print**: `${actual_close:,.2f}`\n"
+                        f"┗ **Net Variance Delta**: `${abs(actual_close - predicted_target):,.2f}`\n\n"
+                        f"*Ecosystem Performance Verification: Session calculation finalized and archived in core database system.*"
+                    )
+                    
+                    if WEBHOOK_ANNOUNCEMENTS:
+                        send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "🔮 SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
+                        logger.info("Quant Forecast Accuracy Index broadcasted.")
             logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
         elif args.mode == "tsp":

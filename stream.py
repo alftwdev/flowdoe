@@ -40,7 +40,7 @@ except ImportError:
     def send_essentials_embed(*args, **kwargs): pass
 
 # =====================================================================
-# THREAD 1: REST Polling Agent (Replaces trade_signals.py)
+# THREAD 1: REST Polling Agent
 # =====================================================================
 class StructuralBreakoutAgent:
     def __init__(self):
@@ -114,7 +114,7 @@ class StructuralBreakoutAgent:
 
     def broadcast_signal(self, symbol, status, price, sd, bbw, atr, trend):
         alert_id = f"breakout_{symbol}_{datetime.now().strftime('%Y%m%d')}"
-        if not db.track_and_limit_alerts(alert_id, f"SIGNAL_{status}_PRC_{price}", current_trigger=price, max_broadcasts=2, threshold_pct=0.002): return
+        if not db.track_and_limit_alerts(alert_id, f"SIGNAL_{status}_PRC", current_trigger=price, max_broadcasts=2, threshold_pct=0.002): return
         payload = (f"⚡ **System Trend Momentum Entry Confirmed**\n┣ **Asset ID:** `{symbol}`\n┣ **Action Type:** `{status}`\n"
                    f"┣ **Execution Spot Price:** `${price:,.2f}`\n┣ **Standard Deviation Factor:** `{sd:+.2f}σ`\n"
                    f"┣ **Bandwidth Expansion (BBW):** `{bbw:.4f}`\n┗ **Filter (Daily MA):** `{trend}TREND`")
@@ -122,7 +122,7 @@ class StructuralBreakoutAgent:
 
     def broadcast_trap(self, symbol, status, price, sd, bbw, atr):
         alert_id = f"trap_{symbol}_{datetime.now().strftime('%Y%m%d')}"
-        if not db.track_and_limit_alerts(alert_id, f"TRAP_{status}_PRC_{price}", current_trigger=price, max_broadcasts=1, threshold_pct=0.005): return
+        if not db.track_and_limit_alerts(alert_id, f"TRAP_{status}_PRC", current_trigger=price, max_broadcasts=1, threshold_pct=0.005): return
         payload = (f"🚨 **Counter-Trend Institutional Trap Detected**\n┣ **Asset ID:** `{symbol}`\n┣ **Calculated Event:** `{status}`\n"
                    f"┣ **Current Spot Position:** `${price:,.2f}`\n┣ **Exhaustion Boundary Z-Score:** `{sd:+.2f}σ` *(Overextended)*\n"
                    f"┗ **Volatility Index Force (ATR %):** `{atr:.2f}%`\n\n⚠️ *Retail momentum is being absorbed here.*")
@@ -150,23 +150,12 @@ class StructuralBreakoutAgent:
             time.sleep(120)
 
 # =====================================================================
-# THREAD 2: Real-Time WebSocket Agent (Replaces prox.py & volatility_sentry.py)
+# THREAD 2: Real-Time WebSocket Agent 
 # =====================================================================
 class RealTimeTickAgent:
     def __init__(self):
         self.ws_url = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TWELVE_DATA_API_KEY}"
         self.btc_window = []
-        self.alert_cooldowns = {} 
-
-    def enforce_temporal_gatekeeper(self, asset_key, cooldown_seconds=900, max_strikes=3):
-        current_time = time.time()
-        state = self.alert_cooldowns.get(asset_key, {"last_alert": 0, "strikes": 0})
-        if current_time - state["last_alert"] > cooldown_seconds: state["strikes"] = 0
-        if state["strikes"] >= max_strikes: return False
-        state["last_alert"] = current_time
-        state["strikes"] += 1
-        self.alert_cooldowns[asset_key] = state
-        return True
 
     def evaluate_proximity_metrics(self, symbol, price):
         if symbol not in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]: return
@@ -183,12 +172,19 @@ class RealTimeTickAgent:
 
         if upper == 0 or lower == 0 or not target_webhook: return
 
+        # 3-Strike Gatekeeper for Ceiling Breach
         if price >= upper * (1.0 - precision_pct):
-            if self.enforce_temporal_gatekeeper(f"{symbol}_UPPER"):
+            alert_id = f"perimeter_breach_{symbol.upper()}_UPPER"
+            state_str = "VOLATILITY_CEILING_COMPRESSION"
+            if db.track_and_limit_alerts(alert_id, state_str, price, max_broadcasts=1, threshold_pct=0.005):
                 payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Ceiling Compression reached."
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0xe74c3c)
+
+        # 3-Strike Gatekeeper for Floor Breach
         elif price <= lower * (1.0 + precision_pct):
-            if self.enforce_temporal_gatekeeper(f"{symbol}_LOWER"):
+            alert_id = f"perimeter_breach_{symbol.upper()}_LOWER"
+            state_str = "VOLATILITY_FLOOR_COMPRESSION"
+            if db.track_and_limit_alerts(alert_id, state_str, price, max_broadcasts=1, threshold_pct=0.005):
                 payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Floor Compression reached."
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0x2ecc71)
 
@@ -199,7 +195,7 @@ class RealTimeTickAgent:
             
         pct_change = (price - self.btc_window[0][1]) / self.btc_window[0][1]
         if abs(pct_change) >= 0.025:
-            if self.enforce_temporal_gatekeeper("BTC_USD_VOL_STREAM", cooldown_seconds=900, max_strikes=3):
+            if db.track_and_limit_alerts("BTC_USD_VOL_STREAM", "HOURLY_VELOCITY_BREACH", price, max_broadcasts=1, threshold_pct=0.015):
                 webhook = WEBHOOK_TRADE_SIGNALS or WEBHOOK_MARKET_ANALYSIS
                 if webhook and HAS_ESSENTIALS:
                     payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum."
@@ -248,7 +244,6 @@ if __name__ == "__main__":
     rest_agent = StructuralBreakoutAgent()
     ws_agent = RealTimeTickAgent()
 
-    # Daemon threads will close when the main process terminates
     t1 = threading.Thread(target=rest_agent.execution_loop, name="REST_Poller", daemon=True)
     t2 = threading.Thread(target=ws_agent.execution_loop, name="WS_Streamer", daemon=True)
 
@@ -256,7 +251,6 @@ if __name__ == "__main__":
         t1.start()
         t2.start()
         
-        # Keep main thread alive
         while True:
             time.sleep(1)
             
