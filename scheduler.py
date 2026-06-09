@@ -60,34 +60,41 @@ def main():
                 if eod_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"🏦 SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
             
-            # 2. Daily Quant Forecast Accuracy Index
+            # 2. Daily Quant Forecast Accuracy Index Pipeline
             today_str = datetime.now().strftime("%Y-%m-%d")
             prediction_key = f"market_prediction_SPY_{today_str}"
-            
             saved_state = engine.db.get_state(prediction_key)
+            
             if saved_state:
-                predicted_target = float(saved_state)
-                
-                price_data = engine._execute_query("price", {"symbol": "SPY"})
-                if price_data and "price" in price_data:
-                    actual_close = float(price_data["price"])
+                try:
+                    predicted_target = float(saved_state)
+                    price_data = engine._execute_query("price", {"symbol": "SPY"})
                     
-                    accuracy_score = engine.calculate_accuracy_rating(predicted_target, actual_close)
-                    
-                    acc_payload = (
-                        f"🔮 **Quant Forecast Accuracy Index**\n"
-                        f"┣ **Session Date**: `{today_str}`\n"
-                        f"┣ **Model Predictive Accuracy**: `🎯 {accuracy_score}%`\n\n"
-                        f"📊 **Session Performance Breakdown**:\n"
-                        f"┣ **Algorithmic Target Projected**: `${predicted_target:,.2f}`\n"
-                        f"┣ **Institutional Closing Print**: `${actual_close:,.2f}`\n"
-                        f"┗ **Net Variance Delta**: `${abs(actual_close - predicted_target):,.2f}`\n\n"
-                        f"*Ecosystem Performance Verification: Session calculation finalized and archived in core database system.*"
-                    )
-                    
-                    if WEBHOOK_ANNOUNCEMENTS:
-                        send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "🔮 SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
-                        logger.info("Quant Forecast Accuracy Index broadcasted.")
+                    if price_data and "price" in price_data:
+                        actual_close = float(price_data["price"])
+                        accuracy_score = engine.calculate_accuracy_rating(predicted_target, actual_close)
+                        
+                        acc_payload = (
+                            f"🔮 **Quant Forecast Accuracy Index**\n"
+                            f"┣ **Session Date**: `{today_str}`\n"
+                            f"┣ **Model Predictive Accuracy**: `🎯 {accuracy_score}%`\n\n"
+                            f"📊 **Session Performance Breakdown**:\n"
+                            f"┣ **Algorithmic Target Projected**: `${predicted_target:,.2f}`\n"
+                            f"┣ **Institutional Closing Print**: `${actual_close:,.2f}`\n"
+                            f"┗ **Net Variance Delta**: `${abs(actual_close - predicted_target):,.2f}`\n\n"
+                            f"*Ecosystem Performance Verification: Session calculation finalized and archived.*"
+                        )
+                        
+                        if WEBHOOK_ANNOUNCEMENTS:
+                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "🔮 SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
+                            logger.info("Quant Forecast Accuracy Index successfully broadcasted.")
+                    else:
+                        logger.warning("EOD Accuracy: Failed to fetch final closing price from Twelve Data.")
+                except Exception as e:
+                    logger.error(f"EOD Accuracy Calculation Error: {e}")
+            else:
+                logger.warning(f"EOD Accuracy: No morning prediction key found for {prediction_key}. (Server timezone rollover likely).")
+
             logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
         elif args.mode == "tsp":
@@ -95,15 +102,23 @@ def main():
             send_essentials_embed(WEBHOOK_TSP, "🦅 Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
 
         elif args.mode == "income":
-            schd_data = engine._execute_query("price", {"symbol": "SCHD"})
-            schd_price = float(schd_data.get("price", 82.10)) if schd_data else 82.10
-            clean_schd_yield = engine.calculate_clean_yield("SCHD", 0.72, schd_price)
-            payload = (
-                f"🏦 **Institutional Yield & Distribution Terminal**\n\n"
-                f"📊 **GOING EX-DIVIDEND TODAY (Normalized Capture)**\n"
-                f"┣ **SCHD**: `{clean_schd_yield*100:.2f}%` Clean Yield | Spot: `${schd_price:,.2f}`\n"
-                f"┗ *System Filter: Structural capital distributions successfully separated from special payouts.*"
-            )
+            # Premium Subscriber Upgrade: Multi-Asset Yield Tracking
+            income_universe = [("SCHD", 0.72), ("JEPQ", 0.42), ("JEPI", 0.35), ("DIVO", 0.14)]
+            payload_lines = [
+                "🏦 **Institutional Yield & Distribution Terminal**\n",
+                "📊 **EX-DIVIDEND & COVERED CALL YIELD MATRIX**"
+            ]
+            
+            for ticker, est_div in income_universe:
+                data = engine._execute_query("price", {"symbol": ticker})
+                if data and "price" in data:
+                    price = float(data["price"])
+                    clean_yield = engine.calculate_clean_yield(ticker, est_div, price)
+                    payload_lines.append(f"┣ **{ticker}**: `{clean_yield*100:.2f}%` Clean Yield | Spot: `${price:,.2f}`")
+            
+            payload_lines.append("┗ *System Filter: Structural capital distributions successfully separated from special payouts.*")
+            
+            payload = "\n".join(payload_lines)
             send_essentials_embed(WEBHOOK_INCOME, "💰 Yield Engine Analytics Pulse", payload, 0xf1c40f)
 
         elif args.mode == "iv_crush":

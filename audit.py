@@ -21,24 +21,27 @@ class EcosystemAuditor:
         """
         logger.info("Initiating Phase C Systemic Integrity Audit...")
         try:
+            # Block 1: Standard transactions for pruning stale gatekeepers
             with sqlite3.connect(self.db_path, timeout=10.0) as conn:
                 cursor = conn.cursor()
                 
-                # 1. Purge stale gatekeeper locks (older than 24 hours)
                 purge_threshold = (datetime.now() - timedelta(hours=24)).isoformat()
                 cursor.execute("DELETE FROM alert_state_manager WHERE last_alert_time < ?", (purge_threshold,))
                 purged_alerts = cursor.rowcount
                 
-                # 2. Prune Audit Logs to keep query times in the millisecond range
                 cursor.execute("DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT 500)")
                 purged_logs = cursor.rowcount
                 
-                # 3. VACUUM the database to reclaim space and optimize CPU execution
-                cursor.execute("VACUUM")
                 conn.commit()
-                
                 logger.info(f"Ecosystem Audit Complete. Purged {purged_alerts} stale strike locks and {purged_logs} historical logs.")
-                return True
+            
+            # Block 2: Isolated Auto-Commit execution for VACUUM to prevent transaction crashes
+            with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+                conn.isolation_level = None  # Force auto-commit mode required for VACUUM
+                conn.execute("VACUUM")
+                logger.info("Database VACUUM completed successfully. Ecosystem CPU execution optimized.")
+                
+            return True
         except Exception as e:
             logger.critical(f"Database Audit Failed (Lock Contention / Concurrency Error): {e}")
             return False

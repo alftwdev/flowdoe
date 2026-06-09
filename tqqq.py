@@ -5,7 +5,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 
 from database import EcosystemDatabase
@@ -154,15 +154,17 @@ class TQQQTacticalSniper:
         setup = self.calculate_ideal_setup(regime, chain, tqqq_spot)
         if not setup: return
         
-        alert_id = f"tqqq_sniper_{regime['regime']}"
-        state_string = f"SETUP_{setup['strategy']}_STRIKE_{setup['short_strike']}"
+        # Hardened Gatekeeper Lock: Binds state to the specific day and regime structure, completely eliminating micro-spam.
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        alert_id = f"tqqq_sniper_{today_str}"
+        state_string = f"REGIME_{regime['regime']}_ACT_{setup['action']}"
         
         if db.track_and_limit_alerts(
             alert_id=alert_id,
             current_state=state_string,
             current_trigger=tqqq_spot,
             max_broadcasts=1,
-            threshold_pct=0.015 
+            threshold_pct=0.03  # Requires a 3% price shift to break the day lock
         ):
             self.dispatch_intelligence(setup, regime, tech)
         else:
@@ -205,5 +207,5 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"TQQQ Sniper Execution Failed: {e}")
         
-        # 300 second (5 min) sleep to prevent continuous PythonAnywhere loop throttling
+        # 300 second (5 min) sleep to prevent PythonAnywhere CPU hyper-looping
         time.sleep(300)
