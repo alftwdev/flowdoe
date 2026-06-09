@@ -54,13 +54,11 @@ def main():
             logger.info("Morning primers successfully compiled and dispatched.")
 
         elif args.mode == "eod":
-            # 1. End-Of-Day Reconciliation & Audit
             for ticker in ["SPY", "QQQ"]:
                 eod_payload = engine.generate_eod_reconciliation(ticker)
                 if eod_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"🏦 SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
             
-            # 2. Daily Quant Forecast Accuracy Index Pipeline
             today_str = datetime.now().strftime("%Y-%m-%d")
             prediction_key = f"market_prediction_SPY_{today_str}"
             saved_state = engine.db.get_state(prediction_key)
@@ -87,13 +85,22 @@ def main():
                         
                         if WEBHOOK_ANNOUNCEMENTS:
                             send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "🔮 SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
-                            logger.info("Quant Forecast Accuracy Index successfully broadcasted.")
                     else:
                         logger.warning("EOD Accuracy: Failed to fetch final closing price from Twelve Data.")
                 except Exception as e:
                     logger.error(f"EOD Accuracy Calculation Error: {e}")
-            else:
-                logger.warning(f"EOD Accuracy: No morning prediction key found for {prediction_key}. (Server timezone rollover likely).")
+            
+            vix_signal = engine.evaluate_vix_cvr_reversal()
+            if vix_signal and WEBHOOK_MARKET:
+                v_payload = (
+                    f"🚨 **Larry Connors CVR VIX Reversal Signal**\n\n"
+                    f"┣ **Action**: `{vix_signal['signal']}`\n"
+                    f"┣ **VIX Spot**: `{vix_signal['vix_spot']:.2f}`\n"
+                    f"┗ **Technical Confirmation**: {vix_signal['condition']}\n\n"
+                    f"💡 *Context: This is an institutional-grade counter-trend indicator. Capitalize on the volatility contraction/expansion.*"
+                )
+                color_code = 0xe74c3c if "SELL" in vix_signal['signal'] else 0x2ecc71
+                send_essentials_embed(WEBHOOK_MARKET, "🦅 VIX TACTICAL REVERSAL", v_payload, color_code)
 
             logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
@@ -102,7 +109,6 @@ def main():
             send_essentials_embed(WEBHOOK_TSP, "🦅 Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
 
         elif args.mode == "income":
-            # Premium Subscriber Upgrade: Multi-Asset Yield Tracking
             income_universe = [("SCHD", 0.72), ("JEPQ", 0.42), ("JEPI", 0.35), ("DIVO", 0.14)]
             payload_lines = [
                 "🏦 **Institutional Yield & Distribution Terminal**\n",
@@ -120,6 +126,42 @@ def main():
             
             payload = "\n".join(payload_lines)
             send_essentials_embed(WEBHOOK_INCOME, "💰 Yield Engine Analytics Pulse", payload, 0xf1c40f)
+
+            # ADD ON: Dividend Wheel Strategy Synergy
+            logger.info("Executing Dividend Wheel Options scan...")
+            wheel_candidates = engine.generate_dividend_wheel_candidates()
+            if wheel_candidates:
+                
+                # 3-Strike Gatekeeper Application to prevent notification fatigue
+                composite_trigger = sum([c['strike'] for c in wheel_candidates])
+                alert_id = "dividend_wheel_strategy_daily"
+                state_str = "_".join([f"{c['symbol']}{c['strike']}" for c in wheel_candidates])
+                
+                if engine.db.track_and_limit_alerts(
+                    alert_id=alert_id,
+                    current_state=state_str,
+                    current_trigger=composite_trigger,
+                    max_broadcasts=2,
+                    threshold_pct=0.01
+                ):
+                    wheel_payload = "### **⚙️ Dividend & Wheel Strategy Synergy**\n*Accelerating Cash Flow via Cash-Secured Puts on Quality Dividend Payers.*\n\n"
+                    for c in wheel_candidates:
+                        wheel_payload += (
+                            f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
+                            f"┣ **Optimal Setup**: `STO ${c['strike']:.1f} Put` ({c['expiration']}, {c['dte']} DTE)\n"
+                            f"┣ **Premium Collected**: `${c['premium']*100:.0f}` per contract\n"
+                            f"┣ **Probability of Profit**: `{c['chance_of_profit']:.1f}%` (Delta: {c['delta']:.2f})\n"
+                            f"┣ **Implied Volatility**: `{c['iv']:.1f}%` | **Open Interest**: `{c['oi']:,}`\n"
+                            f"┗ **Capital Efficiency**: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
+                        )
+                    
+                    # Dispatch to dual routing requirements
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(WEBHOOK_INCOME, "🎡 DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                    if WEBHOOK_OPTIONS:
+                        send_essentials_embed(WEBHOOK_OPTIONS, "🎡 DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                else:
+                    logger.info("Dividend Wheel Strategy blocked by Ecosystem Gatekeeper (State Unchanged).")
 
         elif args.mode == "iv_crush":
             scan_data = engine.run_iv_crush_scan()

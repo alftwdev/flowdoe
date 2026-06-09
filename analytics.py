@@ -51,10 +51,6 @@ class HighFidelityAnalyticsEngine:
             return {}
 
     def calculate_accuracy_rating(self, predicted_move, actual_close):
-        """
-        Computes the mathematical variance between the algorithmic opening projection
-        and actual session institutional closing data.
-        """
         try:
             predicted_move = float(predicted_move)
             actual_close = float(actual_close)
@@ -65,6 +61,50 @@ class HighFidelityAnalyticsEngine:
         except Exception as e:
             logger.error(f"Accuracy calculation error: {e}")
             return 0.0
+
+    def evaluate_vix_cvr_reversal(self):
+        data = self._execute_query("time_series", {"symbol": "VIX", "interval": "1day", "outputsize": "20"})
+        if not data or "values" not in data: return None
+        
+        try:
+            df = pd.DataFrame(data["values"])
+            df["close"] = df["close"].astype(float)
+            df["open"] = df["open"].astype(float)
+            df["high"] = df["high"].astype(float)
+            df["low"] = df["low"].astype(float)
+            df = df.iloc[::-1].reset_index(drop=True)
+            
+            if len(df) < 16: return None
+            
+            current_candle = df.iloc[-1]
+            historical_15 = df.iloc[-16:-1] 
+            
+            max_high_15 = historical_15["high"].max()
+            min_low_15 = historical_15["low"].min()
+            
+            c_open = current_candle["open"]
+            c_close = current_candle["close"]
+            c_high = current_candle["high"]
+            c_low = current_candle["low"]
+            
+            if c_high > max_high_15 and c_close < c_open:
+                return {
+                    "signal": "🟢 MARKET BUY TRIGGER",
+                    "condition": f"VIX established new 15-Day High ({c_high:.2f}) but violently rejected and closed below open ({c_close:.2f} < {c_open:.2f}).",
+                    "vix_spot": c_close
+                }
+                
+            if c_low < min_low_15 and c_close > c_open:
+                return {
+                    "signal": "🔴 MARKET SELL TRIGGER",
+                    "condition": f"VIX established new 15-Day Low ({c_low:.2f}) but bounced and closed above open ({c_close:.2f} > {c_open:.2f}).",
+                    "vix_spot": c_close
+                }
+                
+            return None
+        except Exception as e:
+            logger.error(f"VIX CVR calculation failed: {e}")
+            return None
 
     def calculate_ohlcv_matrix(self, symbol="SPY", lookback=20):
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": str(lookback + 5)})
@@ -120,11 +160,9 @@ class HighFidelityAnalyticsEngine:
             upper_bound = spot + expected_move_dollars
             lower_bound = spot - expected_move_dollars
             
-            # Cache boundaries in DB
             self.db.update_state(f"{symbol}_expected_upper", upper_bound)
             self.db.update_state(f"{symbol}_expected_lower", lower_bound)
 
-            # EOD Tracking: Store directional prediction based on gap
             predicted_target = upper_bound if gap_pct > 0 else lower_bound
             today_str = datetime.now().strftime("%Y-%m-%d")
             self.db.update_state(f"market_prediction_{symbol}_{today_str}", predicted_target)
@@ -319,6 +357,89 @@ class HighFidelityAnalyticsEngine:
                 })
             except Exception as e: logger.error(f"Wheel scan failed for {symbol}: {e}")
         return candidates
+
+    def generate_dividend_wheel_candidates(self):
+        """
+        Executes an automated cash-secured put option screening for high-grade dividend-paying stocks.
+        Math aligns with target selection methodology:
+        Score = (1 - |Δ|) × (250 / (DTE + 5)) × (Premium / Strike)
+        """
+        dividend_universe = ["BAC", "KO", "PFE", "VZ", "CSCO", "T", "F", "WFC", "KMI", "MO", "BMY", "MDT"] 
+        candidates = []
+        
+        # Target constraints for ideal wheel deployment
+        target_dte_min = 15
+        target_dte_max = 45
+        
+        for symbol in dividend_universe:
+            try:
+                spot_data = self._execute_query("price", {"symbol": symbol})
+                if not spot_data or "price" not in spot_data: continue
+                spot = float(spot_data["price"])
+                if spot == 0: continue
+
+                chain = self._execute_query("options/chain", {"symbol": symbol})
+                if not chain or "data" not in chain: continue
+
+                df = pd.DataFrame(chain["data"])
+                if df.empty: continue
+                
+                df["expiration_date"] = pd.to_datetime(df["expiration_date"])
+                df["strike"] = df["strike"].astype(float)
+                
+                today = pd.Timestamp.today()
+                df["dte"] = (df["expiration_date"] - today).dt.days
+                
+                # Parse greeks with fallback handling to zero for specific tiers
+                df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
+                
+                if "delta" in df.columns:
+                    df["delta"] = pd.to_numeric(df["delta"], errors="coerce").fillna(0).abs()
+                else:
+                    # Proxy Delta via distance metric if API suppresses greek output
+                    df["delta"] = (spot - df["strike"]) / spot
+                    df["delta"] = df["delta"].clip(0.01, 0.99)
+                
+                if "bid" in df.columns and "ask" in df.columns:
+                    df["mid"] = (pd.to_numeric(df["bid"], errors="coerce") + pd.to_numeric(df["ask"], errors="coerce")) / 2
+                else:
+                    df["mid"] = df["strike"] * 0.015  # 1.5% premium fallback mechanism
+                
+                # Institutional filtering parameters
+                df_filtered = df[(df["type"] == "put") & 
+                                 (df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & 
+                                 (df["delta"] >= 0.15) & (df["delta"] <= 0.35) &
+                                 (df["open_interest"] >= 50)].copy()
+                
+                if df_filtered.empty: continue
+                
+                # Advanced Strategy Scoring Formula
+                df_filtered["score"] = (1 - df_filtered["delta"]) * (250 / (df_filtered["dte"] + 5)) * (df_filtered["mid"] / df_filtered["strike"])
+                
+                # Select the optimal contract layer
+                best_option = df_filtered.loc[df_filtered["score"].idxmax()]
+                annualized_roi = (best_option["mid"] / best_option["strike"]) * (365 / best_option["dte"]) * 100
+                
+                candidates.append({
+                    "symbol": symbol,
+                    "spot": spot,
+                    "strike": best_option["strike"],
+                    "dte": int(best_option["dte"]),
+                    "expiration": best_option["expiration_date"].strftime('%Y-%m-%d'),
+                    "premium": best_option["mid"],
+                    "delta": best_option["delta"],
+                    "iv": best_option["implied_volatility"] * 100,
+                    "oi": int(best_option["open_interest"]),
+                    "score": best_option["score"],
+                    "chance_of_profit": (1 - best_option["delta"]) * 100,
+                    "annualized_roi": annualized_roi
+                })
+            except Exception as e:
+                logger.error(f"Dividend Wheel scan failed for {symbol}: {e}")
+                
+        # Return top 3 highest-rated setups based on the scoring logic
+        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:3]
 
     def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "5min", "outputsize": str(lookback + 5)})

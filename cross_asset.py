@@ -68,7 +68,8 @@ def compute_market_profile_nodes(df):
 
 def run_intraday_futures_update():
     if not WEBHOOK_FUTURES: return
-    assets = {"SPY": "/ES Futures Proxy", "QQQ": "/NQ Futures Proxy"}
+    # Simplified labels per your request
+    assets = {"SPY": "/ES", "QQQ": "/NQ"}
     
     for sym, label in assets.items():
         df = fetch_profile_time_series(sym)
@@ -82,25 +83,28 @@ def run_intraday_futures_update():
         db.update_state(f"{sym}_poc", profile["poc"])
         db.update_state(f"{sym}_vwap", vwap)
         
+        # Reformatted posture text
         if spot > profile["vah"]:
-            posture = "🟢 OUTSIDE VALUE UP | Aggressive buyers in control."
+            posture = "Outside Value Up | Aggressive buyers in control."
         elif spot < profile["val"]:
-            posture = "🔴 OUTSIDE VALUE DOWN | Aggressive sellers routing positions."
+            posture = "Outside Value Down | Aggressive sellers routing positions."
         else:
-            posture = "⚖️ INSIDE VALUE REGIME | Mean-reversion trading dominant."
+            posture = "Inside Value Regime | Mean-reversion trading dominant."
             
         payload = (
-            f"📊 **Algorithmic Market Profile Terminal [{label}]**\n"
+            f"**{label}**\n"
             f"┣ **Current Spot Rate**: `${spot:,.2f}`\n"
-            f"┣ **Postural State Context**: {posture}\n\n"
-            f"🎯 **INSTITUTIONAL AUCTION STRUCTURE**:\n"
+            f"┣ **Posture**: {posture}\n\n"
+            f"🎯 **STRUCTURE**:\n"
             f"┣ 🔥 **Value Area High (VAH)**: `${profile['vah']:,.2f}`\n"
             f"┣ 🌟 **Point of Control (POC)**: `${profile['poc']:,.2f}`\n"
             f"┣ 📉 **Value Area Low (VAL)**: `${profile['val']:,.2f}`\n"
-            f"┗ 🪓 **Institutional VWAP**: `${vwap:,.2f}`\n\n"
-            f"💡 **Tactical Directive**: Core setups are highly optimal when fading value boundaries ({profile['val']:,.2f} - {profile['vah']:,.2f})."
+            f"┣ 🪓 **Institutional VWAP**: `${vwap:,.2f}`\n"
+            f"┗ 💡 **Tactical Directive**: Core setups are highly optimal when fading value boundaries ({profile['val']:,.2f} - {profile['vah']:,.2f})."
         )
-        send_essentials_embed(WEBHOOK_FUTURES, f"⚡ Intraday Profile Update: {sym}", payload, 0x3498db)
+        
+        # Removed the redundant text from the embed title
+        send_essentials_embed(WEBHOOK_FUTURES, "📊 Algorithmic Market Profile Terminal", payload, 0x3498db)
 
 if __name__ == "__main__":
     run_intraday_futures_update()
