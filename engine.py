@@ -4,13 +4,19 @@ import sys
 import json
 import requests
 from datetime import datetime
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # ECOSYSTEM ENVIRONMENT CONFIGURATION
 # ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 TWELVE_DATA_API_KEY = os.getenv('TWELVE_DATA_API_KEY', 'demo')
 WEBHOOK_MARKET_ANALYSIS = os.getenv('WEBHOOK_MARKET_ANALYSIS')
 WEBHOOK_FOREX = os.getenv('WEBHOOK_FOREX')
+WEBHOOK_TRADE_SIGNALS = os.getenv('WEBHOOK_TRADE_SIGNALS') # Mapped for Crypto
+WEBHOOK_FED = os.getenv('WEBHOOK_FED')                     # Mapped for TSP
 
 # Institutional Proxy Mapping for TSP Funds
 TSP_PROXIES = {
@@ -24,8 +30,8 @@ TSP_PROXIES = {
 # Forex / Global Macro Watchlist
 FOREX_WATCHLIST = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "XAU/USD", "DXY"]
 
-# Persistent State Management File Path (PythonAnywhere compatible)
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gatekeeper_state.json")
+# Persistent State Management File Path
+STATE_FILE = os.path.join(BASE_DIR, "gatekeeper_state.json")
 
 def load_gatekeeper_state():
     """Loads current strike status and tracking baselines across all sectors."""
@@ -97,9 +103,7 @@ def calculate_rsi_vector(prices, period=14):
 def evaluate_macro_momentum(prices):
     """
     Engineers institutional RSI & MACD logic directly into telemetry responses.
-    Returns structured signal indicators tailored for the retail psychological layer.
     """
-    # Reverse price matrix so oldest data is first, newest is last for rolling calculations
     rev_prices = prices[::-1]
     if len(rev_prices) < 35:
         return "N/A", "N/A", "⚪ Insufficient Telemetry Arrays"
@@ -135,12 +139,10 @@ def evaluate_macro_momentum(prices):
     prev_sig = signal_line[-2]
     
     macd_signal = "CONSOLIDATION ⚪"
-    # Trend Crossings
     if prev_macd < prev_sig and curr_macd >= curr_sig:
         macd_signal = "🟢 BULLISH MACD TRIGGER (Golden Cross)"
     elif prev_macd > prev_sig and curr_macd <= curr_sig:
         macd_signal = "🔴 BEARISH MACD TRIGGER (Death Cross)"
-    # Zero-Line Baselines
     elif curr_macd > 0 and curr_macd >= prev_macd:
         macd_signal = "🛡️ MACD BASELINE HOLD (Sustained Expansion)"
     elif curr_macd < 0 and curr_macd <= prev_macd:
@@ -152,42 +154,28 @@ def evaluate_macro_momentum(prices):
 # CORE QUANT MATH METRICS
 # ---------------------------------------------------------------------------
 def calculate_bb_rating(close, bb_upper, bb_middle, bb_lower):
-    """Translates raw pricing arrays into an authoritative -3 to +3 matrix."""
     if None in (close, bb_upper, bb_middle, bb_lower) or (bb_upper == bb_lower):
         return 0, "NEUTRAL ⚪"
     
-    if close > bb_upper:
-        rating = 3
-    elif close > bb_middle + ((bb_upper - bb_middle) / 2):
-        rating = 2
-    elif close > bb_middle:
-        rating = 1
-    elif close < bb_lower:
-        rating = -3
-    elif close < bb_middle - ((bb_middle - bb_lower) / 2):
-        rating = -2
-    elif close < bb_middle:
-        rating = -1
-    else:
-        rating = 0
+    if close > bb_upper: rating = 3
+    elif close > bb_middle + ((bb_upper - bb_middle) / 2): rating = 2
+    elif close > bb_middle: rating = 1
+    elif close < bb_lower: rating = -3
+    elif close < bb_middle - ((bb_middle - bb_lower) / 2): rating = -2
+    elif close < bb_middle: rating = -1
+    else: rating = 0
 
     signal = "NEUTRAL ⚪"
-    if rating >= 2:
-        signal = "BULLISH 🟢"
-    elif rating <= -2:
-        signal = "BEARISH 🔴"
+    if rating >= 2: signal = "BULLISH 🟢"
+    elif rating <= -2: signal = "BEARISH 🔴"
         
     return rating, signal
 
 def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, major_shift_pct=1.5):
-    """
-    Executes the 3-Strike Rule.
-    Returns True if we must broadcast a report; False if suppressed to prevent fatigue.
-    """
+    """Executes the 3-Strike Rule."""
     state = load_gatekeeper_state()
     
-    if market_type not in state:
-        state[market_type] = {}
+    if market_type not in state: state[market_type] = {}
     if asset_id not in state[market_type]:
         state[market_type][asset_id] = {"strike_count": 0, "last_price": 0.0, "last_rating": 0}
         
@@ -200,7 +188,6 @@ def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, ma
     if last_price > 0:
         price_delta = abs(((current_price - last_price) / last_price) * 100)
 
-    # Trigger 1: Trend Rating reversal or substantial mathematical deviation resets strikes
     if current_rating != last_rating or price_delta >= major_shift_pct:
         asset_state["strike_count"] = 1
         asset_state["last_price"] = current_price
@@ -208,14 +195,12 @@ def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, ma
         save_gatekeeper_state(state)
         return True
 
-    # Trigger 2: Under 3 strikes, advance count and broadcast
     if strike_count < 3:
         asset_state["strike_count"] += 1
         asset_state["last_price"] = current_price
         save_gatekeeper_state(state)
         return True
 
-    # Suppress output: Limit reached without structural shift
     return False
 
 # ---------------------------------------------------------------------------
@@ -233,13 +218,11 @@ def fetch_fear_greed_index():
     return 50, "Neutral"
 
 def fetch_twelve_data_metrics(ticker, interval="1h", outputsize=100):
-    """Bumps sampling size array depth out to 100 slots to parse RSI/MACD smoothers."""
     try:
         url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval={interval}&outputsize={outputsize}&apikey={TWELVE_DATA_API_KEY}"
         res = requests.get(url, timeout=12).json()
         
-        if "values" not in res or len(res["values"]) == 0:
-            return None
+        if "values" not in res or len(res["values"]) == 0: return None
             
         prices = [float(x['close']) for x in res['values']]
         highs = [float(x['high']) for x in res['values']]
@@ -264,7 +247,7 @@ def fetch_twelve_data_metrics(ticker, interval="1h", outputsize=100):
             "bb_lower": bb_lower,
             "max_drawdown": max_drawdown,
             "velocity": velocity,
-            "raw_history": prices # Retained for nested vector indicator tasks
+            "raw_history": prices 
         }
     except Exception as e:
         print(f"[-] Data fetch exception for {ticker}: {e}")
@@ -281,6 +264,8 @@ def send_discord_pulse(payload, webhook_url):
         r = requests.post(webhook_url, json=payload, timeout=10)
         if r.status_code not in (200, 204):
             print(f"[-] Discord API error: {r.status_code} - {r.text}")
+        else:
+            print("[+] Payload successfully delivered to Discord.")
     except Exception as e:
         print(f"[-] Failed to deliver discord webhook: {e}")
 
@@ -293,8 +278,7 @@ def process_crypto_sector():
         
     rating, signal = calculate_bb_rating(metrics["spot"], metrics["bb_upper"], metrics["sma20"], metrics["bb_lower"])
     
-    if not evaluate_gatekeeper("crypto", "BTC/USD", metrics["spot"], rating, major_shift_pct=2.0):
-        return
+    if not evaluate_gatekeeper("crypto", "BTC/USD", metrics["spot"], rating, major_shift_pct=2.0): return
         
     fng_val, fng_class = fetch_fear_greed_index()
     fng_emoji = "🟢" if fng_val > 55 else "🔴" if fng_val < 45 else "🟠"
@@ -320,7 +304,7 @@ def process_crypto_sector():
             "footer": {"text": f"Dynamic Gatekeeper: {state['crypto']['BTC/USD']['strike_count']}/3 strikes | Data Secured"}
         }]
     }
-    send_discord_pulse(payload, WEBHOOK_MARKET_ANALYSIS)
+    send_discord_pulse(payload, WEBHOOK_TRADE_SIGNALS)
 
 def process_tsp_sector():
     state = load_gatekeeper_state()
@@ -331,8 +315,7 @@ def process_tsp_sector():
             
         rating, signal = calculate_bb_rating(metrics["spot"], metrics["bb_upper"], metrics["sma20"], metrics["bb_lower"])
         
-        if not evaluate_gatekeeper("TSP", fund_id, metrics["spot"], rating, major_shift_pct=1.0):
-            continue
+        if not evaluate_gatekeeper("TSP", fund_id, metrics["spot"], rating, major_shift_pct=1.0): continue
             
         bbw = (metrics["bb_upper"] - metrics["bb_lower"]) / metrics["sma20"]
         bbw_status = "VOLATILITY SQUEEZE" if bbw < 0.02 else "EXPANDING STRENGTH"
@@ -357,7 +340,7 @@ def process_tsp_sector():
                 "footer": {"text": f"Gatekeeper: {state['TSP'][fund_id]['strike_count']}/3 strikes | Macro-Quant"}
             }]
         }
-        send_discord_pulse(payload, WEBHOOK_MARKET_ANALYSIS)
+        send_discord_pulse(payload, WEBHOOK_FED)
 
 def process_forex_macro_sector():
     print("[+] Compiling Global Macro & Forex Telemetry...")
@@ -365,14 +348,27 @@ def process_forex_macro_sector():
     dxy_metrics = fetch_twelve_data_metrics("DXY", interval="1day")
     dxy_velocity = dxy_metrics["velocity"] if dxy_metrics else 0.0
     
+    # --- MACRO GOLD MINE: Credit Risk Appetite (HYG vs TLT) ---
+    hyg_metrics = fetch_twelve_data_metrics("HYG", interval="1day")
+    tlt_metrics = fetch_twelve_data_metrics("TLT", interval="1day")
+    
+    credit_spread_alert = ""
+    if hyg_metrics and tlt_metrics:
+        hyg_vel = hyg_metrics["velocity"]
+        tlt_vel = tlt_metrics["velocity"]
+        if hyg_vel > tlt_vel + 0.5:
+            credit_spread_alert = f"🟢 **CREDIT EXPANSION:** HYG outperforming TLT (Spread: +{hyg_vel - tlt_vel:.2f}%). Institutional risk appetite is elevated.\n"
+        elif tlt_vel > hyg_vel + 0.5:
+            credit_spread_alert = f"🔴 **CREDIT CONTRACTION:** TLT outperforming HYG (Spread: -{tlt_vel - hyg_vel:.2f}%). Capital flight to safety detected.\n"
+    # -----------------------------------------------------------
+
     grid_metrics = {}
     for pair in FOREX_WATCHLIST:
         if pair == "DXY": continue
         metrics = fetch_twelve_data_metrics(pair, interval="1day")
-        if metrics:
-            grid_metrics[pair] = metrics
+        if metrics: grid_metrics[pair] = metrics
             
-    # Format the Discord Diff Block (Natively prints + in Green, - in Red)
+    # Format the Discord Diff Block
     diff_grid = "```diff\n"
     diff_grid += f"{'Pair':<10} | {'Price':<10} | {'Daily Change':<10}\n"
     diff_grid += "─────────────────────────────────────\n"
@@ -385,7 +381,6 @@ def process_forex_macro_sector():
             diff_grid += f"- {pair:<8} | {data['spot']:<10.4f} | {chg:.2f}%\n"
     diff_grid += "```"
 
-    # Core Momentum Engine Processing for Target Volatility Crosses (XAU/USD, EUR/USD)
     macro_directives = ""
     if "XAU/USD" in grid_metrics:
         xau_rsi, xau_rsi_sig, xau_macd_sig = evaluate_macro_momentum(grid_metrics["XAU/USD"]["raw_history"])
@@ -406,11 +401,12 @@ def process_forex_macro_sector():
         if jpy_velocity < -1.0:
             macro_alerts += f"⚠️ **CARRY TRADE RISK:** USD/JPY down {jpy_velocity:.2f}%. High probability of broad risk-off contagion as carry trades unwind.\n"
 
+    # Append the Gold Mine extraction to the alerts
+    macro_alerts += credit_spread_alert
+
     description = f"**1-Day Cross-Sectional Relative Performance**\n{diff_grid}"
-    if macro_directives:
-        description += f"**ALGORITHMIC MOMENTUM SIGNALS**\n{macro_directives}"
-    if macro_alerts:
-        description += f"**Macro Institutional Insights:**\n{macro_alerts}"
+    if macro_directives: description += f"**ALGORITHMIC MOMENTUM SIGNALS**\n{macro_directives}"
+    if macro_alerts: description += f"**Macro Institutional Insights:**\n{macro_alerts}"
 
     payload = {
         "embeds": [{
