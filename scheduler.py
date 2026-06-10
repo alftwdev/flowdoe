@@ -19,6 +19,7 @@ WEBHOOK_TSP = os.getenv("WEBHOOK_FED")
 WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS") or WEBHOOK_MARKET
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS") or WEBHOOK_MARKET
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
+WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") 
 WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS") or WEBHOOK_MARKET
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
@@ -114,25 +115,38 @@ def main():
                 "🏦 **Institutional Yield & Distribution Terminal**\n",
                 "📊 **EX-DIVIDEND & COVERED CALL YIELD MATRIX**"
             ]
+            composite_price = 0.0
             
             for ticker, est_div in income_universe:
                 data = engine._execute_query("price", {"symbol": ticker})
                 if data and "price" in data:
                     price = float(data["price"])
+                    composite_price += price
                     clean_yield = engine.calculate_clean_yield(ticker, est_div, price)
                     payload_lines.append(f"┣ **{ticker}**: `{clean_yield*100:.2f}%` Clean Yield | Spot: `${price:,.2f}`")
             
             payload_lines.append("┗ *System Filter: Structural capital distributions successfully separated from special payouts.*")
             
-            payload = "\n".join(payload_lines)
-            send_essentials_embed(WEBHOOK_INCOME, "💰 Yield Engine Analytics Pulse", payload, 0xf1c40f)
+            # Wrap Yield Pulse in Gatekeeper to stop 8:05/8:06 AM duplication issue
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            alert_id = "daily_income_yield_pulse"
+            
+            if engine.db.track_and_limit_alerts(
+                alert_id=alert_id,
+                current_state=f"YIELD_PULSE_{today_str}",
+                current_trigger=composite_price,
+                max_broadcasts=1,
+                threshold_pct=0.015 # Require structural matrix shift to broadcast twice in one day
+            ):
+                payload = "\n".join(payload_lines)
+                send_essentials_embed(WEBHOOK_INCOME, "💰 Yield Engine Analytics Pulse", payload, 0xf1c40f)
+            else:
+                logger.info("Yield Engine Pulse suppressed by Gatekeeper memory state.")
 
             # ADD ON: Dividend Wheel Strategy Synergy
             logger.info("Executing Dividend Wheel Options scan...")
             wheel_candidates = engine.generate_dividend_wheel_candidates()
             if wheel_candidates:
-                
-                # 3-Strike Gatekeeper Application to prevent notification fatigue
                 composite_trigger = sum([c['strike'] for c in wheel_candidates])
                 alert_id = "dividend_wheel_strategy_daily"
                 state_str = "_".join([f"{c['symbol']}{c['strike']}" for c in wheel_candidates])
@@ -155,7 +169,6 @@ def main():
                             f"┗ **Capital Efficiency**: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
                         )
                     
-                    # Dispatch to dual routing requirements
                     if WEBHOOK_INCOME:
                         send_essentials_embed(WEBHOOK_INCOME, "🎡 DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
                     if WEBHOOK_OPTIONS:

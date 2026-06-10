@@ -31,6 +31,7 @@ WEBHOOK_TRADE_SIGNALS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_MARKET_ANALYSIS = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 WEBHOOK_DIVIDEND_CCETFS = os.getenv("WEBHOOK_DIVIDEND_CCETFS")
 WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
+WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") # Explicit Crypto Allocation
 
 try:
     from essentials_tools import send_essentials_embed
@@ -172,7 +173,6 @@ class RealTimeTickAgent:
 
         if upper == 0 or lower == 0 or not target_webhook: return
 
-        # 3-Strike Gatekeeper for Ceiling Breach
         if price >= upper * (1.0 - precision_pct):
             alert_id = f"perimeter_breach_{symbol.upper()}_UPPER"
             state_str = "VOLATILITY_CEILING_COMPRESSION"
@@ -180,7 +180,6 @@ class RealTimeTickAgent:
                 payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Ceiling Compression reached."
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0xe74c3c)
 
-        # 3-Strike Gatekeeper for Floor Breach
         elif price <= lower * (1.0 + precision_pct):
             alert_id = f"perimeter_breach_{symbol.upper()}_LOWER"
             state_str = "VOLATILITY_FLOOR_COMPRESSION"
@@ -195,8 +194,9 @@ class RealTimeTickAgent:
             
         pct_change = (price - self.btc_window[0][1]) / self.btc_window[0][1]
         if abs(pct_change) >= 0.025:
-            if db.track_and_limit_alerts("BTC_USD_VOL_STREAM", "HOURLY_VELOCITY_BREACH", price, max_broadcasts=1, threshold_pct=0.015):
-                webhook = WEBHOOK_TRADE_SIGNALS or WEBHOOK_MARKET_ANALYSIS
+            # Shifted tolerance threshold from 1.5% to 3.0% buffer before DB lockout breaks
+            if db.track_and_limit_alerts("BTC_USD_VOL_STREAM", "HOURLY_VELOCITY_BREACH", price, max_broadcasts=1, threshold_pct=0.03):
+                webhook = WEBHOOK_CRYPTO or WEBHOOK_MARKET_ANALYSIS
                 if webhook and HAS_ESSENTIALS:
                     payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum."
                     send_essentials_embed(webhook, "⚡ Volatility Sentry Trigger", payload, 0xf39c12)

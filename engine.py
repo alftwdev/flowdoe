@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import os
 import sys
-import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+from database import EcosystemDatabase
 
 # ---------------------------------------------------------------------------
 # ECOSYSTEM ENVIRONMENT CONFIGURATION
@@ -15,8 +15,12 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 TWELVE_DATA_API_KEY = os.getenv('TWELVE_DATA_API_KEY', 'demo')
 WEBHOOK_MARKET_ANALYSIS = os.getenv('WEBHOOK_MARKET_ANALYSIS')
 WEBHOOK_FOREX = os.getenv('WEBHOOK_FOREX')
-WEBHOOK_TRADE_SIGNALS = os.getenv('WEBHOOK_TRADE_SIGNALS') # Mapped for Crypto
+WEBHOOK_TRADE_SIGNALS = os.getenv('WEBHOOK_TRADE_SIGNALS') 
+WEBHOOK_CRYPTO = os.getenv('WEBHOOK_CRYPTO')               # Mapped for Crypto
 WEBHOOK_FED = os.getenv('WEBHOOK_FED')                     # Mapped for TSP
+
+# Initialize Centralized Database Engine
+db = EcosystemDatabase()
 
 # Institutional Proxy Mapping for TSP Funds
 TSP_PROXIES = {
@@ -29,31 +33,6 @@ TSP_PROXIES = {
 
 # Forex / Global Macro Watchlist
 FOREX_WATCHLIST = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "XAU/USD", "DXY"]
-
-# Persistent State Management File Path
-STATE_FILE = os.path.join(BASE_DIR, "gatekeeper_state.json")
-
-def load_gatekeeper_state():
-    """Loads current strike status and tracking baselines across all sectors."""
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "crypto": {},
-        "TSP": {},
-        "forex": {}
-    }
-
-def save_gatekeeper_state(state):
-    """Persists current state definitions to prevent task-reset memory losses."""
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=4)
-    except Exception as e:
-        print(f"[-] Critical: Failed to persist gatekeeper state: {e}")
 
 # ---------------------------------------------------------------------------
 # ALGORITHMIC INDICATOR CALCULATIONS (NATIVE CORE MATH)
@@ -172,14 +151,10 @@ def calculate_bb_rating(close, bb_upper, bb_middle, bb_lower):
     return rating, signal
 
 def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, major_shift_pct=1.5):
-    """Executes the 3-Strike Rule."""
-    state = load_gatekeeper_state()
+    """Executes the 3-Strike Rule with Database Backend and Flutter Protection."""
+    state_key = f"gatekeeper_{market_type}_{asset_id}"
+    asset_state = db.get_state(state_key, {"strike_count": 0, "last_price": 0.0, "last_rating": 0})
     
-    if market_type not in state: state[market_type] = {}
-    if asset_id not in state[market_type]:
-        state[market_type][asset_id] = {"strike_count": 0, "last_price": 0.0, "last_rating": 0}
-        
-    asset_state = state[market_type][asset_id]
     last_price = asset_state.get("last_price", 0.0)
     last_rating = asset_state.get("last_rating", 0)
     strike_count = asset_state.get("strike_count", 0)
@@ -188,17 +163,20 @@ def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, ma
     if last_price > 0:
         price_delta = abs(((current_price - last_price) / last_price) * 100)
 
-    if current_rating != last_rating or price_delta >= major_shift_pct:
+    # Hardened fix: Require a major structural breakdown (delta >= 2) to reset
+    rating_delta = abs(current_rating - last_rating)
+
+    if rating_delta >= 2 or price_delta >= major_shift_pct:
         asset_state["strike_count"] = 1
         asset_state["last_price"] = current_price
         asset_state["last_rating"] = current_rating
-        save_gatekeeper_state(state)
+        db.update_state(state_key, asset_state)
         return True
 
     if strike_count < 3:
         asset_state["strike_count"] += 1
         asset_state["last_price"] = current_price
-        save_gatekeeper_state(state)
+        db.update_state(state_key, asset_state)
         return True
 
     return False
@@ -283,7 +261,9 @@ def process_crypto_sector():
     fng_val, fng_class = fetch_fear_greed_index()
     fng_emoji = "🟢" if fng_val > 55 else "🔴" if fng_val < 45 else "🟠"
     rsi_val, rsi_sig, macd_sig = evaluate_macro_momentum(metrics["raw_history"])
-    state = load_gatekeeper_state()
+    
+    # Retrieve current strike logic dynamically from DB to append to footer
+    strike_count = db.get_state("gatekeeper_crypto_BTC/USD", {}).get("strike_count", 1)
     
     payload = {
         "embeds": [{
@@ -301,13 +281,12 @@ def process_crypto_sector():
                 f"┗ MACD Regime Profile: {macd_sig}"
             ),
             "color": 3066993 if rating >= 0 else 15158332,
-            "footer": {"text": f"Dynamic Gatekeeper: {state['crypto']['BTC/USD']['strike_count']}/3 strikes | Data Secured"}
+            "footer": {"text": f"Dynamic Gatekeeper: {strike_count}/3 strikes | Data Secured"}
         }]
     }
-    send_discord_pulse(payload, WEBHOOK_TRADE_SIGNALS)
+    send_discord_pulse(payload, WEBHOOK_CRYPTO) # Properly routed to Crypto
 
 def process_tsp_sector():
-    state = load_gatekeeper_state()
     for fund_id, meta in TSP_PROXIES.items():
         ticker = meta["ticker"]
         metrics = fetch_twelve_data_metrics(ticker, interval="1h")
@@ -320,6 +299,8 @@ def process_tsp_sector():
         bbw = (metrics["bb_upper"] - metrics["bb_lower"]) / metrics["sma20"]
         bbw_status = "VOLATILITY SQUEEZE" if bbw < 0.02 else "EXPANDING STRENGTH"
         rsi_val, rsi_sig, macd_sig = evaluate_macro_momentum(metrics["raw_history"])
+        
+        strike_count = db.get_state(f"gatekeeper_TSP_{fund_id}", {}).get("strike_count", 1)
         
         payload = {
             "embeds": [{
@@ -337,7 +318,7 @@ def process_tsp_sector():
                     f"┗ MACD Regime Profile: {macd_sig}"
                 ),
                 "color": 3447003 if rating >= 0 else 16711680,
-                "footer": {"text": f"Gatekeeper: {state['TSP'][fund_id]['strike_count']}/3 strikes | Macro-Quant"}
+                "footer": {"text": f"Gatekeeper: {strike_count}/3 strikes | Macro-Quant"}
             }]
         }
         send_discord_pulse(payload, WEBHOOK_FED)
@@ -348,7 +329,6 @@ def process_forex_macro_sector():
     dxy_metrics = fetch_twelve_data_metrics("DXY", interval="1day")
     dxy_velocity = dxy_metrics["velocity"] if dxy_metrics else 0.0
     
-    # --- MACRO GOLD MINE: Credit Risk Appetite (HYG vs TLT) ---
     hyg_metrics = fetch_twelve_data_metrics("HYG", interval="1day")
     tlt_metrics = fetch_twelve_data_metrics("TLT", interval="1day")
     
@@ -360,7 +340,6 @@ def process_forex_macro_sector():
             credit_spread_alert = f"🟢 **CREDIT EXPANSION:** HYG outperforming TLT (Spread: +{hyg_vel - tlt_vel:.2f}%). Institutional risk appetite is elevated.\n"
         elif tlt_vel > hyg_vel + 0.5:
             credit_spread_alert = f"🔴 **CREDIT CONTRACTION:** TLT outperforming HYG (Spread: -{tlt_vel - hyg_vel:.2f}%). Capital flight to safety detected.\n"
-    # -----------------------------------------------------------
 
     grid_metrics = {}
     for pair in FOREX_WATCHLIST:
@@ -368,7 +347,6 @@ def process_forex_macro_sector():
         metrics = fetch_twelve_data_metrics(pair, interval="1day")
         if metrics: grid_metrics[pair] = metrics
             
-    # Format the Discord Diff Block
     diff_grid = "```diff\n"
     diff_grid += f"{'Pair':<10} | {'Price':<10} | {'Daily Change':<10}\n"
     diff_grid += "─────────────────────────────────────\n"
@@ -401,7 +379,6 @@ def process_forex_macro_sector():
         if jpy_velocity < -1.0:
             macro_alerts += f"⚠️ **CARRY TRADE RISK:** USD/JPY down {jpy_velocity:.2f}%. High probability of broad risk-off contagion as carry trades unwind.\n"
 
-    # Append the Gold Mine extraction to the alerts
     macro_alerts += credit_spread_alert
 
     description = f"**1-Day Cross-Sectional Relative Performance**\n{diff_grid}"
