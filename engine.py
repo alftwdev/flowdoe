@@ -269,8 +269,9 @@ def process_forex_macro_sector():
     for pair, data in grid_metrics.items():
         chg = data["velocity"]
         diff_grid += f"{'+ ' if chg > 0 else '- '}{pair:<8} | {data['spot']:<10.4f} | {chg:+.2f}%\n"
-    diff_grid += "
-```"
+    
+    # Properly closed string literal on the same line to avoid SyntaxError
+    diff_grid += "```"
 
     payload = {
         "embeds": [{
