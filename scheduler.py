@@ -36,15 +36,15 @@ def main():
         if args.mode == "macro":
             liq_payload = engine.generate_macro_liquidity_payload()
             if liq_payload and WEBHOOK_MARKET:
-                send_essentials_embed(WEBHOOK_MARKET, "🏦 Institutional Liquidity Radar", liq_payload, 0x3498db)
+                send_essentials_embed(WEBHOOK_MARKET, "Institutional Liquidity Radar", liq_payload, 0x3498db)
             
             fx_payload = engine.generate_forex_matrix_payload()
             if fx_payload and WEBHOOK_FOREX:
-                send_essentials_embed(WEBHOOK_FOREX, "💱 Forex Performance Grid", fx_payload, 0x34495e)
+                send_essentials_embed(WEBHOOK_FOREX, "Forex Performance Grid", fx_payload, 0x34495e)
             
             crypto_payload = engine.generate_crypto_matrix_payload()
-            if crypto_payload and WEBHOOK_OPTIONS:
-                send_essentials_embed(WEBHOOK_OPTIONS, "🪙 Crypto Sector Liquidity Tracker", crypto_payload, 0xf39c12)
+            if crypto_payload and WEBHOOK_CRYPTO:
+                send_essentials_embed(WEBHOOK_CRYPTO, "Crypto Sector Liquidity Tracker", crypto_payload, 0xf39c12)
                 
             logger.info("Macro matrix compilation and dispatch completed.")
 
@@ -52,14 +52,14 @@ def main():
             for ticker in ["SPY", "QQQ"]:
                 primer_payload = engine.generate_premarket_primer(ticker)
                 if primer_payload and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, f"🌅 STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
+                    send_essentials_embed(WEBHOOK_MARKET, f"STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
             logger.info("Morning primers successfully compiled and dispatched.")
 
         elif args.mode == "eod":
             for ticker in ["SPY", "QQQ"]:
                 eod_payload = engine.generate_eod_reconciliation(ticker)
                 if eod_payload and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, f"🏦 SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
+                    send_essentials_embed(WEBHOOK_MARKET, f"SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
             
             today_str = datetime.now().strftime("%Y-%m-%d")
             prediction_key = f"market_prediction_SPY_{today_str}"
@@ -75,18 +75,18 @@ def main():
                         accuracy_score = engine.calculate_accuracy_rating(predicted_target, actual_close)
                         
                         acc_payload = (
-                            f"🔮 **Quant Forecast Accuracy Index**\n"
-                            f"┣ **Session Date**: `{today_str}`\n"
-                            f"┣ **Model Predictive Accuracy**: `🎯 {accuracy_score}%`\n\n"
-                            f"📊 **Session Performance Breakdown**:\n"
-                            f"┣ **Algorithmic Target Projected**: `${predicted_target:,.2f}`\n"
-                            f"┣ **Institutional Closing Print**: `${actual_close:,.2f}`\n"
-                            f"┗ **Net Variance Delta**: `${abs(actual_close - predicted_target):,.2f}`\n\n"
+                            f"Quant Forecast Accuracy Index\n"
+                            f"┣ Session Date: `{today_str}`\n"
+                            f"┣ Model Predictive Accuracy: `{accuracy_score}%`\n\n"
+                            f"Session Performance Breakdown:\n"
+                            f"┣ Algorithmic Target Projected: `${predicted_target:,.2f}`\n"
+                            f"┣ Institutional Closing Print: `${actual_close:,.2f}`\n"
+                            f"┗ Net Variance Delta: `${abs(actual_close - predicted_target):,.2f}`\n\n"
                             f"*Ecosystem Performance Verification: Session calculation finalized and archived.*"
                         )
                         
                         if WEBHOOK_ANNOUNCEMENTS:
-                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "🔮 SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
+                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
                     else:
                         logger.warning("EOD Accuracy: Failed to fetch final closing price from Twelve Data.")
                 except Exception as e:
@@ -95,26 +95,26 @@ def main():
             vix_signal = engine.evaluate_vix_cvr_reversal()
             if vix_signal and WEBHOOK_MARKET:
                 v_payload = (
-                    f"🚨 **Larry Connors CVR VIX Reversal Signal**\n\n"
-                    f"┣ **Action**: `{vix_signal['signal']}`\n"
-                    f"┣ **VIX Spot**: `{vix_signal['vix_spot']:.2f}`\n"
-                    f"┗ **Technical Confirmation**: {vix_signal['condition']}\n\n"
-                    f"💡 *Context: This is an institutional-grade counter-trend indicator. Capitalize on the volatility contraction/expansion.*"
+                    f"Larry Connors CVR VIX Reversal Signal\n\n"
+                    f"┣ Action: `{vix_signal['signal']}`\n"
+                    f"┣ VIX Spot: `{vix_signal['vix_spot']:.2f}`\n"
+                    f"┗ Technical Confirmation: {vix_signal['condition']}\n\n"
+                    f"Context: This is an institutional-grade counter-trend indicator. Capitalize on the volatility contraction/expansion."
                 )
                 color_code = 0xe74c3c if "SELL" in vix_signal['signal'] else 0x2ecc71
-                send_essentials_embed(WEBHOOK_MARKET, "🦅 VIX TACTICAL REVERSAL", v_payload, color_code)
+                send_essentials_embed(WEBHOOK_MARKET, "VIX TACTICAL REVERSAL", v_payload, color_code)
 
             logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
         elif args.mode == "tsp":
             tsp_payload = engine.compile_tsp_allocation_matrix()
-            send_essentials_embed(WEBHOOK_TSP, "🦅 Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
+            send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
 
         elif args.mode == "income":
             income_universe = [("SCHD", 0.72), ("JEPQ", 0.42), ("JEPI", 0.35), ("DIVO", 0.14)]
             payload_lines = [
-                "🏦 **Institutional Yield & Distribution Terminal**\n",
-                "📊 **EX-DIVIDEND & COVERED CALL YIELD MATRIX**"
+                "Institutional Yield & Distribution Terminal\n",
+                "EX-DIVIDEND & COVERED CALL YIELD MATRIX"
             ]
             composite_price = 0.0
             
@@ -124,11 +124,10 @@ def main():
                     price = float(data["price"])
                     composite_price += price
                     clean_yield = engine.calculate_clean_yield(ticker, est_div, price)
-                    payload_lines.append(f"┣ **{ticker}**: `{clean_yield*100:.2f}%` Clean Yield | Spot: `${price:,.2f}`")
+                    payload_lines.append(f"┣ {ticker}: `{clean_yield*100:.2f}%` Clean Yield | Spot: `${price:,.2f}`")
             
             payload_lines.append("┗ *System Filter: Structural capital distributions successfully separated from special payouts.*")
             
-            # Wrap Yield Pulse in Gatekeeper to stop 8:05/8:06 AM duplication issue
             today_str = datetime.now().strftime("%Y-%m-%d")
             alert_id = "daily_income_yield_pulse"
             
@@ -137,14 +136,13 @@ def main():
                 current_state=f"YIELD_PULSE_{today_str}",
                 current_trigger=composite_price,
                 max_broadcasts=1,
-                threshold_pct=0.015 # Require structural matrix shift to broadcast twice in one day
+                threshold_pct=0.015
             ):
                 payload = "\n".join(payload_lines)
-                send_essentials_embed(WEBHOOK_INCOME, "💰 Yield Engine Analytics Pulse", payload, 0xf1c40f)
+                send_essentials_embed(WEBHOOK_INCOME, "Yield Engine Analytics Pulse", payload, 0xf1c40f)
             else:
                 logger.info("Yield Engine Pulse suppressed by Gatekeeper memory state.")
 
-            # ADD ON: Dividend Wheel Strategy Synergy
             logger.info("Executing Dividend Wheel Options scan...")
             wheel_candidates = engine.generate_dividend_wheel_candidates()
             if wheel_candidates:
@@ -159,37 +157,37 @@ def main():
                     max_broadcasts=2,
                     threshold_pct=0.01
                 ):
-                    wheel_payload = "### **⚙️ Dividend & Wheel Strategy Synergy**\n*Accelerating Cash Flow via Cash-Secured Puts on Quality Dividend Payers.*\n\n"
+                    wheel_payload = "### Dividend & Wheel Strategy Synergy\n*Accelerating Cash Flow via Cash-Secured Puts on Quality Dividend Payers.*\n\n"
                     for c in wheel_candidates:
                         wheel_payload += (
                             f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
-                            f"┣ **Optimal Setup**: `STO ${c['strike']:.1f} Put` ({c['expiration']}, {c['dte']} DTE)\n"
-                            f"┣ **Premium Collected**: `${c['premium']*100:.0f}` per contract\n"
-                            f"┣ **Probability of Profit**: `{c['chance_of_profit']:.1f}%` (Delta: {c['delta']:.2f})\n"
-                            f"┣ **Implied Volatility**: `{c['iv']:.1f}%` | **Open Interest**: `{c['oi']:,}`\n"
-                            f"┗ **Capital Efficiency**: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
+                            f"┣ Optimal Setup: `STO ${c['strike']:.1f} Put` ({c['expiration']}, {c['dte']} DTE)\n"
+                            f"┣ Premium Collected: `${c['premium']*100:.0f}` per contract\n"
+                            f"┣ Probability of Profit: `{c['chance_of_profit']:.1f}%` (Delta: {c['delta']:.2f})\n"
+                            f"┣ Implied Volatility: `{c['iv']:.1f}%` | Open Interest: `{c['oi']:,}`\n"
+                            f"┗ Capital Efficiency: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
                         )
                     
                     if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, "🎡 DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                        send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
                     if WEBHOOK_OPTIONS:
-                        send_essentials_embed(WEBHOOK_OPTIONS, "🎡 DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                        send_essentials_embed(WEBHOOK_OPTIONS, "DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
                 else:
                     logger.info("Dividend Wheel Strategy blocked by Ecosystem Gatekeeper (State Unchanged).")
 
         elif args.mode == "iv_crush":
             scan_data = engine.run_iv_crush_scan()
             if not scan_data: return
-            payload = "💥 **Systemic IV Overpricing & Volatility Crush Report**\n\n"
+            payload = "Systemic IV Overpricing & Volatility Crush Report\n\n"
             for asset in scan_data:
                 payload += (
                     f"**Asset**: `{asset['symbol']}`\n"
                     f"┣ Trailing 30D Historical Volatility: `{asset['hv']}%`\n"
                     f"┣ Front-Month Implied Volatility (IV): `{asset['iv']}%`\n"
-                    f"┗ 🔥 **Premium Edge Spread**: `{asset['spread']:+.1f}%` Vol Variance\n"
-                    f"💡 *Tactical Action: Selling credit strategies or iron condors here carries maximized statistical advantages due to current premium inflation.*\n\n"
+                    f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` Vol Variance\n"
+                    f"Context: Selling credit strategies or iron condors here carries maximized statistical advantages due to current premium inflation.\n\n"
                 )
-            send_essentials_embed(WEBHOOK_OPTIONS, "📉 VOLATILITY ARBITRAGE TERMINAL: IV Crush Scanner", payload, 0x9b59b6)
+            send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL: IV Crush Scanner", payload, 0x9b59b6)
 
         elif args.mode == "gex":
             gex_data = engine.calculate_gex_profile("SPY")
@@ -198,13 +196,13 @@ def main():
                 return 
                 
             payload = (
-                f"🧬 **Automated Market Maker Positioning Map (SPY)**\n\n"
-                f"┣ **Current Spot Price**: `${gex_data['current_spot']:.2f}`\n"
-                f"┣ 🎯 **Systemic Gamma Flip Line**: `${gex_data['flip_strike']:.2f}`\n"
-                f"┗ **Structural Posture Context**: {gex_data['market_state']}\n\n"
-                f"⚠️ *Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms.*"
+                f"Automated Market Maker Positioning Map (SPY)\n\n"
+                f"┣ Current Spot Price: `${gex_data['current_spot']:.2f}`\n"
+                f"┣ Systemic Gamma Flip Line: `${gex_data['flip_strike']:.2f}`\n"
+                f"┗ Structural Posture Context: {gex_data['market_state']}\n\n"
+                f"Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms."
             )
-            send_essentials_embed(WEBHOOK_MARKET, "🎛️ COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, 0xe67e22)
+            send_essentials_embed(WEBHOOK_MARKET, "COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, 0xe67e22)
 
         elif args.mode == "post_market":
             watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "META", "GOOGL", "AMZN"]
@@ -222,14 +220,14 @@ def main():
                         if rth_close > 0:
                             pct_change = ((ah_price - rth_close) / rth_close) * 100
                             if abs(pct_change) >= 2.0:
-                                direction = "🚀 BULLISH SURGE" if pct_change > 0 else "🩸 BEARISH DUMP"
-                                triggered_assets.append(f"┣ **{sym}**: `{pct_change:+.2f}%` | AH Spot: `${ah_price:,.2f}` | {direction}")
+                                direction = "BULLISH SURGE" if pct_change > 0 else "BEARISH DUMP"
+                                triggered_assets.append(f"┣ {sym}: `{pct_change:+.2f}%` | AH Spot: `${ah_price:,.2f}` | {direction}")
                 except Exception as e:
                     logger.error(f"Post-Market fetch failed for {sym}: {e}")
 
             if triggered_assets:
-                payload = "**Institutional Extended-Hours Liquidity Sweep**\n\n" + "\n".join(triggered_assets) + "\n\n💡 *Context: Abnormal post-market volatility usually signals an earnings release or breaking structural news.*"
-                send_essentials_embed(WEBHOOK_MARKET, "🌙 POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0x8e44ad)
+                payload = "Institutional Extended-Hours Liquidity Sweep\n\n" + "\n".join(triggered_assets) + "\n\nContext: Abnormal post-market volatility usually signals an earnings release or breaking structural news."
+                send_essentials_embed(WEBHOOK_MARKET, "POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0x8e44ad)
 
         elif args.mode == "darkpool":
             broad_universe = "SPY,QQQ,IWM,AAPL,NVDA,MSFT,META,TSLA,AMD,AMZN,NFLX,BA,DIS,JPM,V,WMT,COST,AVGO,SMCI,COIN"
@@ -261,15 +259,15 @@ def main():
                     max_broadcasts=2, threshold_pct=0.002 
                 ):
                     payload = (
-                        f"🐋 **Institutional Footprint: Block Trade Proxy Detected**\n"
-                        f"┣ **Asset**: `{sym}` | Spot Execution: `${block_data['spot']:,.2f}`\n"
-                        f"┣ **Abnormal Candle Volume**: `{int(block_data['current_vol']):,}` shares\n"
-                        f"┣ **Trailing Benchmark Average**: `{int(block_data['baseline_vol']):,}` shares\n"
-                        f"┗ **Volume Multiplier Velocity**: `{block_data['rvol']:.1f}x` spike above baseline\n\n"
-                        f"**Ecosystem Context**: A hidden institutional transaction or dark pool order allocation has just cleared.\n"
-                        f"**VWAP Positioning**: {block_data['direction']} (VWAP: `${block_data['vwap']:,.2f}`)"
+                        f"Institutional Footprint: Block Trade Proxy Detected\n"
+                        f"┣ Asset: `{sym}` | Spot Execution: `${block_data['spot']:,.2f}`\n"
+                        f"┣ Abnormal Candle Volume: `{int(block_data['current_vol']):,}` shares\n"
+                        f"┣ Trailing Benchmark Average: `{int(block_data['baseline_vol']):,}` shares\n"
+                        f"┗ Volume Multiplier Velocity: `{block_data['rvol']:.1f}x` spike above baseline\n\n"
+                        f"Ecosystem Context: A hidden institutional transaction or dark pool order allocation has just cleared.\n"
+                        f"VWAP Positioning: {block_data['direction']} (VWAP: `${block_data['vwap']:,.2f}`)"
                     )
-                    send_essentials_embed(WEBHOOK_OPTIONS, f"🌊 DARK POOL RADAR: {sym}", payload, 0x9b59b6)
+                    send_essentials_embed(WEBHOOK_OPTIONS, f"DARK POOL RADAR: {sym}", payload, 0x9b59b6)
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

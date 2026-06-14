@@ -64,16 +64,16 @@ def calculate_rsi_vector(prices, period=14):
 
 def evaluate_macro_momentum(prices):
     rev_prices = prices[::-1]
-    if len(rev_prices) < 35: return "N/A", "N/A", "⚪ Insufficient Telemetry Arrays"
+    if len(rev_prices) < 35: return "N/A", "N/A", "Insufficient Telemetry Arrays"
 
     rsi_series = calculate_rsi_vector(rev_prices, period=14)
     current_rsi, prev_rsi = rsi_series[-1], rsi_series[-2]
     
-    rsi_signal = "NEUTRAL ⚡"
-    if prev_rsi < 30 and current_rsi >= 30: rsi_signal = "🟢 BULLISH CROSSOVER"
-    elif prev_rsi > 70 and current_rsi <= 70: rsi_signal = "🔴 BEARISH CROSSOVER"
-    elif prev_rsi < 50 and current_rsi >= 50: rsi_signal = "🚀 MIDLINE ACCELERATION"
-    elif prev_rsi > 50 and current_rsi <= 50: rsi_signal = "⚠️ MIDLINE BREAKDOWN"
+    rsi_signal = "NEUTRAL"
+    if prev_rsi < 30 and current_rsi >= 30: rsi_signal = "BULLISH CROSSOVER"
+    elif prev_rsi > 70 and current_rsi <= 70: rsi_signal = "BEARISH CROSSOVER"
+    elif prev_rsi < 50 and current_rsi >= 50: rsi_signal = "MIDLINE ACCELERATION"
+    elif prev_rsi > 50 and current_rsi <= 50: rsi_signal = "MIDLINE BREAKDOWN"
 
     ema12, ema26 = calculate_ema(rev_prices, 12), calculate_ema(rev_prices, 26)
     macd_line = [e12 - e26 for e12, e26 in zip(ema12, ema26)]
@@ -82,19 +82,19 @@ def evaluate_macro_momentum(prices):
     curr_macd, prev_macd = macd_line[-1], macd_line[-2]
     curr_sig, prev_sig = signal_line[-1], signal_line[-2]
     
-    macd_signal = "CONSOLIDATION ⚪"
-    if prev_macd < prev_sig and curr_macd >= curr_sig: macd_signal = "🟢 BULLISH TRIGGER"
-    elif prev_macd > prev_sig and curr_macd <= curr_sig: macd_signal = "🔴 BEARISH TRIGGER"
-    elif curr_macd > 0 and curr_macd >= prev_macd: macd_signal = "🛡️ BASELINE HOLD"
-    elif curr_macd < 0 and curr_macd <= prev_macd: macd_signal = "📉 BASELINE REJECTION"
+    macd_signal = "CONSOLIDATION"
+    if prev_macd < prev_sig and curr_macd >= curr_sig: macd_signal = "BULLISH TRIGGER"
+    elif prev_macd > prev_sig and curr_macd <= curr_sig: macd_signal = "BEARISH TRIGGER"
+    elif curr_macd > 0 and curr_macd >= prev_macd: macd_signal = "BASELINE HOLD"
+    elif curr_macd < 0 and curr_macd <= prev_macd: macd_signal = "BASELINE REJECTION"
 
     return f"{current_rsi:.2f}", rsi_signal, macd_signal
 
 # ---------------------------------------------------------------------------
-# TRUE 3-STRIKE DYNAMIC GATEKEEPER 
+# DYNAMIC GATEKEEPER INTEGRATION
 # ---------------------------------------------------------------------------
 def calculate_bb_rating(close, bb_upper, bb_middle, bb_lower):
-    if None in (close, bb_upper, bb_middle, bb_lower) or (bb_upper == bb_lower): return 0, "NEUTRAL ⚪"
+    if None in (close, bb_upper, bb_middle, bb_lower) or (bb_upper == bb_lower): return 0, "NEUTRAL"
     if close > bb_upper: rating = 3
     elif close > bb_middle + ((bb_upper - bb_middle) / 2): rating = 2
     elif close > bb_middle: rating = 1
@@ -103,13 +103,12 @@ def calculate_bb_rating(close, bb_upper, bb_middle, bb_lower):
     elif close < bb_middle: rating = -1
     else: rating = 0
 
-    signal = "NEUTRAL ⚪"
-    if rating >= 2: signal = "BULLISH 🟢"
-    elif rating <= -2: signal = "BEARISH 🔴"
+    signal = "NEUTRAL"
+    if rating >= 2: signal = "BULLISH"
+    elif rating <= -2: signal = "BEARISH"
     return rating, signal
 
 def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, major_shift_pct=1.5):
-    """Prop Firm Grade Gatekeeper: 1 Setup -> 2 Reminders -> Silence."""
     state_key = f"gatekeeper_{market_type}_{asset_id}"
     asset_state = db.get_state(state_key, {"strike_count": 0, "last_price": current_price, "last_rating": current_rating})
     
@@ -120,7 +119,6 @@ def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, ma
     price_delta = abs(((current_price - last_price) / last_price) * 100) if last_price > 0 else 0.0
     rating_delta = abs(current_rating - last_rating)
 
-    # 1. Math shifts significantly -> Counter resets
     if rating_delta >= 2 or price_delta >= major_shift_pct or strike_count == 0:
         asset_state["strike_count"] = 1
         asset_state["last_price"] = current_price
@@ -128,13 +126,11 @@ def evaluate_gatekeeper(market_type, asset_id, current_price, current_rating, ma
         db.update_state(state_key, asset_state)
         return True, "Pulse Broadcast (New Signal)"
 
-    # 2. Remind the room up to two more times
     if strike_count < 3:
         asset_state["strike_count"] += 1
         db.update_state(state_key, asset_state)
         return True, f"Pulse Reminder ({asset_state['strike_count']}/3)"
 
-    # 3. Go completely silent
     return False, "Silent"
 
 # ---------------------------------------------------------------------------
@@ -177,7 +173,7 @@ def send_discord_pulse(payload, webhook_url):
     except: pass
 
 # ---------------------------------------------------------------------------
-# CORE PRODUCTION PIPELINES (PULSE REPORTS)
+# PRODUCTION PIPELINES
 # ---------------------------------------------------------------------------
 def process_crypto_sector():
     metrics = fetch_twelve_data_metrics("BTC/USD", interval="1h")
@@ -189,16 +185,15 @@ def process_crypto_sector():
     if not broadcast: return
         
     fng_val, fng_class = fetch_fear_greed_index()
-    fng_emoji = "🟢" if fng_val > 55 else "🔴" if fng_val < 45 else "🟠"
     rsi_val, rsi_sig, macd_sig = evaluate_macro_momentum(metrics["raw_history"])
     
     payload = {
         "embeds": [{
-            "title": "⚡ CRYPTO SECTOR PULSE REPORT: [BTC/USD]",
+            "title": "ESSENTIALS QUANT RADAR: [BTC/USD]",
             "description": (
-                f"**Status:** {signal} [BB Rating: {rating:^+}] \n"
-                f"**Sentiment:** {fng_emoji} {fng_val} ({fng_class})\n\n"
-                f"**QUANT METRICS [1H FRAME]**\n"
+                f"Status: {signal} [BB Rating: {rating:^+}] \n"
+                f"Sentiment: {fng_val} ({fng_class})\n\n"
+                f"QUANT METRICS [1H FRAME]\n"
                 f"┣ Spot Rate: ${metrics['spot']:,.2f}\n"
                 f"┣ SMA20 Baseline: ${metrics['sma20']:,.2f}\n"
                 f"┗ Velocity Vector: {metrics['velocity']:+.2f}%\n\n"
@@ -227,11 +222,11 @@ def process_tsp_sector():
         
         payload = {
             "embeds": [{
-                "title": f"🏛️ TSP DYNAMIC PULSE: {meta['name']}",
+                "title": f"ESSENTIALS MACRO PULSE: {meta['name']}",
                 "description": (
-                    f"**Structural Bias:** {signal} [Rating: {rating:^+}]\n"
-                    f"**Trading Status:** Real-Time Venture Proxy (`{meta['ticker']}`)\n\n"
-                    f"**MACRO ANALYSIS EXPOSURE**\n"
+                    f"Structural Bias: {signal} [Rating: {rating:^+}]\n"
+                    f"Trading Status: Real-Time Venture Proxy ({meta['ticker']})\n\n"
+                    f"MACRO ANALYSIS EXPOSURE\n"
                     f"┣ Spot Execution: ${metrics['spot']:,.2f}\n"
                     f"┣ Bollinger Width: {bbw:.4f} \n"
                     f"┗ Tactical Velocity: {metrics['velocity']:+.2f}%\n\n"
@@ -254,7 +249,6 @@ def process_forex_macro_sector():
             grid_metrics[pair] = metrics
             composite_velocity += abs(metrics["velocity"])
 
-    # Apply Gatekeeper to Macro Pulse to stop 5-minute spam
     state_key = "gatekeeper_macro_forex"
     asset_state = db.get_state(state_key, {"strike_count": 0, "last_velocity": composite_velocity})
     last_vel = asset_state.get("last_velocity", composite_velocity)
@@ -269,7 +263,7 @@ def process_forex_macro_sector():
         asset_state["strike_count"] += 1
         db.update_state(state_key, asset_state)
         status_text = f"Pulse Reminder ({asset_state['strike_count']}/3)"
-    else: return # Silent
+    else: return
 
     diff_grid = "```diff\nPair       | Price      | Daily Change\n──────────────────────────────────────\n"
     for pair, data in grid_metrics.items():
@@ -280,8 +274,8 @@ def process_forex_macro_sector():
 
     payload = {
         "embeds": [{
-            "title": "🌐 GLOBAL MACRO & FOREX PULSE",
-            "description": f"**1-Day Relative Performance**\n{diff_grid}",
+            "title": "GLOBAL MACRO & FOREX PULSE",
+            "description": f"1-Day Relative Performance\n{diff_grid}",
             "color": 16766720,
             "footer": {"text": f"Dynamic Gatekeeper: {status_text} | Telemetry Sync: {datetime.utcnow().strftime('%H:%M:%S')} UTC"}
         }]
@@ -300,5 +294,4 @@ if __name__ == "__main__":
             try: func()
             except Exception as e: print(f"[-] Runtime failure: {e}")
             
-        # Sleep for 15 minutes. Gatekeeper manages notification state across loops.
         time.sleep(900)

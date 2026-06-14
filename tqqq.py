@@ -116,17 +116,17 @@ class TQQQTacticalSniper:
 
     def dispatch_intelligence(self, setup):
         embed_desc = (
-            f"### **🛡️ Primary Play: Tactical Structure**\n"
+            f"### Primary Play: Tactical Structure\n"
             f"┣ **Setup**: `{setup['strategy']} ({setup['action']})`\n"
             f"┣ **TQQQ Spot**: `${setup['tqqq_spot']:.2f}` | **DTE**: {setup['target_dte']} Days\n"
             f"┣ **Short Strike (Sell)**: `${setup['short_strike']}`\n"
             f"┗ **Long Strike (Buy)**: `${setup['long_strike']}`\n\n"
-            f"### **⚡ Frictionless Alternative: Velocity Direction**\n"
+            f"### Frictionless Alternative: Velocity Direction\n"
             f"┣ **Setup**: `{setup['alternative_strategy']}` (No multi-leg complexity)\n"
             f"┗ **Target Execution Strike**: `${setup['alternative_strike']}`\n"
         )
         if HAS_ESSENTIALS and WEBHOOK_TRADE_SIGNALS:
-            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "🎯 TQQQ SYSTEMIC OPTIONS SNIPER", embed_desc, 0xe67e22)
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ SYSTEMIC OPTIONS SNIPER", embed_desc, 0xe67e22)
 
 if __name__ == "__main__":
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
@@ -136,5 +136,4 @@ if __name__ == "__main__":
             sniper.execute_sniper_sweep()
         except Exception as e:
             logger.error(f"Daemon error: {e}")
-        # Sleep 15 minutes. Prevents PythonAnywhere from immediately restarting the file.
         time.sleep(900)
