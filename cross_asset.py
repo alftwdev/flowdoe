@@ -3,7 +3,6 @@ import logging
 import requests
 import pandas as pd
 from dotenv import load_dotenv
-from essentials_tools import send_essentials_embed
 from database import EcosystemDatabase
 
 logger = logging.getLogger("Market_Profile_Matrix")
@@ -68,7 +67,6 @@ def compute_market_profile_nodes(df):
 
 def run_intraday_futures_update():
     if not WEBHOOK_FUTURES: return
-    # Simplified labels per your request
     assets = {"SPY": "/ES", "QQQ": "/NQ"}
     
     for sym, label in assets.items():
@@ -83,7 +81,6 @@ def run_intraday_futures_update():
         db.update_state(f"{sym}_poc", profile["poc"])
         db.update_state(f"{sym}_vwap", vwap)
         
-        # Reformatted posture text
         if spot > profile["vah"]:
             posture = "Outside Value Up | Aggressive buyers in control."
         elif spot < profile["val"]:
@@ -92,19 +89,27 @@ def run_intraday_futures_update():
             posture = "Inside Value Regime | Mean-reversion trading dominant."
             
         payload = (
-            f"**{label}**\n"
-            f"┣ **Current Spot Rate**: `${spot:,.2f}`\n"
-            f"┣ **Posture**: {posture}\n\n"
-            f"🎯 **STRUCTURE**:\n"
-            f"┣ 🔥 **Value Area High (VAH)**: `${profile['vah']:,.2f}`\n"
-            f"┣ 🌟 **Point of Control (POC)**: `${profile['poc']:,.2f}`\n"
-            f"┣ 📉 **Value Area Low (VAL)**: `${profile['val']:,.2f}`\n"
-            f"┣ 🪓 **Institutional VWAP**: `${vwap:,.2f}`\n"
-            f"┗ 💡 **Tactical Directive**: Core setups are highly optimal when fading value boundaries ({profile['val']:,.2f} - {profile['vah']:,.2f})."
+            f"⚡ ALGORITHMIC MARKET PROFILE TERMINAL | {label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Market Metrics:\n"
+            f"┣ Current Spot Rate:  ${spot:,.2f}\n"
+            f"┗ Current Posture:    {posture}\n\n"
+            f"🌐 Profile Structure:\n"
+            f"┣ Value Area High (VAH):    ${profile['vah']:,.2f}\n"
+            f"┣ Point of Control (POC):   ${profile['poc']:,.2f}\n"
+            f"┗ Value Area Low (VAL):     ${profile['val']:,.2f}\n\n"
+            f"🐳 Quantum Flow:\n"
+            f"┗ Institutional VWAP:       ${vwap:,.2f}\n\n"
+            f"🎯 Tactical Directive:\n"
+            f"┗ Core setups are highly optimal when fading value boundaries ({profile['val']:,.2f} - {profile['vah']:,.2f}).\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ ESSENTIALS Macro-Quant Architecture | Data Secured"
         )
         
-        # Removed the redundant text from the embed title
-        send_essentials_embed(WEBHOOK_FUTURES, "📊 Algorithmic Market Profile Terminal", payload, 0x3498db)
+        try:
+            requests.post(WEBHOOK_FUTURES, json={"content": payload}, timeout=10)
+        except Exception as e:
+            logger.error(f"Broadcast failure: {e}")
 
 if __name__ == "__main__":
     run_intraday_futures_update()
