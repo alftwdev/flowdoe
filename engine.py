@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import requests
+import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 from database import EcosystemDatabase
@@ -62,7 +63,7 @@ def dispatch_webhook(channel, payload_text):
     return False
 
 def fetch_market_telemetry():
-    """Data Aggregator Anchor (Replace mock loops with direct streams)"""
+    """Data Aggregator Anchor"""
     return {
         "liquidity": {"index": "7.42T", "momentum": "+1.4%", "sofr": "0.012%"},
         "forex_pairs": [
@@ -205,40 +206,71 @@ def build_gex_pulse(data, tickers, status_text):
     return pulse
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="ESSENTIALS Multi-Asset Quant Engine")
-    parser.add_argument("--mode", required=True, choices=["forex", "crypto", "tsp_daily", "tsp_weekly", "gex"])
+    
+    # Required=False allows the script to survive in the Always-On tab.
+    parser.add_argument("--mode", required=False, default="daemon", 
+                        choices=["forex", "crypto", "tsp_daily", "tsp_weekly", "gex", "daemon"])
     args = parser.parse_args()
     
-    data = fetch_market_telemetry()
-    
-    if args.mode == "forex":
-        current_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
-        should_send, status = evaluate_gatekeeper("forex", current_metric, major_threshold=0.5)
-        if should_send:
-            dispatch_webhook("forex", build_forex_pulse(data, status))
+    if args.mode == "daemon":
+        print(f"[+] Launching Ecosystem Pulse Daemon: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        while True:
+            data = fetch_market_telemetry()
             
-    elif args.mode == "crypto":
-        current_metric = float(data["crypto"]["velocity"].replace("%", ""))
-        should_send, status = evaluate_gatekeeper("crypto", current_metric, major_threshold=1.5)
-        if should_send:
-            dispatch_webhook("crypto", build_crypto_pulse(data, status))
-            
-    elif args.mode == "tsp_daily":
-        dispatch_webhook("tsp_daily", build_tsp_daily_pulse(data))
-        
-    elif args.mode == "tsp_weekly":
-        current_metric = float(data["tsp_funds"][0]["change"].replace("%", ""))
-        should_send, status = evaluate_gatekeeper("tsp_weekly", current_metric, major_threshold=1.5)
-        if should_send:
-            dispatch_webhook("tsp_weekly", build_tsp_weekly_pulse(data, status))
+            # --- FOREX DAEMON SWEEP ---
+            try:
+                f_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
+                should_send, status = evaluate_gatekeeper("forex", f_metric, major_threshold=0.5)
+                if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
+            except Exception as e: print(f"[-] Forex execution error: {e}")
 
-    elif args.mode == "gex":
-        current_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
-        should_send, status = evaluate_gatekeeper("gex", current_metric, major_threshold=2.0)
-        if should_send:
-            dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
-            dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
+            # --- CRYPTO DAEMON SWEEP ---
+            try:
+                c_metric = float(data["crypto"]["velocity"].replace("%", ""))
+                should_send, status = evaluate_gatekeeper("crypto", c_metric, major_threshold=1.5)
+                if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
+            except Exception as e: print(f"[-] Crypto execution error: {e}")
+
+            # --- GEX DAEMON SWEEP ---
+            try:
+                g_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
+                should_send, status = evaluate_gatekeeper("gex", g_metric, major_threshold=2.0)
+                if should_send:
+                    dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
+                    dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
+            except Exception as e: print(f"[-] GEX execution error: {e}")
+
+            # Sleep 15 minutes (900s) to prevent loop exhaustion
+            time.sleep(900)
+            
+    else:
+        # Execution block for specific command-line cron jobs
+        data = fetch_market_telemetry()
+        if args.mode == "forex":
+            current_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
+            should_send, status = evaluate_gatekeeper("forex", current_metric, major_threshold=0.5)
+            if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
+                
+        elif args.mode == "crypto":
+            current_metric = float(data["crypto"]["velocity"].replace("%", ""))
+            should_send, status = evaluate_gatekeeper("crypto", current_metric, major_threshold=1.5)
+            if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
+                
+        elif args.mode == "tsp_daily":
+            dispatch_webhook("tsp_daily", build_tsp_daily_pulse(data))
+            
+        elif args.mode == "tsp_weekly":
+            current_metric = float(data["tsp_funds"][0]["change"].replace("%", ""))
+            should_send, status = evaluate_gatekeeper("tsp_weekly", current_metric, major_threshold=1.5)
+            if should_send: dispatch_webhook("tsp_weekly", build_tsp_weekly_pulse(data, status))
+
+        elif args.mode == "gex":
+            current_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
+            should_send, status = evaluate_gatekeeper("gex", current_metric, major_threshold=2.0)
+            if should_send:
+                dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
+                dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
 
 if __name__ == "__main__":
     main()
