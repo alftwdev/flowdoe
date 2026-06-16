@@ -8,11 +8,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
-# Load existing environment configuration
+# Load existing environment configuration[cite: 1]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# Webhook mapping from your verified .env setup
+# Webhook mapping from verified .env setup[cite: 1]
 WEBHOOKS = {
     "forex": os.getenv("WEBHOOK_FOREX"),
     "crypto": os.getenv("WEBHOOK_CRYPTO"),
@@ -26,7 +26,7 @@ db = EcosystemDatabase()
 
 def evaluate_gatekeeper(channel, current_metric, major_threshold=2.0):
     """
-    Implements the 3-Strike Dynamic Gatekeeper protocol natively using EcosystemDatabase.
+    Implements the 3-Strike Dynamic Gatekeeper protocol natively[cite: 1].
     """
     state_key = f"gatekeeper_{channel}_pulse"
     channel_state = db.get_state(state_key, {"strike_count": 0, "last_value": 0.0})
@@ -63,17 +63,17 @@ def dispatch_webhook(channel, payload_text):
     return False
 
 def fetch_market_telemetry():
-    """Data Aggregator Anchor"""
+    """Data Aggregator Anchor[cite: 1]"""
     return {
         "liquidity": {"index": "7.42T", "momentum": "+1.4%", "sofr": "0.012%"},
         "forex_pairs": [
-            {"pair": "AUD/USD", "spot": "0.7081", "change": "+0.60%", "regime": "Accelerating Up", "rr": "1 : 3.4 (Long)"},
-            {"pair": "XAU/USD", "spot": "4281.86", "change": "+1.58%", "regime": "Accelerating Up", "rr": "1 : 2.9 (Long)"},
-            {"pair": "EUR/USD", "spot": "1.1605", "change": "+0.41%", "regime": "Trend Decelerating", "rr": "1 : 1.5 (Range)"},
-            {"pair": "USD/JPY", "spot": "159.81", "change": "-0.30%", "regime": "Trend Decelerating", "rr": "1 : 1.1 (Squeeze)"}
+            {"pair": "AUD/USD", "spot": "0.7081", "change": "+0.60%", "regime": "Accelerating Up", "rr": "1 : 3.4"},
+            {"pair": "XAU/USD", "spot": "4281.86", "change": "+1.58%", "regime": "Accelerating Up", "rr": "1 : 2.9"},
+            {"pair": "EUR/USD", "spot": "1.1605", "change": "+0.41%", "regime": "Trend Decelerating", "rr": "1 : 1.5"},
+            {"pair": "USD/JPY", "spot": "159.81", "change": "-0.30%", "regime": "Trend Decelerating", "rr": "1 : 1.1"}
         ],
         "crypto": {
-            "spot": "65,440.24", "vol": "42.1%", "bbw": "LOW (Compression Target)", 
+            "spot": "65,440.24", "vol": "42.1%", "bbw": "LOW", 
             "funding": "+0.035%", "velocity": "+2.52%", "imbalance": "+12.4%"
         },
         "tsp_funds": [
@@ -85,9 +85,9 @@ def fetch_market_telemetry():
         ],
         "macro": {"us10y": "4.45%", "ratio": "3.1:1"},
         "gex": {
-            "SPY": {"spot": 542.12, "flip": 535.00, "state": "POSITIVE GAMMA (Volatility Suppressed)"},
-            "QQQ": {"spot": 472.50, "flip": 475.00, "state": "NEGATIVE GAMMA (Volatility Amplified)"},
-            "TQQQ": {"spot": 62.80, "flip": 60.00, "state": "POSITIVE GAMMA (Accelerated Momentum)"}
+            "SPY": {"spot": 542.12, "flip": 535.00, "state": "POSITIVE GAMMA"},
+            "QQQ": {"spot": 472.50, "flip": 475.00, "state": "NEGATIVE GAMMA"},
+            "TQQQ": {"spot": 62.80, "flip": 60.00, "state": "POSITIVE GAMMA"}
         }
     }
 
@@ -97,20 +97,19 @@ def build_forex_pulse(data, status_text):
         f"⚡ GLOBAL MACRO & FX TELEMETRY PULSE\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💧 Global Liquidity Environment:\n"
-        f"┣ Net Liquidity Index:  ${liq['index']} [{liq['momentum']} / 20d Momentum]\n"
-        f"┣ SOFR-Repo Spread:     {liq['sofr']} [Liquidity Abundant]\n"
-        f"┗ DXY Macro Bias:       Bearish Volatility Compression\n\n"
-        f"📊 Cross-Sectional FX Momentum Matrix:\n"
-        f"Pair       | Spot Price | Day %  | RS Momentum Regime       | Dynamic R:R\n"
-        f"───────────+────────────+────────+──────────────────────────+─────────────\n"
+        f"┣ Net Liquidity Index:  ${liq['index']} [{liq['momentum']}]\n"
+        f"┣ SOFR-Repo Spread:     {liq['sofr']} (Abundant)\n"
+        f"┗ DXY Macro Bias:       Volatility Compression\n\n"
+        f"📊 Cross-Sectional Matrix (Spot | % | Regime):\n"
     )
     for p in data["forex_pairs"]:
-        pulse += f"{p['pair']:<10} | {p['spot']:<10} | {p['change']:<6} | {p['regime']:<24} | {p['rr']}\n"
+        pulse += f"┣ {p['pair']:<8}: {p['spot']:<8} | {p['change']:<6} | {p['regime']}\n"
         
     pulse += (
-        f"\n🔗 Structural Divergence Alerts:\n"
-        f"┗ ALERT [USD/JPY]: Spot price maintaining upward trend despite\n"
-        f"  compression in yield differential. Potential institutional unwinding.\n"
+        f"┗ Vector:  Risk-Adjusted R:R active across matrix\n\n"
+        f"🔗 Structural Divergence Alert:\n"
+        f"┣ Alert:   USD/JPY spot trend vs yield compression\n"
+        f"┗ Status:  Potential institutional unwinding detected\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ ESSENTIALS Macro-Quant Architecture | {status_text}"
     )
@@ -119,20 +118,19 @@ def build_forex_pulse(data, status_text):
 def build_crypto_pulse(data, status_text):
     c = data["crypto"]
     pulse = (
-        f"⚡ CRYPTO LIQUIDITY & VOLATILITY SENTRY | BTC/USD\n"
+        f"⚡ CRYPTO LIQUIDITY & VOLATILITY SENTRY\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🚨 Structural Market Telemetry:\n"
-        f"┣ Current Spot Rate:   ${c['spot']}\n"
-        f"┣ 24h Realized Vol:    {c['vol']}\n"
-        f"┣ Volatility Context:  COMPRESSION MAXIMUM (BBW at {c['bbw']})\n"
-        f"┗ Order Book Imbal:    {c['imbalance']} Ask-Side Depth\n\n"
-        f"⛓️ Derivatives & Leverage Risk Profile:\n"
-        f"┣ Agg. Funding Rate:   {c['funding']} / 8h\n"
-        f"┣ 1H Liq. Vector:      High density resting at $66,200\n"
-        f"┗ Velocity Profile:    Momentum expanding away from VWAP\n\n"
-        f"🛡️ Algorithmic Telemetry Vector:\n"
-        f"┗ SENTRY TRIGGER: Velocity Vector moved {c['velocity']}. BBW compressed.\n"
-        f"  Expect aggressive directional volume expansion within 2-4 hours.\n"
+        f"┣ Spot Rate:          ${c['spot']}\n"
+        f"┣ 24h Realized Vol:   {c['vol']}\n"
+        f"┣ Vol Context:        BBW at {c['bbw']} (Compression)\n"
+        f"┗ Order Book:         {c['imbalance']} Ask-Side Depth\n\n"
+        f"⛓️ Derivatives Risk Profile:\n"
+        f"┣ Funding Rate:       {c['funding']} / 8h\n"
+        f"┣ Liquidity Vector:   High density at $66,200\n"
+        f"┗ Velocity:           {c['velocity']} (Momentum expanding)\n\n"
+        f"🛡️ Algorithmic Vector:\n"
+        f"┗ Status:             Directional expansion expected < 4h\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ ESSENTIALS Macro-Quant Architecture | {status_text}"
     )
@@ -141,23 +139,21 @@ def build_crypto_pulse(data, status_text):
 def build_tsp_weekly_pulse(data, status_text):
     m = data["macro"]
     pulse = (
-        f"⚡ GOVERNMENT & MILITARY WEALTH MATRIX | TSP STRATEGIC VECTOR\n"
+        f"⚡ TSP STRATEGIC VECTOR & RISK MATRIX\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🛡️ Risk-Parity Matrix & Target Weights:\n"
-        f"Fund    | Proxy Tracked | Momentum Regime    | Target Vector\n"
-        f"────────+───────────────+────────────────────+───────────────\n"
+        f"🛡️ Target Allocation Weights:\n"
     )
     for f in data["tsp_funds"]:
-        pulse += f"{f['name']:<7} | {f['proxy']:<13} | {f['regime']:<18} | ALLOC ({f['weight']})\n"
+        pulse += f"┣ {f['name']:<7}: {f['weight']:<5} ({f['regime']})\n"
         
     pulse += (
-        f"\n📊 Macro Underlying Metrics:\n"
-        f"┣ Reference Yield (10Y): {m['us10y']} [Bias: Rising]\n"
-        f"┣ System Equity Risk:    LOW (S&P 500 > 200 SMA)\n"
-        f"┗ Cross-Asset Momentum:  Equities outpacing Fixed Income {m['ratio']}\n\n"
+        f"┗ Vector:  Risk-Parity weights balanced for regime\n\n"
+        f"📊 Macro Underlying Metrics:\n"
+        f"┣ Ref Yield (10Y):    {m['us10y']} (Rising Bias)\n"
+        f"┣ Equity Risk:        LOW (S&P > 200 SMA)\n"
+        f"┗ Momentum Ratio:     Equities lead Fixed Income {m['ratio']}\n\n"
         f"🎯 Strategic Directive:\n"
-        f"┗ Maintain equity core in C-Fund. Hold cash buffers in G-Fund\n"
-        f"  (Zero-Volatility Anchor proxy via Treasury yield curve).\n"
+        f"┗ Action: Maintain C-Fund core; hold G-Fund buffers\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ ESSENTIALS Macro-Quant Architecture | {status_text}"
     )
@@ -165,41 +161,41 @@ def build_tsp_weekly_pulse(data, status_text):
 
 def build_tsp_daily_pulse(data):
     pulse = (
-        f"⚡ TSP END-OF-DAY RECAP | MARKET HARMONIZATION\n"
+        f"⚡ TSP END-OF-DAY PERFORMANCE RECAP\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏁 TSP Fund Closing Performance:\n"
+        f"🏁 Closing Performance:\n"
     )
     for f in data["tsp_funds"]:
-        pulse += f"┣ {f['name']} ({f['proxy']:<13}) : {f['change']:<6} | Status: {f['regime']}\n"
+        pulse += f"┣ {f['name']:<7}: {f['change']:<6} | {f['regime']}\n"
         
     pulse += (
-        f"\n📋 Sector Synchronization Analysis:\n"
-        f"┣ Large-Cap Equities (C-Fund) tracking institutional inflows.\n"
-        f"┣ Small-Cap Equities (S-Fund) maintaining neutral compression.\n"
-        f"┣ Fixed Income (F-Fund) observing downside acceleration via 10Y.\n"
-        f"┗ Risk-Free Yield (G-Fund) executing safe-haven functions.\n"
+        f"┗ Sync:    Market closing harmonization complete\n\n"
+        f"📋 Sector Synchronization:\n"
+        f"┣ C-Fund:  Institutional inflows tracked\n"
+        f"┣ S-Fund:  Neutral compression maintaining\n"
+        f"┣ F-Fund:  Downside acceleration via 10Y\n"
+        f"┗ G-Fund:  Safe-haven anchor executing\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ ESSENTIALS Macro-Quant Architecture | Data Secured"
     )
     return pulse
 
 def build_gex_pulse(data, tickers, status_text):
-    header_tag = "GLOBAL MACRO" if "SPY" in tickers else "TACTICAL OPTIONS"
+    header = "GLOBAL MACRO" if "SPY" in tickers else "TACTICAL OPTIONS"
     pulse = (
-        f"⚡ SYSTEMIC GEX MATRIX PROFILE | {header_tag}\n"
+        f"⚡ SYSTEMIC GEX MATRIX | {header}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 Automated Market Maker Positioning:\n"
-        f"Ticker     | Spot Price | Gamma Flip | Structural Posture Context\n"
-        f"───────────+────────────+────────────+──────────────────────────────\n"
+        f"🎯 Market Maker Positioning:\n"
     )
     for t in tickers:
         g = data["gex"][t]
-        pulse += f"{t:<10} | ${g['spot']:<9.2f} | ${g['flip']:<10.2f} | {g['state']}\n"
+        pulse += f"┣ {t:<6}: ${g['spot']:<8.2f} (Flip: ${g['flip']:.2f})\n"
         
     pulse += (
-        f"\n💡 Strategic Posture Directive:\n"
-        f"┗ Fading or breaking Gamma Flip lines shifts institutional hedging.\n"
-        f"  Negative Gamma = Volatility Expansion. Positive = Suppression.\n"
+        f"┗ State:  {data['gex'][tickers[0]]['state']}\n\n"
+        f"💡 Strategic Posture:\n"
+        f"┣ Trigger: Breaking Gamma Flip shifts hedging\n"
+        f"┗ Effect:  Negative = Vol Expansion | Positive = Suppression\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ ESSENTIALS Macro-Quant Architecture | {status_text}"
     )
@@ -207,8 +203,6 @@ def build_gex_pulse(data, tickers, status_text):
 
 def main():
     parser = argparse.ArgumentParser(description="ESSENTIALS Multi-Asset Quant Engine")
-    
-    # Required=False allows the script to survive in the Always-On tab.
     parser.add_argument("--mode", required=False, default="daemon", 
                         choices=["forex", "crypto", "tsp_daily", "tsp_weekly", "gex", "daemon"])
     args = parser.parse_args()
@@ -218,53 +212,47 @@ def main():
         while True:
             data = fetch_market_telemetry()
             
-            # --- FOREX DAEMON SWEEP ---
+            # --- FOREX SWEEP ---
             try:
                 f_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("forex", f_metric, major_threshold=0.5)
                 if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
-            except Exception as e: print(f"[-] Forex execution error: {e}")
+            except Exception as e: print(f"[-] Forex error: {e}")
 
-            # --- CRYPTO DAEMON SWEEP ---
+            # --- CRYPTO SWEEP ---
             try:
                 c_metric = float(data["crypto"]["velocity"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("crypto", c_metric, major_threshold=1.5)
                 if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
-            except Exception as e: print(f"[-] Crypto execution error: {e}")
+            except Exception as e: print(f"[-] Crypto error: {e}")
 
-            # --- GEX DAEMON SWEEP ---
+            # --- GEX SWEEP ---
             try:
                 g_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
                 should_send, status = evaluate_gatekeeper("gex", g_metric, major_threshold=2.0)
                 if should_send:
                     dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
                     dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
-            except Exception as e: print(f"[-] GEX execution error: {e}")
+            except Exception as e: print(f"[-] GEX error: {e}")
 
-            # Sleep 15 minutes (900s) to prevent loop exhaustion
-            time.sleep(900)
+            time.sleep(900) #[cite: 1]
             
     else:
-        # Execution block for specific command-line cron jobs
         data = fetch_market_telemetry()
         if args.mode == "forex":
             current_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("forex", current_metric, major_threshold=0.5)
             if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
-                
         elif args.mode == "crypto":
             current_metric = float(data["crypto"]["velocity"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("crypto", current_metric, major_threshold=1.5)
             if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
-                
         elif args.mode == "tsp_daily":
             dispatch_webhook("tsp_daily", build_tsp_daily_pulse(data))
-            
         elif args.mode == "tsp_weekly":
             current_metric = float(data["tsp_funds"][0]["change"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("tsp_weekly", current_metric, major_threshold=1.5)
             if should_send: dispatch_webhook("tsp_weekly", build_tsp_weekly_pulse(data, status))
-
         elif args.mode == "gex":
             current_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
             should_send, status = evaluate_gatekeeper("gex", current_metric, major_threshold=2.0)
