@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import sys
 import argparse
@@ -14,9 +15,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+# Verified structural environmental hooks
 WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS") 
-WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS") 
+WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")        # Primary Directional Signals Channel
+WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS")       # Dedicated Income Audience Channel
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") 
 WEBHOOK_TSP = os.getenv("WEBHOOK_FED")
@@ -44,7 +46,8 @@ def main():
             
             crypto_payload = engine.generate_crypto_matrix_payload()
             if crypto_payload and WEBHOOK_CRYPTO:
-                send_essentials_embed(WEBHOOK_CRYPTO, "Crypto Sector Liquidity Tracker", crypto_payload, 0xf39c12)
+                # Dynamic translation matching image layout properties (Yellow Warning/Scan Bar)
+                send_essentials_embed(WEBHOOK_CRYPTO, "Crypto Sector Liquidity Tracker", crypto_payload, 0xf1c40f)
                 
             logger.info("Macro matrix compilation and dispatch completed.")
 
@@ -139,7 +142,8 @@ def main():
                 threshold_pct=0.015
             ):
                 payload = "\n".join(payload_lines)
-                send_essentials_embed(WEBHOOK_INCOME, "Yield Engine Analytics Pulse", payload, 0xf1c40f)
+                # SUPPLEMENTAL VISUAL ASSIGNMENT: Green border line configuration for stable income tracking
+                send_essentials_embed(WEBHOOK_INCOME, "Yield Engine Analytics Pulse", payload, 0x2ecc71)
             else:
                 logger.info("Yield Engine Pulse suppressed by Gatekeeper memory state.")
 
@@ -158,6 +162,7 @@ def main():
                     threshold_pct=0.01
                 ):
                     wheel_payload = "### Dividend & Wheel Strategy Synergy\n*Accelerating Cash Flow via Cash-Secured Puts on Quality Dividend Payers.*\n\n"
+                    avg_win_prob = 0.0
                     for c in wheel_candidates:
                         wheel_payload += (
                             f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
@@ -167,11 +172,18 @@ def main():
                             f"┣ Implied Volatility: `{c['iv']:.1f}%` | Open Interest: `{c['oi']:,}`\n"
                             f"┗ Capital Efficiency: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
                         )
+                        avg_win_prob += c['chance_of_profit']
                     
+                    # Compute macro safety metric contextually
+                    avg_win_prob = avg_win_prob / len(wheel_candidates) if wheel_candidates else 100.0
+                    # Dynamic mathematical verification for left-side indicator border 
+                    setup_color = 0x2ecc71 if avg_win_prob >= 75.0 else 0xf1c40f
+                    
+                    # SYSTEMIC DIRECTIVE ROUTING PRESERVATION
                     if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                        send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL ARCHITECTURE | INCOME SCAN", wheel_payload, setup_color)
                     if WEBHOOK_OPTIONS:
-                        send_essentials_embed(WEBHOOK_OPTIONS, "DIVIDEND WHEEL ARCHITECTURE", wheel_payload, 0x9b59b6)
+                        send_essentials_embed(WEBHOOK_OPTIONS, "DIVIDEND WHEEL ARCHITECTURE | OPTION ENGINE DIRECTIONAL", wheel_payload, setup_color)
                 else:
                     logger.info("Dividend Wheel Strategy blocked by Ecosystem Gatekeeper (State Unchanged).")
 
@@ -187,7 +199,8 @@ def main():
                     f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` Vol Variance\n"
                     f"Context: Selling credit strategies or iron condors here carries maximized statistical advantages due to current premium inflation.\n\n"
                 )
-            send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL: IV Crush Scanner", payload, 0x9b59b6)
+            # Highly pricing-skewed entries default to a Yellow/Orange actionable scanning line
+            send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL: IV Crush Scanner", payload, 0xf1c40f)
 
         elif args.mode == "gex":
             gex_data = engine.calculate_gex_profile("SPY")
@@ -202,7 +215,9 @@ def main():
                 f"┗ Structural Posture Context: {gex_data['market_state']}\n\n"
                 f"Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms."
             )
-            send_essentials_embed(WEBHOOK_MARKET, "COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, 0xe67e22)
+            # Dynamic look for market state: Red for Negative Gamma environments, Green for stable Positive Gamma environments
+            gex_color = 0x2ecc71 if "POSITIVE" in gex_data['market_state'].upper() else 0xe74c3c
+            send_essentials_embed(WEBHOOK_MARKET, "COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, gex_color)
 
         elif args.mode == "post_market":
             watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "META", "GOOGL", "AMZN"]
@@ -227,7 +242,7 @@ def main():
 
             if triggered_assets:
                 payload = "Institutional Extended-Hours Liquidity Sweep\n\n" + "\n".join(triggered_assets) + "\n\nContext: Abnormal post-market volatility usually signals an earnings release or breaking structural news."
-                send_essentials_embed(WEBHOOK_MARKET, "POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0x8e44ad)
+                send_essentials_embed(WEBHOOK_MARKET, "POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0xe74c3c)
 
         elif args.mode == "darkpool":
             broad_universe = "SPY,QQQ,IWM,AAPL,NVDA,MSFT,META,TSLA,AMD,AMZN,NFLX,BA,DIS,JPM,V,WMT,COST,AVGO,SMCI,COIN"
@@ -267,7 +282,9 @@ def main():
                         f"Ecosystem Context: A hidden institutional transaction or dark pool order allocation has just cleared.\n"
                         f"VWAP Positioning: {block_data['direction']} (VWAP: `${block_data['vwap']:,.2f}`)"
                     )
-                    send_essentials_embed(WEBHOOK_OPTIONS, f"DARK POOL RADAR: {sym}", payload, 0x9b59b6)
+                    # Assign dynamic color depending on execution bias direction
+                    dp_color = 0x2ecc71 if "BULLISH" in block_data['direction'].upper() else 0xe74c3c
+                    send_essentials_embed(WEBHOOK_OPTIONS, f"DARK POOL RADAR: {sym}", payload, dp_color)
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

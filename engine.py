@@ -8,11 +8,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
-# Load existing environment configuration[cite: 1]
+# Load existing environment configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# Webhook mapping from verified .env setup[cite: 1]
+# Webhook mapping from verified .env setup
 WEBHOOKS = {
     "forex": os.getenv("WEBHOOK_FOREX"),
     "crypto": os.getenv("WEBHOOK_CRYPTO"),
@@ -26,7 +26,7 @@ db = EcosystemDatabase()
 
 def evaluate_gatekeeper(channel, current_metric, major_threshold=2.0):
     """
-    Implements the 3-Strike Dynamic Gatekeeper protocol natively[cite: 1].
+    Implements the 3-Strike Dynamic Gatekeeper protocol natively.
     """
     state_key = f"gatekeeper_{channel}_pulse"
     channel_state = db.get_state(state_key, {"strike_count": 0, "last_value": 0.0})
@@ -53,17 +53,43 @@ def evaluate_gatekeeper(channel, current_metric, major_threshold=2.0):
     db.update_state(state_key, channel_state)
     return True, f"Pulse Reminder ({channel_state['strike_count']}/3)"
 
-def dispatch_webhook(channel, payload_text):
+def dispatch_webhook(channel, payload_text, title="SYSTEMIC TELEMETRY ALERT", color=0x2ecc71):
+    """
+    UPGRADED: Converts text blocks into native Discord Rich Embed notifications.
+    Maintains full reverse-compatibility with the original string input signature.
+    The left-hand vertical bar color adapts instantly to the market state.
+    """
     url = WEBHOOKS.get(channel)
     if not url: return False
+    
+    # Extract the original string header to use as the embed Title for scannability
+    lines = payload_text.split("\n")
+    if lines and lines[0].startswith("⚡"):
+        title = lines[0].replace("⚡", "").strip()
+        payload_text = "\n".join(lines[1:])
+        
+    embed_payload = {
+        "embeds": [
+            {
+                "title": f"⚡ {title}",
+                "description": payload_text,
+                "color": color,
+                "footer": {
+                    "text": "ESSENTIALS Macro-Quant Architecture | Data Secured"
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        ]
+    }
+    
     try:
-        response = requests.post(url, json={"content": payload_text}, headers={"Content-Type": "application/json"}, timeout=10)
+        response = requests.post(url, json=embed_payload, headers={"Content-Type": "application/json"}, timeout=10)
         if response.status_code in [200, 204]: return True
     except Exception: pass
     return False
 
 def fetch_market_telemetry():
-    """Data Aggregator Anchor[cite: 1]"""
+    """Data Aggregator Anchor"""
     return {
         "liquidity": {"index": "7.42T", "momentum": "+1.4%", "sofr": "0.012%"},
         "forex_pairs": [
@@ -216,49 +242,58 @@ def main():
             try:
                 f_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("forex", f_metric, major_threshold=0.5)
-                if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
+                # SUPPLEMENTAL VISUAL ASSIGNMENT: Dynamic border color injection
+                color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
+                if should_send: dispatch_webhook("forex", build_forex_pulse(data, status), color=color_code)
             except Exception as e: print(f"[-] Forex error: {e}")
 
             # --- CRYPTO SWEEP ---
             try:
                 c_metric = float(data["crypto"]["velocity"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("crypto", c_metric, major_threshold=1.5)
-                if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
+                color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
+                if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status), color=color_code)
             except Exception as e: print(f"[-] Crypto error: {e}")
 
             # --- GEX SWEEP ---
             try:
                 g_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
                 should_send, status = evaluate_gatekeeper("gex", g_metric, major_threshold=2.0)
+                color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
                 if should_send:
-                    dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
-                    dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
+                    dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status), color=color_code)
+                    dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status), color=color_code)
             except Exception as e: print(f"[-] GEX error: {e}")
 
-            time.sleep(900) #[cite: 1]
+            time.sleep(900)
             
     else:
         data = fetch_market_telemetry()
         if args.mode == "forex":
             current_metric = float(data["forex_pairs"][0]["change"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("forex", current_metric, major_threshold=0.5)
-            if should_send: dispatch_webhook("forex", build_forex_pulse(data, status))
+            color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
+            if should_send: dispatch_webhook("forex", build_forex_pulse(data, status), color=color_code)
         elif args.mode == "crypto":
             current_metric = float(data["crypto"]["velocity"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("crypto", current_metric, major_threshold=1.5)
-            if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status))
+            color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
+            if should_send: dispatch_webhook("crypto", build_crypto_pulse(data, status), color=color_code)
         elif args.mode == "tsp_daily":
-            dispatch_webhook("tsp_daily", build_tsp_daily_pulse(data))
+            # Direct transmission uses standard target green
+            dispatch_webhook("tsp_daily", build_tsp_daily_pulse(data), color=0x2ecc71)
         elif args.mode == "tsp_weekly":
             current_metric = float(data["tsp_funds"][0]["change"].replace("%", ""))
             should_send, status = evaluate_gatekeeper("tsp_weekly", current_metric, major_threshold=1.5)
-            if should_send: dispatch_webhook("tsp_weekly", build_tsp_weekly_pulse(data, status))
+            color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
+            if should_send: dispatch_webhook("tsp_weekly", build_tsp_weekly_pulse(data, status), color=color_code)
         elif args.mode == "gex":
             current_metric = abs(data["gex"]["SPY"]["spot"] - data["gex"]["SPY"]["flip"])
             should_send, status = evaluate_gatekeeper("gex", current_metric, major_threshold=2.0)
+            color_code = 0xe74c3c if "New Regime" in status else (0xf1c40f if "Reminder" in status else 0x2ecc71)
             if should_send:
-                dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status))
-                dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status))
+                dispatch_webhook("gex_macro", build_gex_pulse(data, ["SPY", "QQQ"], status), color=color_code)
+                dispatch_webhook("gex_options", build_gex_pulse(data, ["TQQQ"], status), color=color_code)
 
 if __name__ == "__main__":
     main()
