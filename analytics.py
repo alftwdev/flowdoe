@@ -317,67 +317,73 @@ class HighFidelityAnalyticsEngine:
         matrix_body = "\n".join(table_rows)
         return f"**1-Day Relative Performance Index**\n```js\nTicker  Spot Price  Daily Change\n────────────────────────────────\n{matrix_body}\n```"
 
-    def generate_wheel_candidates(self, watchlist=["AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "TSLA"]):
-        candidates = []
-        target_dte_min, target_dte_max = 30, 45
-        for symbol in watchlist:
+    def generate_ex_dividend_radar(self, universe=["SCHD", "JEPI", "JEPQ", "DIVO", "O", "MAIN", "ARCC", "MO", "VZ", "PFE"]):
+        """
+        Pulls upcoming ex-dividend dates utilizing Twelve Data's complex_data endpoint.
+        Creates an actionable countdown for capital rotation.
+        """
+        results = []
+        today = datetime.now()
+        for sym in universe:
             try:
-                spot_data = self._execute_query("price", {"symbol": symbol})
-                spot = float(spot_data.get("price", 0.0))
-                if spot == 0: continue
-
-                chain = self._execute_query("options/chain", {"symbol": symbol})
-                if not chain or "data" not in chain: continue
-
-                df = pd.DataFrame(chain["data"])
-                df["expiration_date"] = pd.to_datetime(df["expiration_date"])
-                df["strike"] = df["strike"].astype(float)
+                data = self._execute_query("complex_data/dividends", {"symbol": sym})
+                if not data or "data" not in data: continue
                 
-                today = pd.Timestamp.today()
-                df["dte"] = (df["expiration_date"] - today).dt.days
-                df_filtered = df[(df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & (df["type"] == "put")].copy()
+                # Find the immediate next upcoming ex-dividend date
+                for div in data["data"]:
+                    ex_date_str = div.get("ex_date")
+                    if not ex_date_str: continue
+                    
+                    ex_date = datetime.strptime(ex_date_str, "%Y-%m-%d")
+                    # Filter for distributions occurring within the next 14 days
+                    if ex_date >= today and (ex_date - today).days <= 14:
+                        amount = float(div.get("amount", 0.0))
+                        results.append({
+                            "symbol": sym,
+                            "ex_date": ex_date_str,
+                            "amount": amount,
+                            "days_away": (ex_date - today).days
+                        })
+                        break # Secure the immediate next date and move to next ticker
+            except Exception as e:
+                logger.error(f"Ex-Dividend radar failed for {sym}: {e}")
                 
-                if df_filtered.empty: continue
-                
-                target_strike = spot * 0.96
-                df_filtered["strike_dist"] = abs(df_filtered["strike"] - target_strike)
-                optimal_put = df_filtered.loc[df_filtered["strike_dist"].idxmin()]
-                
-                strike, dte = optimal_put["strike"], optimal_put["dte"]
-                exp_date = optimal_put["expiration_date"].strftime('%Y-%m-%d')
-                
-                est_premium = strike * 0.015 
-                capital_required = strike * 100
-                annualized_roi = ((est_premium * 100) / capital_required) * (365 / dte) * 100
-
-                candidates.append({
-                    "symbol": symbol, "spot": spot, "strike": strike,
-                    "dte": dte, "expiration": exp_date, "premium": round(est_premium, 2),
-                    "annualized_roi": round(annualized_roi, 1)
-                })
-            except Exception as e: logger.error(f"Wheel scan failed for {symbol}: {e}")
-        return candidates
+        # Sort sequentially by closest action date
+        return sorted(results, key=lambda x: x["days_away"])
 
     def generate_dividend_wheel_candidates(self):
         """
-        Executes an automated cash-secured put option screening for high-grade dividend-paying stocks.
-        Math aligns with target selection methodology:
-        Score = (1 - |Δ|) × (250 / (DTE + 5)) × (Premium / Strike)
+        Upgraded Wheel Screening: Incorporates Structural Trend tracking (200 SMA) 
+        to prevent yield traps, and relaxes strict OI/Greek dropouts.
         """
-        dividend_universe = ["BAC", "KO", "PFE", "VZ", "CSCO", "T", "F", "WFC", "KMI", "MO", "BMY", "MDT"] 
+        dividend_universe = ["BAC", "KO", "PFE", "VZ", "CSCO", "T", "F", "WFC", "KMI", "MO", "BMY", "MDT", "O", "SCHD"] 
         candidates = []
-        
-        # Target constraints for ideal wheel deployment
         target_dte_min = 15
         target_dte_max = 45
         
         for symbol in dividend_universe:
             try:
-                spot_data = self._execute_query("price", {"symbol": symbol})
-                if not spot_data or "price" not in spot_data: continue
-                spot = float(spot_data["price"])
+                # 1. Yield vs Risk: Pull technical structure to assess safety
+                ts_data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "200"})
+                spot = 0.0
+                sma_200 = 0.0
+                trend_status = "NEUTRAL"
+                
+                if ts_data and "values" in ts_data and len(ts_data["values"]) >= 50:
+                    df_ts = pd.DataFrame(ts_data["values"])
+                    df_ts["close"] = df_ts["close"].astype(float)
+                    spot = df_ts["close"].iloc[0] # Most recent spot
+                    if len(df_ts) == 200:
+                        sma_200 = df_ts["close"].mean()
+                        trend_status = "🟢 BULLISH TRENCH" if spot > sma_200 else "🔴 BEARISH TRAP"
+                else:
+                    spot_data = self._execute_query("price", {"symbol": symbol})
+                    if not spot_data or "price" not in spot_data: continue
+                    spot = float(spot_data["price"])
+
                 if spot == 0: continue
 
+                # 2. Options Architecture
                 chain = self._execute_query("options/chain", {"symbol": symbol})
                 if not chain or "data" not in chain: continue
 
@@ -390,55 +396,51 @@ class HighFidelityAnalyticsEngine:
                 today = pd.Timestamp.today()
                 df["dte"] = (df["expiration_date"] - today).dt.days
                 
-                # Parse greeks with fallback handling to zero for specific tiers
+                # Graceful degradation for API latency on greeks/OI
                 df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
                 df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
                 
                 if "delta" in df.columns:
                     df["delta"] = pd.to_numeric(df["delta"], errors="coerce").fillna(0).abs()
+                    # Patch latent zero-delta returns from the data provider
+                    df.loc[df["delta"] == 0, "delta"] = ((spot - df["strike"]) / spot).clip(0.01, 0.99)
                 else:
-                    # Proxy Delta via distance metric if API suppresses greek output
-                    df["delta"] = (spot - df["strike"]) / spot
-                    df["delta"] = df["delta"].clip(0.01, 0.99)
+                    df["delta"] = ((spot - df["strike"]) / spot).clip(0.01, 0.99)
                 
                 if "bid" in df.columns and "ask" in df.columns:
                     df["mid"] = (pd.to_numeric(df["bid"], errors="coerce") + pd.to_numeric(df["ask"], errors="coerce")) / 2
                 else:
-                    df["mid"] = df["strike"] * 0.015  # 1.5% premium fallback mechanism
+                    df["mid"] = df["strike"] * 0.015  # Fallback 1.5% premium math
                 
-                # Institutional filtering parameters
+                # Filter limits relaxed to prevent silent loop failures
                 df_filtered = df[(df["type"] == "put") & 
                                  (df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & 
                                  (df["delta"] >= 0.15) & (df["delta"] <= 0.35) &
-                                 (df["open_interest"] >= 50)].copy()
+                                 (df["open_interest"] >= 10)].copy()
                 
                 if df_filtered.empty: continue
                 
-                # Advanced Strategy Scoring Formula
                 df_filtered["score"] = (1 - df_filtered["delta"]) * (250 / (df_filtered["dte"] + 5)) * (df_filtered["mid"] / df_filtered["strike"])
                 
-                # Select the optimal contract layer
                 best_option = df_filtered.loc[df_filtered["score"].idxmax()]
                 annualized_roi = (best_option["mid"] / best_option["strike"]) * (365 / best_option["dte"]) * 100
                 
                 candidates.append({
                     "symbol": symbol,
                     "spot": spot,
+                    "trend": trend_status,
                     "strike": best_option["strike"],
                     "dte": int(best_option["dte"]),
                     "expiration": best_option["expiration_date"].strftime('%Y-%m-%d'),
                     "premium": best_option["mid"],
                     "delta": best_option["delta"],
-                    "iv": best_option["implied_volatility"] * 100,
-                    "oi": int(best_option["open_interest"]),
-                    "score": best_option["score"],
                     "chance_of_profit": (1 - best_option["delta"]) * 100,
-                    "annualized_roi": annualized_roi
+                    "annualized_roi": annualized_roi,
+                    "score": best_option["score"]
                 })
             except Exception as e:
                 logger.error(f"Dividend Wheel scan failed for {symbol}: {e}")
                 
-        # Return top 3 highest-rated setups based on the scoring logic
         return sorted(candidates, key=lambda x: x["score"], reverse=True)[:3]
 
     def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):

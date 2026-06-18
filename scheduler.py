@@ -114,40 +114,31 @@ def main():
             send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
 
         elif args.mode == "income":
-            income_universe = [("SCHD", 0.72), ("JEPQ", 0.42), ("JEPI", 0.35), ("DIVO", 0.14)]
-            payload_lines = [
-                "Institutional Yield & Distribution Terminal\n",
-                "EX-DIVIDEND & COVERED CALL YIELD MATRIX"
-            ]
-            composite_price = 0.0
-            
-            for ticker, est_div in income_universe:
-                data = engine._execute_query("price", {"symbol": ticker})
-                if data and "price" in data:
-                    price = float(data["price"])
-                    composite_price += price
-                    clean_yield = engine.calculate_clean_yield(ticker, est_div, price)
-                    payload_lines.append(f"┣ {ticker}: `{clean_yield*100:.2f}%` Clean Yield | Spot: `${price:,.2f}`")
-            
-            payload_lines.append("┗ *System Filter: Structural capital distributions successfully separated from special payouts.*")
-            
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            alert_id = "daily_income_yield_pulse"
-            
-            if engine.db.track_and_limit_alerts(
-                alert_id=alert_id,
-                current_state=f"YIELD_PULSE_{today_str}",
-                current_trigger=composite_price,
-                max_broadcasts=1,
-                threshold_pct=0.015
-            ):
-                payload = "\n".join(payload_lines)
-                # SUPPLEMENTAL VISUAL ASSIGNMENT: Green border line configuration for stable income tracking
-                send_essentials_embed(WEBHOOK_INCOME, "Yield Engine Analytics Pulse", payload, 0x2ecc71)
-            else:
-                logger.info("Yield Engine Pulse suppressed by Gatekeeper memory state.")
+            logger.info("Executing Capital Deployment & Income Radar scans...")
 
-            logger.info("Executing Dividend Wheel Options scan...")
+            # 1. EX-DIVIDEND RADAR EXECUTION
+            ex_div_data = engine.generate_ex_dividend_radar()
+            if ex_div_data:
+                ex_payload = "Targeted Capital Deployment Timeline\n\n"
+                composite_ex_trigger = 0.0
+                
+                for item in ex_div_data:
+                    days_text = "TOMORROW" if item['days_away'] <= 1 else f"In {item['days_away']} Days"
+                    ex_payload += (
+                        f"**{item['symbol']}** | Action Required: `{days_text}`\n"
+                        f"┣ Ex-Dividend Date: `{item['ex_date']}`\n"
+                        f"┗ Declared Payout: `${item['amount']:,.2f}` per share\n\n"
+                    )
+                    composite_ex_trigger += item['amount']
+                    
+                ex_payload += "Context: Capital must be deployed and settled before the ex-date to capture the distribution."
+                
+                # 3-Strike Gatekeeper: Only broadcast if new dividend dates enter the 14-day window
+                if engine.db.track_and_limit_alerts("ex_dividend_radar_weekly", f"EX_DIV_{len(ex_div_data)}", composite_ex_trigger, max_broadcasts=2, threshold_pct=0.05):
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(WEBHOOK_INCOME, "EX-DIVIDEND RADAR & YIELD CAPTURE", ex_payload, 0xf1c40f)
+
+            # 2. DIVIDEND WHEEL ARCHITECTURE (Yield vs Risk)
             wheel_candidates = engine.generate_dividend_wheel_candidates()
             if wheel_candidates:
                 composite_trigger = sum([c['strike'] for c in wheel_candidates])
@@ -161,32 +152,26 @@ def main():
                     max_broadcasts=2,
                     threshold_pct=0.01
                 ):
-                    wheel_payload = "### Dividend & Wheel Strategy Synergy\n*Accelerating Cash Flow via Cash-Secured Puts on Quality Dividend Payers.*\n\n"
+                    wheel_payload = "Automated Cash-Secured Put Strategies on Dividend Aristocrats\n\n"
                     avg_win_prob = 0.0
                     for c in wheel_candidates:
                         wheel_payload += (
                             f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
+                            f"┣ Structural Trend: {c['trend']}\n"
                             f"┣ Optimal Setup: `STO ${c['strike']:.1f} Put` ({c['expiration']}, {c['dte']} DTE)\n"
                             f"┣ Premium Collected: `${c['premium']*100:.0f}` per contract\n"
-                            f"┣ Probability of Profit: `{c['chance_of_profit']:.1f}%` (Delta: {c['delta']:.2f})\n"
-                            f"┣ Implied Volatility: `{c['iv']:.1f}%` | Open Interest: `{c['oi']:,}`\n"
+                            f"┣ Probability of Profit: `{c['chance_of_profit']:.1f}%`\n"
                             f"┗ Capital Efficiency: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
                         )
                         avg_win_prob += c['chance_of_profit']
                     
-                    # Compute macro safety metric contextually
                     avg_win_prob = avg_win_prob / len(wheel_candidates) if wheel_candidates else 100.0
-                    # Dynamic mathematical verification for left-side indicator border 
                     setup_color = 0x2ecc71 if avg_win_prob >= 75.0 else 0xf1c40f
                     
-                    # SYSTEMIC DIRECTIVE ROUTING PRESERVATION
                     if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL ARCHITECTURE | INCOME SCAN", wheel_payload, setup_color)
-                    if WEBHOOK_OPTIONS:
-                        send_essentials_embed(WEBHOOK_OPTIONS, "DIVIDEND WHEEL ARCHITECTURE | OPTION ENGINE DIRECTIONAL", wheel_payload, setup_color)
+                        send_essentials_embed(WEBHOOK_INCOME, "CAPITAL EFFICIENCY MATRIX | WHEEL BLUEPRINT", wheel_payload, setup_color)
                 else:
                     logger.info("Dividend Wheel Strategy blocked by Ecosystem Gatekeeper (State Unchanged).")
-
         elif args.mode == "iv_crush":
             scan_data = engine.run_iv_crush_scan()
             if not scan_data: return
