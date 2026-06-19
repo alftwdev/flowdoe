@@ -2,7 +2,6 @@
 """
 ESSENTIALS Macro-Quant Architecture — Central Pulse Engine
 Standardized Master Template System for Cross-Sector Performance Reporting.
-Author: Data Quant Analyst / Python Architect
 """
 
 import os
@@ -16,7 +15,7 @@ from dotenv import load_dotenv
 from database import EcosystemDatabase
 
 # Load environment configurations
-BASE_DIR = os.path.dirname(os.path.abspath(__file__ ))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # Centralized Webhook Mapping
@@ -50,21 +49,17 @@ def evaluate_gatekeeper(channel, current_metric, major_threshold=2.0):
     is_major_move = delta >= major_threshold
     
     if is_major_move or strike_count == 0:
-        # Reset counter on major technical shift or fresh initialization
         strike_count = 1
         status = "🟢 NEW STRUCTURAL REGIME DETECTED"
         should_send = True
     elif strike_count < 3:
-        # Allow up to 2 subsequent reminders if within the range
         strike_count += 1
         status = f"🟡 REGIME PERSISTENCE REMINDER [{strike_count}/3]"
         should_send = True
     else:
-        # Silence notifications to prevent channel noise
         status = "🔒 FATIGUE SILENCE ACTIVE — BOUNDARY NOT BREACHED"
         should_send = False
         
-    # Update state in local persistence engine
     db.update_state(state_key, {"strike_count": strike_count, "last_value": current_metric})
     return should_send, status
 
@@ -102,7 +97,6 @@ def dispatch_webhook(channel_key, payload_text, color_hex=0x2ecc71):
 # =====================================================================
 
 def build_gex_pulse(data, status_tag):
-    """Formats options and gamma metrics into the master template layout."""
     gex_data = data.get("gex", {}).get("SPY", {"spot": 0.0, "flip": 0.0, "net_oi": 0})
     return (
         f"⚡ **ESSENTIALS QUANT CELL | OPTIONS & GAMMA EXPOSURE**\n"
@@ -115,7 +109,6 @@ def build_gex_pulse(data, status_tag):
     )
 
 def build_forex_pulse(data, status_tag):
-    """Formats global foreign exchange pairs into the master template layout."""
     fx_data = data.get("forex", [{"pair": "EUR/USD", "spot": 0.0, "change": "0.0%"}])[0]
     return (
         f"⚡ **ESSENTIALS MACRO TERMINAL | FOREIGN EXCHANGE MATRIX**\n"
@@ -128,7 +121,6 @@ def build_forex_pulse(data, status_tag):
     )
 
 def build_crypto_pulse(data, status_tag):
-    """Formats decentralized assets and digital velocity indicators into the master template layout."""
     crypto_data = data.get("crypto", {"symbol": "BTC/USD", "spot": 0.0, "velocity": "0.0%"})
     return (
         f"⚡ **ESSENTIALS DIGITAL ASSET DESK | CRYPTO VELOCITY SYSTEM**\n"
@@ -141,7 +133,6 @@ def build_crypto_pulse(data, status_tag):
     )
 
 def build_futures_pulse(data, status_tag):
-    """Formats index, energy, and metals futures profiles into the master template layout."""
     fut_data = data.get("futures", {"symbol": "ES_F", "spot": 0.0, "posture": "Inside Value"})
     return (
         f"⚡ **ESSENTIALS MICROSTRUCTURE PROFILE | GLOBAL FUTURES**\n"
@@ -154,7 +145,6 @@ def build_futures_pulse(data, status_tag):
     )
 
 def build_tsp_pulse(data, interval_label):
-    """Formats sovereign/federal retirement index allocations into the master template layout."""
     tsp_data = data.get("tsp", {"fund": "C Fund", "change": "0.0%"})
     return (
         f"⚡ **ESSENTIALS SOVEREIGN TERMINAL | TSP ALLOCATION METRIX**\n"
@@ -172,12 +162,14 @@ def build_tsp_pulse(data, interval_label):
 
 def main():
     parser = argparse.ArgumentParser(description="ESSENTIALS Pulse Production Engine Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, 
-                        choices=["gex", "forex", "crypto", "futures", "tsp_daily", "tsp_weekly"])
+    
+    # FIX: required=False allows the script to survive in the Always-On tab.
+    # Added "daemon" to choices and set it as the default.
+    parser.add_argument("--mode", type=str, required=False, default="daemon",
+                        choices=["gex", "forex", "crypto", "futures", "tsp_daily", "tsp_weekly", "daemon"])
     args = parser.parse_args()
 
     # Mock ingestion pipeline representing typical dynamic runtime payloads 
-    # Replace with direct API fetches or analytics engine calls as needed
     simulated_payload = {
         "gex": {"SPY": {"spot": 542.50, "flip": 540.00, "net_oi": 145000}},
         "forex": [{"pair": "EUR/USD", "spot": 1.0850, "change": "+0.65%"}],
@@ -186,7 +178,43 @@ def main():
         "tsp": {"fund": "S Fund", "change": "+1.15%"}
     }
 
-    if args.mode == "gex":
+    if args.mode == "daemon":
+        print(f"[+] Launching Ecosystem Pulse Daemon: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        while True:
+            try:
+                # GEX Sweep
+                g_metric = abs(simulated_payload["gex"]["SPY"]["spot"] - simulated_payload["gex"]["SPY"]["flip"])
+                should_send, status = evaluate_gatekeeper("gex", g_metric, major_threshold=2.0)
+                if should_send:
+                    color = 0x2ecc71 if "NEW" in status else 0xf1c40f
+                    dispatch_webhook("gex_macro", build_gex_pulse(simulated_payload, status), color_hex=color)
+
+                # Forex Sweep
+                f_metric = float(simulated_payload["forex"][0]["change"].replace("%", ""))
+                should_send, status = evaluate_gatekeeper("forex", f_metric, major_threshold=0.5)
+                if should_send:
+                    color = 0x3498db if "NEW" in status else 0xf1c40f
+                    dispatch_webhook("forex", build_forex_pulse(simulated_payload, status), color_hex=color)
+
+                # Crypto Sweep
+                c_metric = float(simulated_payload["crypto"]["velocity"].replace("%", ""))
+                should_send, status = evaluate_gatekeeper("crypto", c_metric, major_threshold=1.5)
+                if should_send:
+                    color = 0x9b59b6 if "NEW" in status else 0xf1c40f
+                    dispatch_webhook("crypto", build_crypto_pulse(simulated_payload, status), color_hex=color)
+
+                # Futures Sweep
+                should_send, status = evaluate_gatekeeper("futures", 1.0, major_threshold=0.5)
+                if should_send:
+                    dispatch_webhook("futures", build_futures_pulse(simulated_payload, status), color_hex=0xe67e22)
+
+            except Exception as e:
+                print(f"[-] Daemon execution error: {e}")
+            
+            # Sleep 15 minutes to prevent loop exhaustion
+            time.sleep(900)
+
+    elif args.mode == "gex":
         metric = abs(simulated_payload["gex"]["SPY"]["spot"] - simulated_payload["gex"]["SPY"]["flip"])
         should_send, status = evaluate_gatekeeper("gex", metric, major_threshold=2.0)
         if should_send:
@@ -208,13 +236,11 @@ def main():
             dispatch_webhook("crypto", build_crypto_pulse(simulated_payload, status), color_hex=color)
 
     elif args.mode == "futures":
-        # Evaluated using dynamic posture changes or structural metrics
         should_send, status = evaluate_gatekeeper("futures", 1.0, major_threshold=0.5)
         if should_send:
             dispatch_webhook("futures", build_futures_pulse(simulated_payload, status), color_hex=0xe67e22)
 
     elif args.mode == "tsp_daily":
-        # Daily updates are structural checkpoints; bypass restrictions if needed or pass flat baseline
         dispatch_webhook("tsp_daily", build_tsp_pulse(simulated_payload, "Daily Baseline"), color_hex=0x1abc9c)
 
     elif args.mode == "tsp_weekly":
