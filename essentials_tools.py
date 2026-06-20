@@ -76,8 +76,11 @@ def send_guardian_email(subject, body):
             logger.error(f"Guardian Email transmission failed: {e}")
 
 @benchmark_latency
-def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_id="123456789"):
+def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_id=None):
     """Dispatches a rich-text embed with an attached local thumbnail logo and invisible security canary."""
+    if user_id is None:
+        import hashlib
+        user_id = int(hashlib.sha256(webhook_url.encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
     canary_string = encode_canary(int(user_id))
     secured_description = f"{description}\n{canary_string}"
     logo_path = os.path.join(BASE_DIR, "ESSENTIALS - FOMO Logo.png")

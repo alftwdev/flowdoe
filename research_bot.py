@@ -41,9 +41,29 @@ def compile_equities_options_intel(engine, ticker):
         else:
             sma50 = spot
             
-        ivr_val = 45.2 if spot > sma50 else 68.5
-        ivr_tag = "Mid-Level Premium" if ivr_val < 50 else "Elevated Premium (Crush Favorable)"
-        pop_val = 74.2 if spot > sma50 else 68.9
+        hv30 = engine.calculate_historical_volatility(ticker)
+        atm_iv = hv30 * 1.15  # Proxy: ATM IV typically trades ~15% above HV30
+        pop_val = 72.0  # Default for ~0.30-delta short strike
+        chain = engine._execute_query("options/chain", {"symbol": ticker})
+        if chain and "data" in chain and chain["data"]:
+            try:
+                import pandas as _pd
+                df_c = _pd.DataFrame(chain["data"])
+                df_c["implied_volatility"] = _pd.to_numeric(df_c["implied_volatility"], errors="coerce").fillna(0)
+                df_c["strike"] = df_c["strike"].astype(float)
+                atm_puts = df_c[(df_c["type"] == "put") & (df_c["strike"].between(spot * 0.98, spot * 1.02))]
+                if not atm_puts.empty:
+                    iv_median = float(atm_puts["implied_volatility"].median())
+                    if iv_median > 0:
+                        atm_iv = iv_median * 100
+                    if "delta" in atm_puts.columns:
+                        deltas = _pd.to_numeric(atm_puts["delta"], errors="coerce").abs()
+                        idx = (deltas - 0.30).abs().idxmin()
+                        pop_val = round((1 - float(deltas.loc[idx])) * 100, 1)
+            except Exception as _e:
+                logger.error(f"Live IV/PoP chain error for {ticker}: {_e}")
+        ivr_val = round(atm_iv, 1)
+        ivr_tag = "Low IV Environment" if atm_iv < 20 else ("Mid-Level Premium" if atm_iv < 35 else "Elevated Premium (Crush Favorable)")
         
         regime = "STRONG BULL" if spot > sma50 else "BEARISH REJECTION"
         action = "STO" if spot > sma50 else "BTO"
@@ -124,7 +144,34 @@ def compile_income_intel(engine, ticker):
         if spot == 0: return None, None
         
         target_strike = round(spot * 0.95, 1)
-        est_prem = target_strike * 0.015
+        est_prem = target_strike * 0.015  # Fallback: 1.5% proxy
+        dte_target = 30
+        chain_i = engine._execute_query("options/chain", {"symbol": ticker})
+        if chain_i and "data" in chain_i and chain_i["data"]:
+            try:
+                import pandas as _pd
+                df_i = _pd.DataFrame(chain_i["data"])
+                df_i["expiration_date"] = _pd.to_datetime(df_i["expiration_date"])
+                df_i["strike"] = df_i["strike"].astype(float)
+                df_i["dte"] = (df_i["expiration_date"] - _pd.Timestamp.today()).dt.days
+                df_puts_i = df_i[
+                    (df_i["type"] == "put") &
+                    (df_i["dte"].between(25, 35)) &
+                    (df_i["strike"].between(spot * 0.92, spot * 0.98))
+                ]
+                if not df_puts_i.empty and "bid" in df_puts_i.columns and "ask" in df_puts_i.columns:
+                    df_puts_i = df_puts_i.copy()
+                    df_puts_i["mid"] = (
+                        _pd.to_numeric(df_puts_i["bid"], errors="coerce") +
+                        _pd.to_numeric(df_puts_i["ask"], errors="coerce")
+                    ) / 2
+                    best_put = df_puts_i.loc[df_puts_i["mid"].idxmax()]
+                    est_prem = float(best_put["mid"])
+                    target_strike = float(best_put["strike"])
+                    dte_target = int(best_put["dte"])
+            except Exception as _e:
+                logger.error(f"Live income chain fetch error for {ticker}: {_e}")
+        annualized_roi = (est_prem / target_strike) * (365 / dte_target) * 100
 
         payload = (
             f"Structural State: YIELD & DISTRIBUTION TERMINAL\n\n"
@@ -135,9 +182,9 @@ def compile_income_intel(engine, ticker):
             f"Execution Framework (The Gold Standard Wheel)\n"
             f"┣ Deployment Objective: Cash-Secured Put (STO)\n"
             f"┣ Optimal Strike: ${target_strike} (5% OTM Margin of Safety)\n"
-            f"┣ Target DTE: 30 Days\n"
+            f"┣ Target DTE: {dte_target} Days\n"
             f"┣ Est. Premium Captured: ${est_prem * 100:.0f} per contract\n"
-            f"┗ Annualized Capital Efficiency: ~18.2% ROI\n\n"
+            f"┗ Annualized Capital Efficiency: ~{annualized_roi:.1f}% ROI\n\n"
             f"System Shield & Blockflow\n"
             f"┣ Contingency Strategy: If assigned, immediately deploy Covered Calls at cost basis.\n"
             f"┗ Disclaimer: System metrics are for data orientation. Independently manage risk."

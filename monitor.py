@@ -143,6 +143,14 @@ def get_ticker_report(session, ticker):
     )
 
 def send_daily_pulse(is_test=False):
+    if not is_test:
+        tz_h_guard = pytz.timezone('Pacific/Honolulu')
+        current_date = datetime.now(tz_h_guard).strftime("%Y-%m-%d")
+        last_pulse = db.get_state("last_monitor_pulse_date", "")
+        if last_pulse == current_date:
+            logger.info("Daily pulse already dispatched today — skipping duplicate call.")
+            return
+        db.update_state("last_monitor_pulse_date", current_date)
     reports = []
     # Connection pooling to prevent Twelve Data & SEC API timeouts
     with requests.Session() as session:

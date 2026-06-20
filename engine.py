@@ -13,6 +13,7 @@ import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 from database import EcosystemDatabase
+from analytics import HighFidelityAnalyticsEngine
 
 # Load environment configurations
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -157,6 +158,61 @@ def build_tsp_pulse(data, interval_label):
     )
 
 # =====================================================================
+# LIVE DATA INGESTION LAYER
+# =====================================================================
+
+_analytics_engine = None
+
+def get_analytics():
+    global _analytics_engine
+    if _analytics_engine is None:
+        _analytics_engine = HighFidelityAnalyticsEngine()
+    return _analytics_engine
+
+def fetch_live_payload():
+    """Fetches live market data via HighFidelityAnalyticsEngine each daemon iteration."""
+    engine = get_analytics()
+    payload = {
+        "gex": {"SPY": {"spot": 0.0, "flip": 0.0, "net_oi": 0}},
+        "forex": [{"pair": "EUR/USD", "spot": 0.0, "change": "+0.00%"}],
+        "crypto": {"symbol": "BTC/USD", "spot": 0.0, "velocity": "+0.00%"},
+        "futures": {"symbol": "ES", "spot": 0.0, "posture": "Inside Value"},
+        "tsp": {"fund": "C Fund", "change": "+0.00%"}
+    }
+    try:
+        gex = engine.calculate_gex_profile("SPY")
+        if gex.get("current_spot", 0.0) > 0:
+            payload["gex"]["SPY"].update({
+                "spot": gex["current_spot"],
+                "flip": gex["flip_strike"]
+            })
+    except Exception as e:
+        print(f"[-] Live GEX fetch failed: {e}")
+    try:
+        quotes = engine._fetch_twelve_data_quotes(["EUR/USD", "BTC/USD", "SPY"])
+        eur = quotes.get("EUR/USD", {})
+        if "close" in eur:
+            pct = float(eur.get("percent_change", 0.0))
+            payload["forex"] = [{"pair": "EUR/USD", "spot": float(eur["close"]), "change": f"{pct:+.2f}%"}]
+        btc = quotes.get("BTC/USD", {})
+        if "close" in btc:
+            pct = float(btc.get("percent_change", 0.0))
+            payload["crypto"] = {"symbol": "BTC/USD", "spot": float(btc["close"]), "velocity": f"{pct:+.2f}%"}
+        spy = quotes.get("SPY", {})
+        if "close" in spy:
+            spot = float(spy["close"])
+            vah = float(db.get_state("SPY_vah", spot * 1.005))
+            val_level = float(db.get_state("SPY_val", spot * 0.995))
+            posture = ("Outside Value Up" if spot > vah else
+                       ("Outside Value Down" if spot < val_level else "Inside Value Regime"))
+            chg = float(spy.get("percent_change", 0.0))
+            payload["futures"] = {"symbol": "ES", "spot": spot, "posture": posture}
+            payload["tsp"] = {"fund": "C Fund", "change": f"{chg:+.2f}%"}
+    except Exception as e:
+        print(f"[-] Live quote batch fetch failed: {e}")
+    return payload
+
+# =====================================================================
 # ENGINE EXECUTION ROUTER
 # =====================================================================
 
@@ -169,44 +225,41 @@ def main():
                         choices=["gex", "forex", "crypto", "futures", "tsp_daily", "tsp_weekly", "daemon"])
     args = parser.parse_args()
 
-    # Mock ingestion pipeline representing typical dynamic runtime payloads 
-    simulated_payload = {
-        "gex": {"SPY": {"spot": 542.50, "flip": 540.00, "net_oi": 145000}},
-        "forex": [{"pair": "EUR/USD", "spot": 1.0850, "change": "+0.65%"}],
-        "crypto": {"symbol": "BTC/USD", "spot": 67250.00, "velocity": "+2.10%"},
-        "futures": {"symbol": "ES_F", "spot": 5480.25, "posture": "Outside Value Up"},
-        "tsp": {"fund": "S Fund", "change": "+1.15%"}
-    }
+    live_payload = fetch_live_payload()
 
     if args.mode == "daemon":
         print(f"[+] Launching Ecosystem Pulse Daemon: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         while True:
             try:
+                live_payload = fetch_live_payload()
                 # GEX Sweep
-                g_metric = abs(simulated_payload["gex"]["SPY"]["spot"] - simulated_payload["gex"]["SPY"]["flip"])
+                g_metric = abs(live_payload["gex"]["SPY"]["spot"] - live_payload["gex"]["SPY"]["flip"])
                 should_send, status = evaluate_gatekeeper("gex", g_metric, major_threshold=2.0)
                 if should_send:
                     color = 0x2ecc71 if "NEW" in status else 0xf1c40f
-                    dispatch_webhook("gex_macro", build_gex_pulse(simulated_payload, status), color_hex=color)
+                    dispatch_webhook("gex_macro", build_gex_pulse(live_payload, status), color_hex=color)
 
                 # Forex Sweep
-                f_metric = float(simulated_payload["forex"][0]["change"].replace("%", ""))
+                f_metric = float(live_payload["forex"][0]["change"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("forex", f_metric, major_threshold=0.5)
                 if should_send:
                     color = 0x3498db if "NEW" in status else 0xf1c40f
-                    dispatch_webhook("forex", build_forex_pulse(simulated_payload, status), color_hex=color)
+                    dispatch_webhook("forex", build_forex_pulse(live_payload, status), color_hex=color)
 
                 # Crypto Sweep
-                c_metric = float(simulated_payload["crypto"]["velocity"].replace("%", ""))
+                c_metric = float(live_payload["crypto"]["velocity"].replace("%", ""))
                 should_send, status = evaluate_gatekeeper("crypto", c_metric, major_threshold=1.5)
                 if should_send:
                     color = 0x9b59b6 if "NEW" in status else 0xf1c40f
-                    dispatch_webhook("crypto", build_crypto_pulse(simulated_payload, status), color_hex=color)
+                    dispatch_webhook("crypto", build_crypto_pulse(live_payload, status), color_hex=color)
 
                 # Futures Sweep
-                should_send, status = evaluate_gatekeeper("futures", 1.0, major_threshold=0.5)
+                spy_spot = live_payload["futures"]["spot"]
+                spy_poc = float(db.get_state("SPY_poc", spy_spot))
+                f_spot_delta = abs(spy_spot - spy_poc)
+                should_send, status = evaluate_gatekeeper("futures", f_spot_delta, major_threshold=5.0)
                 if should_send:
-                    dispatch_webhook("futures", build_futures_pulse(simulated_payload, status), color_hex=0xe67e22)
+                    dispatch_webhook("futures", build_futures_pulse(live_payload, status), color_hex=0xe67e22)
 
             except Exception as e:
                 print(f"[-] Daemon execution error: {e}")
@@ -215,39 +268,42 @@ def main():
             time.sleep(900)
 
     elif args.mode == "gex":
-        metric = abs(simulated_payload["gex"]["SPY"]["spot"] - simulated_payload["gex"]["SPY"]["flip"])
+        metric = abs(live_payload["gex"]["SPY"]["spot"] - live_payload["gex"]["SPY"]["flip"])
         should_send, status = evaluate_gatekeeper("gex", metric, major_threshold=2.0)
         if should_send:
             color = 0x2ecc71 if "NEW" in status else 0xf1c40f
-            dispatch_webhook("gex_macro", build_gex_pulse(simulated_payload, status), color_hex=color)
+            dispatch_webhook("gex_macro", build_gex_pulse(live_payload, status), color_hex=color)
 
     elif args.mode == "forex":
-        metric = float(simulated_payload["forex"][0]["change"].replace("%", ""))
+        metric = float(live_payload["forex"][0]["change"].replace("%", ""))
         should_send, status = evaluate_gatekeeper("forex", metric, major_threshold=0.5)
         if should_send:
             color = 0x3498db if "NEW" in status else 0xf1c40f
-            dispatch_webhook("forex", build_forex_pulse(simulated_payload, status), color_hex=color)
+            dispatch_webhook("forex", build_forex_pulse(live_payload, status), color_hex=color)
 
     elif args.mode == "crypto":
-        metric = float(simulated_payload["crypto"]["velocity"].replace("%", ""))
+        metric = float(live_payload["crypto"]["velocity"].replace("%", ""))
         should_send, status = evaluate_gatekeeper("crypto", metric, major_threshold=1.5)
         if should_send:
             color = 0x9b59b6 if "NEW" in status else 0xf1c40f
-            dispatch_webhook("crypto", build_crypto_pulse(simulated_payload, status), color_hex=color)
+            dispatch_webhook("crypto", build_crypto_pulse(live_payload, status), color_hex=color)
 
     elif args.mode == "futures":
-        should_send, status = evaluate_gatekeeper("futures", 1.0, major_threshold=0.5)
+        spy_spot = live_payload["futures"]["spot"]
+        spy_poc = float(db.get_state("SPY_poc", spy_spot))
+        f_spot_delta = abs(spy_spot - spy_poc)
+        should_send, status = evaluate_gatekeeper("futures", f_spot_delta, major_threshold=5.0)
         if should_send:
-            dispatch_webhook("futures", build_futures_pulse(simulated_payload, status), color_hex=0xe67e22)
+            dispatch_webhook("futures", build_futures_pulse(live_payload, status), color_hex=0xe67e22)
 
     elif args.mode == "tsp_daily":
-        dispatch_webhook("tsp_daily", build_tsp_pulse(simulated_payload, "Daily Baseline"), color_hex=0x1abc9c)
+        dispatch_webhook("tsp_daily", build_tsp_pulse(live_payload, "Daily Baseline"), color_hex=0x1abc9c)
 
     elif args.mode == "tsp_weekly":
-        metric = float(simulated_payload["tsp"]["change"].replace("%", ""))
+        metric = float(live_payload["tsp"]["change"].replace("%", ""))
         should_send, status = evaluate_gatekeeper("tsp_weekly", metric, major_threshold=1.0)
         if should_send:
-            dispatch_webhook("tsp_weekly", build_tsp_pulse(simulated_payload, f"Weekly {status}"), color_hex=0x2c3e50)
+            dispatch_webhook("tsp_weekly", build_tsp_pulse(live_payload, f"Weekly {status}"), color_hex=0x2c3e50)
 
 if __name__ == "__main__":
     main()
