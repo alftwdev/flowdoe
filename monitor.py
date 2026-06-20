@@ -18,7 +18,10 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
 
 try:
-    from essentials_tools import send_essentials_embed, get_institutional_conviction
+    from essentials_tools import (
+        send_essentials_embed, send_essentials_embed_with_chart,
+        generate_line_comparison_chart, get_institutional_conviction,
+    )
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
@@ -29,6 +32,21 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 PRIORITY_ASSETS = {
     "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.45},
     "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.30}
+}
+
+# Cornerstone funds (CLM/CRF) run a managed distribution policy fixed at 21% of NAV, paid monthly,
+# with ex-dividend historically falling mid-month (e.g. Feb 17 / Mar 16, 2026). That ex-div drop is
+# a SCHEDULED, expected dip from the cash payout leaving the fund — not a dilution/RO signal — and
+# must not be misclassified as danger. Heuristic window (no scraped exact calendar exists for this).
+EX_DIV_WINDOW_DAYS = range(15, 20)
+
+# Rights Offering risk-score weighting. N-2/SEC filing is the single confirmed, highest-conviction
+# signal; everything else is a leading indicator pieced together from historical RO precedent
+# (elevated premium Z-score, whale distribution into strength, and macro credit stress all tend to
+# precede an RO announcement by days to weeks).
+RO_SCORE_WEIGHTS = {
+    "sec_n2": 60, "z_danger": 25, "z_caution": 12, "premium_extreme": 10,
+    "whale_distribution": 15, "credit_stress": 10, "ex_div_relief": -10,
 }
 
 def check_sec_edgar(session, ticker):
@@ -72,19 +90,72 @@ def fetch_live_metrics(session, symbol):
         logger.error(f"[Data Fetch Error] {e}")
         return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
 
+def is_near_ex_dividend_window(today=None):
+    """Heuristic mid-month ex-div proximity check (see EX_DIV_WINDOW_DAYS note above)."""
+    today = today or datetime.now(pytz.timezone('Pacific/Honolulu'))
+    return today.day in EX_DIV_WINDOW_DAYS
+
+def detect_whale_flow_direction(session, symbol):
+    """
+    Distinguishes whale ACCUMULATION from whale DISTRIBUTION (sell-off) — the generic
+    get_institutional_conviction() helper only flags a volume spike, it doesn't say which way
+    capital is moving, and "which way" is exactly what matters for RO front-running.
+    """
+    try:
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1day&outputsize=21&apikey={TD_API_KEY}"
+        res = session.get(url, timeout=10).json()
+        values = res.get("values", [])
+        if len(values) < 11:
+            return "NORMAL", 1.0
+        today_vol = float(values[0]["volume"])
+        baseline_vol = sum(float(v["volume"]) for v in values[1:21]) / len(values[1:21])
+        if baseline_vol == 0:
+            return "NORMAL", 1.0
+        rvol = today_vol / baseline_vol
+        price_chg_pct = (float(values[0]["close"]) - float(values[1]["close"])) / float(values[1]["close"]) * 100
+        if rvol >= 1.8 and price_chg_pct <= -0.5:
+            return "🔴 DISTRIBUTION (Whale Sell-Off)", rvol
+        if rvol >= 1.8 and price_chg_pct >= 0.5:
+            return "🟢 ACCUMULATION (Whale Buy-In)", rvol
+        return "NORMAL", rvol
+    except Exception as e:
+        logger.error(f"[Whale Flow Error] {symbol}: {e}")
+        return "NORMAL", 1.0
+
+def calculate_ro_risk_score(sec_shield, z_premium, premium, whale_tag, credit_spread, ex_div_near):
+    """Composite Rights-Offering risk score (0-100) from every leading indicator we track."""
+    score = 0
+    if "N-2" in sec_shield:
+        score += RO_SCORE_WEIGHTS["sec_n2"]
+    if z_premium >= 2.0:
+        score += RO_SCORE_WEIGHTS["z_danger"]
+    elif z_premium >= 1.5:
+        score += RO_SCORE_WEIGHTS["z_caution"]
+    if premium > 25.0:
+        score += RO_SCORE_WEIGHTS["premium_extreme"]
+    if "DISTRIBUTION" in whale_tag:
+        score += RO_SCORE_WEIGHTS["whale_distribution"]
+    if credit_spread > 4.5:
+        score += RO_SCORE_WEIGHTS["credit_stress"]
+    if ex_div_near and score > 0:
+        score += RO_SCORE_WEIGHTS["ex_div_relief"]  # negative — scheduled dip context, not dilution risk
+    score = max(0, min(100, score))
+    if score >= 50:
+        tier = "CRITICAL"
+    elif score >= 25:
+        tier = "ELEVATED"
+    else:
+        tier = "LOW"
+    return score, tier
+
 def get_ticker_report(session, ticker):
     price, rsi, nav = fetch_live_metrics(session, ticker)
-    if price == 0.0: 
-        return f"{ticker}\n⚠️ *Data Feed Offline.*\n"
+    if price == 0.0:
+        return f"{ticker}\n⚠️ *Data Feed Offline.*\n", "LOW", 0
 
-    # Whale Flow Tracking
-    whale_status = "NORMAL"
-    if HAS_ESSENTIALS:
-        try:
-            whale_res = get_institutional_conviction(ticker, TD_API_KEY)
-            whale_status = whale_res[0] if isinstance(whale_res, tuple) else whale_res
-        except Exception:
-            pass
+    # Whale Flow Tracking — direction-aware (accumulation vs. distribution/sell-off), not just a
+    # generic volume-spike flag, since "which way is the whale moving" is the actionable signal.
+    whale_status, whale_rvol = detect_whale_flow_direction(session, ticker)
 
     # Margin Arbitrage, DRIP Alpha & Z-Score Mathematics
     annual_div = 1.4580 if ticker == "CLM" else 1.4112 # 2026 Distribution Profiles
@@ -106,17 +177,28 @@ def get_ticker_report(session, ticker):
     # SEC Scraping Engine
     sec_shield = check_sec_edgar(session, ticker)
 
+    # Macro overlay + scheduled ex-div context feed directly into the RO risk score below.
+    credit_spread = float(db.get_state("credit_spread", 0.0))
+    ex_div_near = is_near_ex_dividend_window()
+    ro_score, ro_tier = calculate_ro_risk_score(sec_shield, z_premium, premium, whale_status, credit_spread, ex_div_near)
+
     # Strategy Logic Flow
     z_tag = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
     rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
     prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
+    ex_div_line = "┣ Ex-Div Window: Active (scheduled distribution dip expected, not RO-related)\n" if ex_div_near else ""
 
     if "N-2" in sec_shield:
         status = "🚨 CRITICAL: N-2 DETECTED"
         income_note = "Distribution/Caution phase"
         verdict = "Active SEC N-2/RO filing detected. Immediate NAV dilution imminent."
         recommendation = "Halt DRIP immediately; prepare protective hedge."
-    elif z_premium >= 1.5 or premium > 25.0:
+    elif ro_tier == "CRITICAL":
+        status = "🚨 CRITICAL: RO RISK ELEVATED"
+        income_note = "Distribution/Caution phase"
+        verdict = "Composite Rights-Offering risk score breached the critical threshold."
+        recommendation = "Halt DRIP; consider selling before a potential RO announcement."
+    elif ro_tier == "ELEVATED" or z_premium >= 1.5 or premium > 25.0:
         status = "⚠️ HIGH PREMIUM"
         income_note = "Distribution/Caution phase"
         verdict = "Premium highly extended above historical norms. RO risk elevated."
@@ -127,12 +209,14 @@ def get_ticker_report(session, ticker):
         verdict = "Premium variance within historical standard deviations. No active dilution signatures."
         recommendation = "Reinvest distributions at NAV"
 
-    return (
+    report_text = (
         f"{ticker}\n"
         f"Status:  {status}\n"
         f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
         f"┣ Premium Z-Score (1Y): {z_premium:+.1f} {z_tag}\n"
         f"┣ SEC: {sec_shield}\n"
+        f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
+        f"{ex_div_line}"
         f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
         f"┣ Net Arbitrage Spread: +{s_net:.2f}%\n"
         f"┣ DRIP Alpha Capture: +{alpha_drip:.2f}%\n"
@@ -141,6 +225,95 @@ def get_ticker_report(session, ticker):
         f"┣ Recommendation: {recommendation}\n"
         f"┗ Strategy Verdict: {verdict}\n"
     )
+    return report_text, ro_tier, ro_score
+
+TIER_RANK = {"LOW": 0, "ELEVATED": 1, "CRITICAL": 2}
+
+def build_cornerstone_chart():
+    """Price vs. NAV for both funds, rebased to 100 over 60 days — the premium gap IS the strategy
+    signal, so visualizing price diverging from NAV is more useful here than a plain candlestick."""
+    try:
+        from analytics import HighFidelityAnalyticsEngine
+        engine = HighFidelityAnalyticsEngine()
+        series = {}
+        for ticker, cfg in PRIORITY_ASSETS.items():
+            price_df = engine.fetch_crypto_ohlc(ticker, outputsize=60)
+            nav_df = engine.fetch_crypto_ohlc(cfg["nav_ticker"], outputsize=60)
+            if price_df is not None and not price_df.empty:
+                series[f"{ticker} Price"] = price_df["close"]
+            if nav_df is not None and not nav_df.empty:
+                series[f"{ticker} NAV"] = nav_df["close"]
+        if not series:
+            return None
+        return generate_line_comparison_chart(series, "Cornerstone CLM/CRF | Price vs. NAV (Rebased to 100, 60D)")
+    except Exception as e:
+        logger.error(f"Cornerstone chart generation failed: {e}")
+        return None
+
+def compute_cornerstone_reports():
+    """Single source of truth for both the scheduled daily pulse and the instant escalation path —
+    computed once per call so the continuous monitor loop and the 0800 HST report never drift."""
+    reports, worst_tier = [], "LOW"
+    with requests.Session() as session:
+        for ticker in PRIORITY_ASSETS:
+            text, tier, score = get_ticker_report(session, ticker)
+            reports.append(text)
+            if TIER_RANK.get(tier, 0) > TIER_RANK.get(worst_tier, 0):
+                worst_tier = tier
+    full_report = "\n\n".join(reports)
+
+    credit_spread = float(db.get_state("credit_spread", 0.0))
+    if credit_spread > 4.5:
+        full_report += f"\n\n🚨 **SYSTEMIC MACRO OVERRIDE:** High Yield Credit Spreads are elevated ({credit_spread:.2f}%). CEFs face high probability of NAV decay in this regime."
+        if TIER_RANK["ELEVATED"] > TIER_RANK.get(worst_tier, 0):
+            worst_tier = "ELEVATED"
+
+    return full_report, worst_tier
+
+def dispatch_cornerstone_alert(title, full_report, color, attach_chart=True):
+    """Fires the same report across all four channels: Discord, Pushover, personal email, work email."""
+    chart_bytes = build_cornerstone_chart() if attach_chart else None
+
+    # 1. Discord Dispatch
+    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+        if chart_bytes:
+            send_essentials_embed_with_chart(WEBHOOK_CORNERSTONE, title, full_report, chart_bytes, color)
+        else:
+            send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
+
+    clean_report = full_report.replace("**", "").replace("`", "")
+
+    # 2. Pushover Dispatch (with chart attachment when available — 2.5MB Pushover limit)
+    pushover_token = os.getenv("PUSHOVER_API_TOKEN")
+    pushover_user = os.getenv("PUSHOVER_USER_KEY")
+    if pushover_token and pushover_user:
+        try:
+            data = {"token": pushover_token, "user": pushover_user, "title": title, "message": clean_report, "priority": 0}
+            files = {"attachment": ("cornerstone_chart.png", chart_bytes, "image/png")} if chart_bytes else None
+            requests.post("https://api.pushover.net/1/messages.json", data=data, files=files, timeout=10)
+            logger.info("Pushover notification executed successfully.")
+        except Exception as e:
+            logger.error(f"Pushover transmission failed: {e}")
+
+    # 3. Email Dispatch — personal AND work, per explicit requirement
+    sender = os.getenv("SENDER_EMAIL")
+    pwd = os.getenv("EMAIL_APP_PASSWORD")
+    work_email = os.getenv("WORK_EMAIL")
+    if sender and pwd:
+        try:
+            msg = EmailMessage()
+            msg.set_content(clean_report)
+            msg['Subject'] = title
+            msg['From'] = sender
+            msg['To'] = f"{sender}, {work_email}" if work_email else sender
+            if chart_bytes:
+                msg.add_attachment(chart_bytes, maintype="image", subtype="png", filename="cornerstone_chart.png")
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+                smtp.login(sender, pwd)
+                smtp.send_message(msg)
+            logger.info("Email notification executed successfully (personal + work).")
+        except Exception as e:
+            logger.error(f"Email transmission failed: {e}")
 
 def send_daily_pulse(is_test=False):
     if not is_test:
@@ -151,64 +324,38 @@ def send_daily_pulse(is_test=False):
             logger.info("Daily pulse already dispatched today — skipping duplicate call.")
             return
         db.update_state("last_monitor_pulse_date", current_date)
-    reports = []
-    # Connection pooling to prevent Twelve Data & SEC API timeouts
-    with requests.Session() as session:
-        for ticker in PRIORITY_ASSETS:
-            reports.append(get_ticker_report(session, ticker))
-            
-    full_report = "\n\n".join(reports)
-    
-    # Ecosystem Supplement: CEF Credit Shield Check
-    credit_spread = float(db.get_state("credit_spread", 0.0))
-    if credit_spread > 4.5:
-        full_report += f"\n\n🚨 **SYSTEMIC MACRO OVERRIDE:** High Yield Credit Spreads are elevated ({credit_spread:.2f}%). CEFs face high probability of NAV decay in this regime."
 
+    full_report, worst_tier = compute_cornerstone_reports()
     title = "☕️ Cornerstone Flowstate Update" + (" - 🧪 Test Only" if is_test else "")
-    color = 0xe74c3c if "CRITICAL" in full_report or credit_spread > 4.5 else (0xf1c40f if "HIGH PREMIUM" in full_report else 0x2ecc71)
-    
-    # 1. Discord Dispatch
-    if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
-        send_essentials_embed(WEBHOOK_CORNERSTONE, title, full_report, color)
+    color = 0xe74c3c if worst_tier == "CRITICAL" else (0xf1c40f if worst_tier == "ELEVATED" else 0x2ecc71)
+    dispatch_cornerstone_alert(title, full_report, color)
+    # Keep the escalation tracker in sync so a quiet 0800 report doesn't leave a stale CRITICAL
+    # flag that would block a real future escalation from re-firing.
+    db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
 
-    clean_report = full_report.replace("**", "").replace("`", "")
-    
-    # 2. Pushover Dispatch
-    pushover_token = os.getenv("PUSHOVER_API_TOKEN")
-    pushover_user = os.getenv("PUSHOVER_USER_KEY")
-    if pushover_token and pushover_user:
-        try:
-            requests.post("https://api.pushover.net/1/messages.json", data={
-                "token": pushover_token,
-                "user": pushover_user,
-                "title": title,
-                "message": clean_report,
-                "priority": 0
-            }, timeout=5)
-            logger.info("Pushover notification executed successfully.")
-        except Exception as e:
-            logger.error(f"Pushover transmission failed: {e}")
+def check_and_escalate_if_critical():
+    """
+    Runs every loop tick (every 5 min), independent of the once-daily 0800 HST gate. The moment
+    a N-2 filing, premium Z-score breach, or whale sell-off pushes either fund into ELEVATED/CRITICAL
+    territory, this fires an immediate red-siren alert across all four channels — capital protection
+    can't wait for the next scheduled report. Debounced on tier *transitions* so a sustained critical
+    state doesn't re-spam every 5 minutes; any further worsening (ELEVATED -> CRITICAL) re-fires.
+    """
+    full_report, worst_tier = compute_cornerstone_reports()
+    current_rank = TIER_RANK.get(worst_tier, 0)
+    prev_rank = int(db.get_state("cornerstone_alert_tier_rank", 0))
 
-    # 3. Email Dispatch
-    sender = os.getenv("SENDER_EMAIL")
-    pwd = os.getenv("EMAIL_APP_PASSWORD")
-    if sender and pwd:
-        try:
-            msg = EmailMessage()
-            msg.set_content(clean_report)
-            msg['Subject'] = title
-            msg['From'] = sender
-            msg['To'] = sender
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-                smtp.login(sender, pwd)
-                smtp.send_message(msg)
-            logger.info("Email notification executed successfully.")
-        except Exception as e: 
-            logger.error(f"Email transmission failed: {e}")
+    if current_rank > prev_rank and current_rank > 0:
+        logger.warning(f"🚨 Cornerstone risk escalation: {worst_tier} (was rank {prev_rank}) — firing immediate alert.")
+        title = "🚨🚨 CORNERSTONE RO ALERT — IMMEDIATE ACTION REQUIRED 🚨🚨"
+        dispatch_cornerstone_alert(title, full_report, 0xe74c3c)
+
+    db.update_state("cornerstone_alert_tier_rank", current_rank)
+    return full_report, worst_tier
 
 def run_monitor():
     tz_h = pytz.timezone('Pacific/Honolulu')
-    if len(sys.argv) > 1 and sys.argv[cite: 1].lower() in ["test", "force"]:
+    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
         send_daily_pulse(is_test=True)
         return
 
@@ -216,19 +363,22 @@ def run_monitor():
 
     while True:
         try:
+            # Continuous capital-protection scan — runs every tick regardless of the daily gate.
+            check_and_escalate_if_critical()
+
             now = datetime.now(tz_h)
             current_date = now.strftime("%Y-%m-%d")
             last_pulse = db.get_state("last_monitor_pulse_date", "")
-            
+
             if now.hour >= 8 and last_pulse != current_date:
                 logger.info("Triggering standard 0800 HST Pulse...")
                 send_daily_pulse()
                 db.update_state("last_monitor_pulse_date", current_date)
-                
+
         except Exception as e:
             logger.critical(f"FATAL LOOP EXCEPTION CAUGHT: {e}")
-            
-        time.sleep(300) 
+
+        time.sleep(300)
 
 if __name__ == "__main__":
     run_monitor()

@@ -23,10 +23,10 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 WEBHOOKS = {
     "gex_macro": os.getenv("WEBHOOK_MARKET_ANALYSIS"),
     "gex_options": os.getenv("WEBHOOK_TRADE_SIGNALS"),
-    "futures": os.getenv("WEBHOOK_FUTURES_TRADING"),
+    # Futures dispatch lives exclusively in cross_asset.py (real ES/NQ market profile + board).
+    # Do not add a "futures" entry here — a second gatekeeper on this channel caused state collisions.
     "crypto": os.getenv("WEBHOOK_CRYPTO"),
-    "tsp_daily": os.getenv("WEBHOOK_FED"),
-    "tsp_weekly": os.getenv("WEBHOOK_FED"),
+    # TSP dispatch lives exclusively in scheduler.py --mode tsp (real tsp.gov NAV data + chart).
     "forex": os.getenv("WEBHOOK_FOREX"),
     "announcements": os.getenv("WEBHOOK_ANNOUNCEMENTS"),
     "income": os.getenv("WEBHOOK_DIVIDEND_CCETFS")
@@ -133,30 +133,6 @@ def build_crypto_pulse(data, status_tag):
         f"┗ Final Actionable Posture: EXPLOIT DISLOCATION ON INTRADAY DRAWDOWNS\n"
     )
 
-def build_futures_pulse(data, status_tag):
-    fut_data = data.get("futures", {"symbol": "ES_F", "spot": 0.0, "posture": "Inside Value"})
-    return (
-        f"⚡ **ESSENTIALS MICROSTRUCTURE PROFILE | GLOBAL FUTURES**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"┣ Status: {status_tag}\n"
-        f"┣ Contract Value / Spot: {fut_data['symbol']} @ {fut_data['spot']}\n"
-        f"┣ Algorithmic Profile Range: VAH/VAL Distribution Fields\n"
-        f"┣ Market Order Imbalance: Structural Liquidity Block Trapped\n"
-        f"┗ Final Actionable Posture: FADE VALUE BOUNDARY EXTENSIONS\n"
-    )
-
-def build_tsp_pulse(data, interval_label):
-    tsp_data = data.get("tsp", {"fund": "C Fund", "change": "0.0%"})
-    return (
-        f"⚡ **ESSENTIALS SOVEREIGN TERMINAL | TSP ALLOCATION METRIX**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"┣ Report Interval: {interval_label.upper()} STRUCTURAL SNAPSHOT\n"
-        f"┣ Leading Fund Baseline: {tsp_data['fund']} Performance Change: {tsp_data['change']}\n"
-        f"┣ Trailing Benchmark Dislocation: Adjusted Risk-Premium Divergence Metric\n"
-        f"┣ Macro Systemic Signal: Institutional Liquidity Backstop Retained\n"
-        f"┗ Final Actionable Posture: MAIN HOLDING ALLOCATION UNCHANGED\n"
-    )
-
 # =====================================================================
 # LIVE DATA INGESTION LAYER
 # =====================================================================
@@ -176,8 +152,6 @@ def fetch_live_payload():
         "gex": {"SPY": {"spot": 0.0, "flip": 0.0, "net_oi": 0}},
         "forex": [{"pair": "EUR/USD", "spot": 0.0, "change": "+0.00%"}],
         "crypto": {"symbol": "BTC/USD", "spot": 0.0, "velocity": "+0.00%"},
-        "futures": {"symbol": "ES", "spot": 0.0, "posture": "Inside Value"},
-        "tsp": {"fund": "C Fund", "change": "+0.00%"}
     }
     try:
         gex = engine.calculate_gex_profile("SPY")
@@ -189,7 +163,7 @@ def fetch_live_payload():
     except Exception as e:
         print(f"[-] Live GEX fetch failed: {e}")
     try:
-        quotes = engine._fetch_twelve_data_quotes(["EUR/USD", "BTC/USD", "SPY"])
+        quotes = engine._fetch_twelve_data_quotes(["EUR/USD", "BTC/USD"])
         eur = quotes.get("EUR/USD", {})
         if "close" in eur:
             pct = float(eur.get("percent_change", 0.0))
@@ -198,16 +172,6 @@ def fetch_live_payload():
         if "close" in btc:
             pct = float(btc.get("percent_change", 0.0))
             payload["crypto"] = {"symbol": "BTC/USD", "spot": float(btc["close"]), "velocity": f"{pct:+.2f}%"}
-        spy = quotes.get("SPY", {})
-        if "close" in spy:
-            spot = float(spy["close"])
-            vah = float(db.get_state("SPY_vah", spot * 1.005))
-            val_level = float(db.get_state("SPY_val", spot * 0.995))
-            posture = ("Outside Value Up" if spot > vah else
-                       ("Outside Value Down" if spot < val_level else "Inside Value Regime"))
-            chg = float(spy.get("percent_change", 0.0))
-            payload["futures"] = {"symbol": "ES", "spot": spot, "posture": posture}
-            payload["tsp"] = {"fund": "C Fund", "change": f"{chg:+.2f}%"}
     except Exception as e:
         print(f"[-] Live quote batch fetch failed: {e}")
     return payload
@@ -222,7 +186,7 @@ def main():
     # FIX: required=False allows the script to survive in the Always-On tab.
     # Added "daemon" to choices and set it as the default.
     parser.add_argument("--mode", type=str, required=False, default="daemon",
-                        choices=["gex", "forex", "crypto", "futures", "tsp_daily", "tsp_weekly", "daemon"])
+                        choices=["gex", "forex", "crypto", "daemon"])
     args = parser.parse_args()
 
     live_payload = fetch_live_payload()
@@ -253,14 +217,6 @@ def main():
                     color = 0x9b59b6 if "NEW" in status else 0xf1c40f
                     dispatch_webhook("crypto", build_crypto_pulse(live_payload, status), color_hex=color)
 
-                # Futures Sweep
-                spy_spot = live_payload["futures"]["spot"]
-                spy_poc = float(db.get_state("SPY_poc", spy_spot))
-                f_spot_delta = abs(spy_spot - spy_poc)
-                should_send, status = evaluate_gatekeeper("futures", f_spot_delta, major_threshold=5.0)
-                if should_send:
-                    dispatch_webhook("futures", build_futures_pulse(live_payload, status), color_hex=0xe67e22)
-
             except Exception as e:
                 print(f"[-] Daemon execution error: {e}")
             
@@ -287,23 +243,6 @@ def main():
         if should_send:
             color = 0x9b59b6 if "NEW" in status else 0xf1c40f
             dispatch_webhook("crypto", build_crypto_pulse(live_payload, status), color_hex=color)
-
-    elif args.mode == "futures":
-        spy_spot = live_payload["futures"]["spot"]
-        spy_poc = float(db.get_state("SPY_poc", spy_spot))
-        f_spot_delta = abs(spy_spot - spy_poc)
-        should_send, status = evaluate_gatekeeper("futures", f_spot_delta, major_threshold=5.0)
-        if should_send:
-            dispatch_webhook("futures", build_futures_pulse(live_payload, status), color_hex=0xe67e22)
-
-    elif args.mode == "tsp_daily":
-        dispatch_webhook("tsp_daily", build_tsp_pulse(live_payload, "Daily Baseline"), color_hex=0x1abc9c)
-
-    elif args.mode == "tsp_weekly":
-        metric = float(live_payload["tsp"]["change"].replace("%", ""))
-        should_send, status = evaluate_gatekeeper("tsp_weekly", metric, major_threshold=1.0)
-        if should_send:
-            dispatch_webhook("tsp_weekly", build_tsp_pulse(live_payload, f"Weekly {status}"), color_hex=0x2c3e50)
 
 if __name__ == "__main__":
     main()

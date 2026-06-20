@@ -7,7 +7,10 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from analytics import HighFidelityAnalyticsEngine
-from essentials_tools import send_essentials_embed
+from essentials_tools import (
+    send_essentials_embed, send_essentials_embed_with_chart, generate_candlestick_chart,
+    generate_line_comparison_chart, calculate_correlation, get_trend_alignment,
+)
 
 logger = logging.getLogger("Central_Scheduler")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,12 +46,116 @@ def main():
             fx_payload = engine.generate_forex_matrix_payload()
             if fx_payload and WEBHOOK_FOREX:
                 send_essentials_embed(WEBHOOK_FOREX, "Forex Performance Grid", fx_payload, 0x34495e)
-            
+
+                # Refresh ATR-based expected-range bounds for the streamed pairs — this is what
+                # stream.py's real-time perimeter alerts read; without this refresh those bounds
+                # default to 0 and the alert silently never fires.
+                for pair in engine.FX_STREAMED_PAIRS:
+                    try:
+                        engine.update_fx_volatility_bounds(pair)
+                    except Exception as e:
+                        logger.error(f"FX volatility bounds refresh failed for {pair}: {e}")
+
+                # Mover-of-the-day deep dive: pivot levels + multi-timeframe trend confluence +
+                # chart snapshot (mirrors the Finviz-style candlestick reference image), only for
+                # whichever pair actually moved — avoids spamming a chart every cron tick.
+                try:
+                    fx_quotes = engine._fetch_twelve_data_quotes(engine.FX_UNIVERSE)
+                    mover = engine.find_biggest_mover(fx_quotes, engine.FX_UNIVERSE)
+                    if mover and abs(mover[3]) >= 0.35:
+                        symbol, price, change, pct_change = mover
+                        pivots = engine.calculate_fx_pivot_points(symbol)
+                        confluence_tag, confluence_detail = engine.calculate_fx_trend_confluence(symbol)
+                        ohlc = engine.fetch_crypto_ohlc(symbol, outputsize=60)
+                        if ohlc is not None and not ohlc.empty:
+                            chart_bytes = generate_candlestick_chart(symbol, ohlc, last_change=change, last_change_pct=pct_change)
+                            pivot_block = ""
+                            if pivots:
+                                pivot_block = (
+                                    f"┣ Pivot: `{pivots['pivot']:.4f}` | R1: `{pivots['r1']:.4f}` | S1: `{pivots['s1']:.4f}`\n"
+                                )
+                            fx_deep_dive = (
+                                f"┣ Spot: `{price:,.4f}` | Move: `{pct_change:+.2f}%`\n"
+                                f"{pivot_block}"
+                                f"┣ Trend Confluence (1h/4h/1D): {confluence_tag}  [{confluence_detail}]\n"
+                                f"┗ Largest swing in today's major-pairs universe."
+                            )
+                            send_essentials_embed_with_chart(
+                                WEBHOOK_FOREX, f"💱 FX MOVER OF THE DAY: {symbol}", fx_deep_dive, chart_bytes, color=0x34495e
+                            )
+                            logger.info(f"Dispatched FX mover chart for {symbol} ({pct_change:+.2f}%)")
+                except Exception as e:
+                    logger.error(f"FX mover chart dispatch failed: {e}")
+
+                # Cross-sector sync: USD/JPY (carry-trade barometer) + Gold direction gives a quick
+                # risk-on/off read. When it's unambiguous, broadcast it to Market Analysis so the
+                # whole ecosystem (equities, futures, crypto) is reading the same macro tape.
+                try:
+                    regime, explanation, usdjpy_chg, gold_chg = engine.assess_risk_sentiment_regime(fx_quotes)
+                    if regime != "🟡 MIXED" and WEBHOOK_MARKET:
+                        if engine.db.track_and_limit_alerts("fx_risk_regime_sync", regime, usdjpy_chg, max_broadcasts=2, threshold_pct=0.3):
+                            regime_payload = (
+                                f"⚡ **CROSS-ASSET CONVICTION | CARRY-TRADE RISK REGIME**\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"┣ Regime: {regime}\n"
+                                f"┣ USD/JPY: `{usdjpy_chg:+.2f}%` | Gold (XAU/USD): `{gold_chg:+.2f}%`\n"
+                                f"┗ {explanation}"
+                            )
+                            send_essentials_embed(WEBHOOK_MARKET, "FOREX → GLOBAL MACRO SIGNAL SYNC", regime_payload, 0x16a085)
+                            logger.info(f"Dispatched FX risk regime sync ({regime})")
+                except Exception as e:
+                    logger.error(f"FX risk regime sync failed: {e}")
+
             crypto_payload = engine.generate_crypto_matrix_payload()
             if crypto_payload and WEBHOOK_CRYPTO:
                 # Dynamic translation matching image layout properties (Yellow Warning/Scan Bar)
                 send_essentials_embed(WEBHOOK_CRYPTO, "Crypto Sector Liquidity Tracker", crypto_payload, 0xf1c40f)
-                
+
+                # Chart snapshot for whichever coin moved the most today (BTC/ETH/SOL/ADA/XRP/LINK/HBAR).
+                # Only attach a chart on a real move — avoids spamming an image every cron tick.
+                try:
+                    crypto_quotes = engine._fetch_twelve_data_quotes(engine.CRYPTO_UNIVERSE)
+                    mover = engine.find_biggest_crypto_mover(crypto_quotes)
+                    if mover and abs(mover[3]) >= 3.0:
+                        symbol, price, change, pct_change = mover
+                        ohlc = engine.fetch_crypto_ohlc(symbol, outputsize=60)
+                        if ohlc is not None and not ohlc.empty:
+                            chart_bytes = generate_candlestick_chart(symbol, ohlc, last_change=change, last_change_pct=pct_change)
+                            send_essentials_embed_with_chart(
+                                WEBHOOK_CRYPTO, f"🪙 CRYPTO MOVER OF THE DAY: {symbol}",
+                                f"┣ Spot: `${price:,.2f}`\n┗ 1-Day Move: `{pct_change:+.2f}%` — largest swing in the tracked universe today.",
+                                chart_bytes, color=0xf39c12
+                            )
+                            logger.info(f"Dispatched crypto chart snapshot for {symbol} ({pct_change:+.2f}%)")
+                except Exception as e:
+                    logger.error(f"Crypto chart snapshot failed: {e}")
+
+                # Cross-sector sync: BTC/USD trend alignment with SPY informs options scalpers
+                # ahead of the cash open — broadcast to Market Analysis, not the crypto channel,
+                # so the signal unifies with the rest of the ecosystem.
+                try:
+                    btc_ohlc = engine.fetch_crypto_ohlc("BTC/USD", outputsize=20)
+                    spy_ohlc = engine.fetch_crypto_ohlc("SPY", outputsize=20)
+                    if btc_ohlc is not None and spy_ohlc is not None and len(btc_ohlc) == len(spy_ohlc) and WEBHOOK_MARKET:
+                        corr = calculate_correlation(btc_ohlc['close'].tolist(), spy_ohlc['close'].tolist())
+                        btc_trend, btc_bullish = get_trend_alignment("BTC/USD", TWELVE_DATA_API_KEY)
+                        spy_trend, spy_bullish = get_trend_alignment("SPY", TWELVE_DATA_API_KEY)
+                        if abs(corr) >= 0.6 and btc_bullish == spy_bullish:
+                            if engine.db.track_and_limit_alerts("btc_spy_correlation_sync", f"ALIGN_{btc_bullish}", corr, max_broadcasts=2, threshold_pct=0.2):
+                                posture = "RISK-ON ALIGNMENT" if btc_bullish else "RISK-OFF ALIGNMENT"
+                                corr_payload = (
+                                    f"⚡ **CROSS-ASSET CONVICTION | BTC ↔ SPY TREND SYNC**\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"┣ Correlation (20D close): `{corr:+.2f}`\n"
+                                    f"┣ BTC/USD: {btc_trend}\n"
+                                    f"┣ SPY: {spy_trend}\n"
+                                    f"┗ Final Actionable Posture: {posture} — crypto sentiment is leaning the same way equities are pricing in. Useful pre-market context for options scalpers."
+                                )
+                                send_essentials_embed(WEBHOOK_MARKET, "CRYPTO → EQUITIES SIGNAL SYNC", corr_payload, 0x9b59b6)
+                                logger.info(f"Dispatched BTC/SPY correlation sync ({posture})")
+                except Exception as e:
+                    logger.error(f"BTC/SPY correlation sync failed: {e}")
+
             logger.info("Macro matrix compilation and dispatch completed.")
 
         elif args.mode == "morning":
@@ -56,6 +163,44 @@ def main():
                 primer_payload = engine.generate_premarket_primer(ticker)
                 if primer_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
+
+            # ── OPTIONS CHANNEL: Pre-Market GEX + VIX Brief ──────────────
+            # Gives options traders their day-start context before the open.
+            try:
+                gex = engine.calculate_gex_profile("SPY")
+                vix_data = engine._execute_query("price", {"symbol": "VIX"})
+                vix_spot = float(vix_data.get("price", 15.0)) if vix_data else 15.0
+                spy_spot = gex.get("current_spot", 0.0)
+                flip = gex.get("flip_strike", 0.0)
+                gex_state = gex.get("market_state", "UNKNOWN")
+
+                # Determine premium environment
+                if vix_spot < 14:
+                    premium_env = "SUPPRESSED — Low premium, avoid naked shorts. Prefer debit structures."
+                elif vix_spot < 18:
+                    premium_env = "BALANCED — Moderate IV. Credit spreads and iron condors viable."
+                else:
+                    premium_env = "RICH — Elevated IV. Premium sellers have statistical edge today."
+
+                gamma_context = (
+                    "Dealers are SHORT gamma — expect accelerated moves in the direction of price."
+                    if "NEGATIVE" in gex_state else
+                    "Dealers are LONG gamma — expect mean-reversion and pinning behavior near key strikes."
+                )
+
+                options_brief = (
+                    f"Pre-market options environment for today's session:\n\n"
+                    f"┣ VIX: `{vix_spot:.2f}` | Premium: {premium_env}\n"
+                    f"┣ SPY Spot: `${spy_spot:.2f}` | GEX Flip: `${flip:.2f}`\n"
+                    f"┣ Gamma Regime: {gex_state}\n"
+                    f"┗ Dealer Behavior: {gamma_context}\n\n"
+                    f"Bias: {'Favor BUY setups (positive gamma suppresses downside).' if 'POSITIVE' in gex_state else 'Elevated tail risk. Size down on directional plays. Spreads preferred.'}"
+                )
+                if WEBHOOK_OPTIONS:
+                    send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS DESK | Pre-Market Conditions Brief", options_brief, 0x00ffff)
+            except Exception as e:
+                logger.error(f"Morning options brief failed: {e}")
+
             logger.info("Morning primers successfully compiled and dispatched.")
 
         elif args.mode == "eod":
@@ -110,82 +255,234 @@ def main():
             logger.info("End-of-day tape audits successfully compiled and dispatched.")
 
         elif args.mode == "tsp":
-            tsp_payload = engine.compile_tsp_allocation_matrix()
-            send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
+            tsp_payload, fund_series = engine.generate_tsp_eod_report()
+            if tsp_payload and WEBHOOK_TSP:
+                try:
+                    if fund_series:
+                        chart_bytes = generate_line_comparison_chart(
+                            fund_series, "TSP Individual Funds | 90-Day Relative Performance (Rebased to 100)"
+                        )
+                        send_essentials_embed_with_chart(
+                            WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector",
+                            tsp_payload, chart_bytes, color=0x3498db
+                        )
+                    else:
+                        send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
+                except Exception as e:
+                    logger.error(f"TSP chart dispatch failed, falling back to text-only: {e}")
+                    send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
+                logger.info("TSP End-of-Day report dispatched with official tsp.gov data.")
+            else:
+                logger.info("TSP report skipped — already reported today's official close, or data unavailable.")
 
         elif args.mode == "income":
-            logger.info("Executing Capital Deployment & Income Radar scans...")
+            logger.info("Executing Income Channel: CC ETF Pulse + Wheel Candidates + Ex-Div Radar...")
 
-            # 1. EX-DIVIDEND RADAR EXECUTION
-            ex_div_data = engine.generate_ex_dividend_radar()
-            if ex_div_data:
-                ex_payload = "Targeted Capital Deployment Timeline\n\n"
-                composite_ex_trigger = 0.0
-                
-                for item in ex_div_data:
-                    days_text = "TOMORROW" if item['days_away'] <= 1 else f"In {item['days_away']} Days"
-                    ex_payload += (
-                        f"**{item['symbol']}** | Action Required: `{days_text}`\n"
-                        f"┣ Ex-Dividend Date: `{item['ex_date']}`\n"
-                        f"┗ Declared Payout: `${item['amount']:,.2f}` per share\n\n"
-                    )
-                    composite_ex_trigger += item['amount']
-                    
-                ex_payload += "Context: Capital must be deployed and settled before the ex-date to capture the distribution."
-                
-                # 3-Strike Gatekeeper: Only broadcast if new dividend dates enter the 14-day window
-                if engine.db.track_and_limit_alerts("ex_dividend_radar_weekly", f"EX_DIV_{len(ex_div_data)}", composite_ex_trigger, max_broadcasts=2, threshold_pct=0.05):
-                    if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, "EX-DIVIDEND RADAR & YIELD CAPTURE", ex_payload, 0xf1c40f)
-
-            # 2. DIVIDEND WHEEL ARCHITECTURE (Yield vs Risk)
-            wheel_candidates = engine.generate_dividend_wheel_candidates()
-            if wheel_candidates:
-                composite_trigger = sum([c['strike'] for c in wheel_candidates])
-                alert_id = "dividend_wheel_strategy_daily"
-                state_str = "_".join([f"{c['symbol']}{c['strike']}" for c in wheel_candidates])
-                
-                if engine.db.track_and_limit_alerts(
-                    alert_id=alert_id,
-                    current_state=state_str,
-                    current_trigger=composite_trigger,
-                    max_broadcasts=2,
-                    threshold_pct=0.01
-                ):
-                    wheel_payload = "Automated Cash-Secured Put Strategies on Dividend Aristocrats\n\n"
-                    avg_win_prob = 0.0
-                    for c in wheel_candidates:
-                        wheel_payload += (
-                            f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n"
-                            f"┣ Structural Trend: {c['trend']}\n"
-                            f"┣ Optimal Setup: `STO ${c['strike']:.1f} Put` ({c['expiration']}, {c['dte']} DTE)\n"
-                            f"┣ Premium Collected: `${c['premium']*100:.0f}` per contract\n"
-                            f"┣ Probability of Profit: `{c['chance_of_profit']:.1f}%`\n"
-                            f"┗ Capital Efficiency: Est. `{c['annualized_roi']:.1f}%` Annualized ROI\n\n"
+            # ── SEGMENT 1: CC ETF & INCOME FUND PULSE ─────────────────────────
+            # Covers: JEPI, JEPQ, DIVO, XYLD, QYLD, RYLD, SCHD, O, MAIN, ARCC
+            # Surfaces: next ex-date, annualized yield, urgency tags, moat rating
+            try:
+                etf_data = engine.generate_income_etf_pulse()
+                if etf_data:
+                    etf_payload = "Monthly & Weekly Income Fund Tracker — Ex-Dividend Urgency Board\n\n"
+                    for item in etf_data:
+                        etf_payload += (
+                            f"**{item['symbol']}** {item['moat']} | {item['type']} | {item['freq']}\n"
+                            f"┣ Spot: `${item['spot']:.2f}` | Div: `${item['div_amount']:.4f}` | Yield: `{item['ann_yield']:.1f}%` ann.\n"
+                            f"┣ Ex-Date: `{item['ex_date']}` ({item['days_away']} days)\n"
+                            f"┗ Status: {item['urgency']}\n\n"
                         )
-                        avg_win_prob += c['chance_of_profit']
-                    
-                    avg_win_prob = avg_win_prob / len(wheel_candidates) if wheel_candidates else 100.0
-                    setup_color = 0x2ecc71 if avg_win_prob >= 75.0 else 0xf1c40f
-                    
-                    if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, "CAPITAL EFFICIENCY MATRIX | WHEEL BLUEPRINT", wheel_payload, setup_color)
+                    etf_payload += (
+                        "✅ = Wide-moat, institutionally vetted | ⚠️ = Yield chase risk — verify payout sustainability\n"
+                        "Directive: Deploy capital before ex-date. Position must settle (T+1) to capture distribution."
+                    )
+                    state_key = f"ETFPULSE_{len(etf_data)}_{'_'.join([e['symbol'] for e in etf_data[:3]])}"
+                    if engine.db.track_and_limit_alerts("income_etf_pulse", state_key, float(len(etf_data)), max_broadcasts=3, threshold_pct=0.1):
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "INCOME ETF PULSE | CC ETF & Dividend Fund Radar", etf_payload, 0x1abc9c)
+                            logger.info(f"CC ETF pulse dispatched: {len(etf_data)} funds tracked.")
+            except Exception as e:
+                logger.error(f"Income ETF pulse segment failed: {e}")
+
+            # ── SEGMENT 2: DIVIDEND WHEEL CANDIDATES v2 ───────────────────────
+            # Enhanced scanner: RSI-14, Bollinger %B, IVR proxy, theta, break-even,
+            # Finnhub safety grade, 3% capital sizing. Returns top 5.
+            try:
+                wheel_candidates = engine.generate_dividend_wheel_candidates()
+                if wheel_candidates:
+                    composite_trigger = sum(c['strike'] for c in wheel_candidates)
+                    state_str = "_".join(f"{c['symbol']}{c['strike']}" for c in wheel_candidates)
+
+                    if engine.db.track_and_limit_alerts(
+                        alert_id="dividend_wheel_v2_daily",
+                        current_state=state_str,
+                        current_trigger=composite_trigger,
+                        max_broadcasts=3,
+                        threshold_pct=0.01
+                    ):
+                        wheel_payload = "Cash-Secured Put Setups on Dividend Stocks — Institutional-Grade Screen\n\n"
+                        avg_pop = 0.0
+
+                        for c in wheel_candidates:
+                            div_growth_tag = ""
+                            if c.get("div_growth_5y") is not None:
+                                div_growth_tag = f" | 5yr Div Growth: `{c['div_growth_5y']:.1f}%`"
+                            payout_tag = ""
+                            if c.get("payout_ratio") is not None:
+                                payout_tag = f" | Payout Ratio: `{c['payout_ratio']:.0f}%`"
+
+                            wheel_payload += (
+                                f"**{c['symbol']}** | Spot: `${c['spot']:.2f}` | {c['trend']} {c['sma50_tag']}\n"
+                                f"┣ RSI-14: `{c['rsi14']}` {c['rsi_tag']} | BB Zone: {c['bb_zone']}\n"
+                                f"┣ Setup: `STO ${c['strike']:.1f} Put` | Exp: `{c['expiration']}` ({c['dte']} DTE)\n"
+                                f"┣ Greeks: Δ `{c['delta']:.2f}` | θ ~`${c['theta_daily']:.3f}`/day | IV `{c['iv']:.1f}%` | IVR `{c['ivr_proxy']:.0f}%` ({c['ivr_tag']})\n"
+                                f"┣ Premium: `${c['premium']*100:.0f}/contract` | PoP: `{c['pop']:.1f}%` | Ann. ROI: `{c['annualized_roi']:.1f}%`\n"
+                                f"┣ Break-Even: `${c['break_even']:.2f}` | Downside Protected: `{c['pct_downside']:.1f}%`\n"
+                                f"┣ Sizing (3% rule): `{c['contracts_10k']}x @ $10k` | `{c['contracts_25k']}x @ $25k`\n"
+                                f"┗ Div Safety: {c['safety_grade']}{payout_tag}{div_growth_tag}\n\n"
+                            )
+                            avg_pop += c['pop']
+
+                        avg_pop = avg_pop / len(wheel_candidates)
+                        setup_color = 0x2ecc71 if avg_pop >= 75.0 else 0xf1c40f
+
+                        wheel_payload += (
+                            "Wheel Strategy Path: CSP → Assignment → Covered Call → Repeat\n"
+                            "Capital Rule: 3% max per position. Scale contracts to account size."
+                        )
+
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL v2 | Premium Selling Setups", wheel_payload, setup_color)
+                            logger.info(f"Wheel candidates dispatched: {len(wheel_candidates)} setups, avg PoP {avg_pop:.1f}%.")
+                    else:
+                        logger.info("Dividend Wheel v2 blocked by gatekeeper — state unchanged.")
                 else:
-                    logger.info("Dividend Wheel Strategy blocked by Ecosystem Gatekeeper (State Unchanged).")
+                    logger.info("No wheel candidates passed filters this session.")
+            except Exception as e:
+                logger.error(f"Dividend wheel v2 segment failed: {e}")
+
+            # ── SEGMENT 3: EX-DIVIDEND RADAR ──────────────────────────────────
+            # 14-day countdown for the broader dividend universe (10 tickers).
+            # Separate from ETF pulse — covers individual stocks too.
+            try:
+                ex_div_data = engine.generate_ex_dividend_radar()
+                if ex_div_data:
+                    ex_payload = "Targeted Capital Deployment Timeline — Next 14 Days\n\n"
+                    composite_ex_trigger = 0.0
+                    for item in ex_div_data:
+                        if item['days_away'] <= 1:
+                            urgency_tag = "🔥 **TOMORROW — LAST CHANCE**"
+                        elif item['days_away'] <= 3:
+                            urgency_tag = "⚡ **IMMINENT**"
+                        elif item['days_away'] <= 7:
+                            urgency_tag = "📅 **THIS WEEK**"
+                        else:
+                            urgency_tag = f"🔍 **In {item['days_away']} Days**"
+
+                        ex_payload += (
+                            f"**{item['symbol']}** | {urgency_tag}\n"
+                            f"┣ Ex-Dividend Date: `{item['ex_date']}`\n"
+                            f"┗ Declared Payout: `${item['amount']:,.4f}` per share\n\n"
+                        )
+                        composite_ex_trigger += item['amount']
+
+                    ex_payload += (
+                        "Directive: Position must be held at market open on ex-date. "
+                        "Settlement is T+1 — buy no later than the day before ex-date."
+                    )
+
+                    if engine.db.track_and_limit_alerts(
+                        "ex_dividend_radar_weekly",
+                        f"EX_DIV_{len(ex_div_data)}_AMT_{round(composite_ex_trigger, 2)}",
+                        composite_ex_trigger,
+                        max_broadcasts=2,
+                        threshold_pct=0.05
+                    ):
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "EX-DIVIDEND RADAR | Yield Capture Countdown", ex_payload, 0xf1c40f)
+                            logger.info(f"Ex-dividend radar dispatched: {len(ex_div_data)} upcoming events.")
+            except Exception as e:
+                logger.error(f"Ex-dividend radar segment failed: {e}")
         elif args.mode == "iv_crush":
+            iv_dispatched = False
+            flow_dispatched = False
+
+            # ── SEGMENT 1: IV CRUSH SCANNER (expanded universe: 15 tickers) ──
             scan_data = engine.run_iv_crush_scan()
-            if not scan_data: return
-            payload = "Systemic IV Overpricing & Volatility Crush Report\n\n"
-            for asset in scan_data:
-                payload += (
-                    f"**Asset**: `{asset['symbol']}`\n"
-                    f"┣ Trailing 30D Historical Volatility: `{asset['hv']}%`\n"
-                    f"┣ Front-Month Implied Volatility (IV): `{asset['iv']}%`\n"
-                    f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` Vol Variance\n"
-                    f"Context: Selling credit strategies or iron condors here carries maximized statistical advantages due to current premium inflation.\n\n"
+            if scan_data:
+                payload = "Systemic IV Overpricing & Volatility Crush Report\n\n"
+                for asset in scan_data:
+                    edge_tag = "EXTREME EDGE" if asset['spread'] >= 20 else ("STRONG EDGE" if asset['spread'] >= 12 else "MODERATE EDGE")
+                    payload += (
+                        f"**{asset['symbol']}** | {edge_tag}\n"
+                        f"┣ 30D Historical Volatility (HV30): `{asset['hv']}%`\n"
+                        f"┣ Front-Month Implied Volatility (IV): `{asset['iv']}%`\n"
+                        f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` vol variance\n"
+                        f"Edge: Selling credit (spreads, iron condors, covered calls) statistically favored.\n\n"
+                    )
+                send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL | IV Crush Scanner", payload, 0xf1c40f)
+                iv_dispatched = True
+                logger.info(f"IV crush scan dispatched: {len(scan_data)} elevated-premium assets.")
+
+            # ── SEGMENT 2: UNUSUAL FLOW SCANNER (Cheddar Flow / UW replacement) ──
+            flow_data = engine.scan_unusual_options_flow()
+            if flow_data:
+                flow_payload = "Institutional Sweep & OI Positioning Intelligence\n\n"
+                for signal in flow_data:
+                    if signal["type"] == "SWEEP":
+                        flow_payload += (
+                            f"**{signal['symbol']}** | {signal['direction']} SWEEP — {signal['conviction']} CONVICTION\n"
+                            f"┣ Strike: `${signal['strike']:.0f}` | Expiry: `{signal['expiration']}` ({signal['dte']} DTE)\n"
+                            f"┣ Volume: `{signal['volume']:,}` contracts | OI: `{signal['open_interest']:,}`\n"
+                            f"┣ Vol:OI Ratio: `{signal['vol_oi_ratio']:.1f}x` (threshold: 2.0x = sweep)\n"
+                            f"┗ IV: `{signal['iv']:.1f}%` | Fresh directional positioning detected\n\n"
+                        )
+                    else:  # OI_SKEW
+                        flow_payload += (
+                            f"**{signal['symbol']}** | OI SKEW — {signal['direction']}\n"
+                            f"┣ Put:Call OI Ratio: `{signal['vol_oi_ratio']:.2f}`\n"
+                            f"┗ Total Open Interest: `{signal['open_interest']:,}` contracts across chain\n\n"
+                        )
+                flow_payload += (
+                    "Methodology: Sweeps (Vol:OI > 2x) signal fresh institutional conviction — "
+                    "they are buying direction, not just hedging. OI skew reveals macro positioning bias."
                 )
-            # Highly pricing-skewed entries default to a Yellow/Orange actionable scanning line
-            send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL: IV Crush Scanner", payload, 0xf1c40f)
+                alert_id = "unusual_flow_scan"
+                state_str = "_".join([f"{s['symbol']}{s['direction'][:3]}" for s in flow_data[:3]])
+                if engine.db.track_and_limit_alerts(alert_id, state_str, float(len(flow_data)), max_broadcasts=3, threshold_pct=0.5):
+                    send_essentials_embed(WEBHOOK_OPTIONS, "INSTITUTIONAL FLOW RADAR | Sweep & OI Intelligence", flow_payload, 0x9b59b6)
+                    flow_dispatched = True
+                    logger.info(f"Unusual flow dispatch: {len(flow_data)} signals found.")
+
+            # ── FALLBACK: Market Conditions Snapshot ─────────────────────────
+            # Breaks channel silence when no IV crush or flow signals exist.
+            # Provides meaningful context even on quiet days.
+            if not iv_dispatched and not flow_dispatched:
+                gex = engine.calculate_gex_profile("SPY")
+                vix_data = engine._execute_query("price", {"symbol": "VIX"})
+                vix_spot = float(vix_data.get("price", 15.0)) if vix_data else 15.0
+
+                if vix_spot < 15:
+                    vix_env = "LOW VOLATILITY — Premium sellers in a drought. Prefer debit spreads or condors."
+                elif vix_spot < 20:
+                    vix_env = "MODERATE VOLATILITY — Balanced premium. Credit spreads statistically favorable."
+                else:
+                    vix_env = "ELEVATED VOLATILITY — Rich premium. Ideal for iron condors & covered calls."
+
+                gex_state = gex.get("market_state", "UNKNOWN")
+                flip = gex.get("flip_strike", 0.0)
+
+                outlook_payload = (
+                    f"No IV crush or unusual flow signals detected this session.\n\n"
+                    f"┣ VIX Spot: `{vix_spot:.2f}` | Regime: {vix_env}\n"
+                    f"┣ SPY Gamma Posture: {gex_state}\n"
+                    f"┣ GEX Flip Level: `${flip:.2f}` (dealer hedging pivot)\n"
+                    f"┗ Directive: {'Wait for VIX expansion above 16 for optimal credit premium.' if vix_spot < 16 else 'Premium environment is active. Screen for setups on earnings or macro events.'}\n\n"
+                    f"Context: When both IV and flow are quiet, capital preservation > new entries. "
+                    f"Watch for VIX spike or unusual volume tomorrow morning."
+                )
+                send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS MARKET PULSE | Conditions Overview", outlook_payload, 0x3498db)
+                logger.info("Options fallback market conditions snapshot dispatched.")
 
         elif args.mode == "gex":
             gex_data = engine.calculate_gex_profile("SPY")

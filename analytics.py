@@ -16,6 +16,7 @@ class HighFidelityAnalyticsEngine:
         self.db = EcosystemDatabase()
         self.api_key = os.getenv("TWELVE_DATA_API_KEY")
         self.fred_api_key = os.getenv("FRED_API_KEY")
+        # No external fundamental API required — derived from Twelve Data statistics endpoint
         self.base_url = "https://api.twelvedata.com"
 
     def _execute_query(self, endpoint, params):
@@ -49,6 +50,88 @@ class HighFidelityAnalyticsEngine:
         except Exception as e:
             logger.error(f"Twelve Data batch error: {e}")
             return {}
+
+    def _fetch_td_fundamentals(self, symbol):
+        """
+        Derives dividend safety metrics entirely from Twelve Data (no Finnhub required).
+
+        Sources:
+        - statistics endpoint  → PE TTM, EPS TTM, 52w high/low
+        - complex_data/dividends → payout ratio (annual_div / EPS) + 5yr CAGR
+
+        Returns None gracefully on any fetch failure.
+        """
+        try:
+            result = {
+                "payout_ratio":  None,
+                "div_growth_5y": None,
+                "eps_ttm":       None,
+                "pe_ttm":        None,
+                "52w_high":      None,
+                "52w_low":       None,
+            }
+
+            # ── 1. STATISTICS: PE, EPS, 52w range ────────────────────────────
+            stats = self._execute_query("statistics", {"symbol": symbol})
+            if stats and "statistics" in stats:
+                s = stats["statistics"]
+                # Defensive: Twelve Data nests these under sub-dicts
+                val = s.get("valuations_metrics", {})
+                fin = s.get("financials", {})
+                inc = fin.get("income_statement", {}) if isinstance(fin, dict) else {}
+                stk = s.get("stock_statistics", {})
+
+                def _safe_float(d, *keys):
+                    """Try multiple key paths; return float or None."""
+                    for k in keys:
+                        v = d.get(k) if isinstance(d, dict) else None
+                        if v not in (None, "", "N/A", "-"):
+                            try:
+                                return float(v)
+                            except (TypeError, ValueError):
+                                pass
+                    return None
+
+                result["pe_ttm"]   = _safe_float(val, "trailing_pe", "pe_ttm", "forward_pe")
+                result["eps_ttm"]  = _safe_float(inc, "eps_ttm", "basic_eps_ttm", "diluted_eps_ttm")
+                result["52w_high"] = _safe_float(stk, "52_week_high", "fifty_two_week_high")
+                result["52w_low"]  = _safe_float(stk, "52_week_low",  "fifty_two_week_low")
+
+            # ── 2. DIVIDEND HISTORY: Payout ratio + 5yr CAGR ─────────────────
+            div_data = self._execute_query("complex_data/dividends", {"symbol": symbol})
+            if div_data and "data" in div_data and div_data["data"]:
+                divs = sorted(
+                    div_data["data"],
+                    key=lambda x: x.get("ex_date", ""),
+                    reverse=True
+                )
+                amounts = [float(d.get("amount", 0)) for d in divs if d.get("amount")]
+
+                # Annual dividend: sum of last 4 quarterly or 12 monthly payments
+                annual_div = sum(amounts[:12]) if len(amounts) >= 12 else sum(amounts[:4]) * (12 / max(len(amounts[:4]), 1))
+
+                # Payout ratio = annual dividends / EPS TTM
+                if result["eps_ttm"] and result["eps_ttm"] > 0 and annual_div > 0:
+                    result["payout_ratio"] = round((annual_div / result["eps_ttm"]) * 100, 1)
+
+                # 5yr dividend CAGR: compare most recent single payment to payment ~5 years ago
+                if len(amounts) >= 8:
+                    newest = amounts[0]
+                    oldest = amounts[-1]
+                    n_periods = len(amounts)
+                    # Estimate years spanned: assume ~4 payments/yr for quarterly, ~12 for monthly
+                    years_spanned = n_periods / 4 if n_periods <= 25 else n_periods / 12
+                    years_spanned = max(years_spanned, 1.0)
+                    if oldest > 0 and newest > 0:
+                        result["div_growth_5y"] = round(
+                            ((newest / oldest) ** (1 / years_spanned) - 1) * 100, 1
+                        )
+
+            return result
+
+        except Exception as e:
+            logger.warning(f"TD fundamentals fetch failed for {symbol}: {e}")
+            return None
 
     def calculate_accuracy_rating(self, predicted_move, actual_close):
         try:
@@ -274,11 +357,119 @@ class HighFidelityAnalyticsEngine:
             f"**System Interpretation:**\n{risk_emoji} *{regime_alert}*\n{liv_alert}"
         )
 
+    FX_UNIVERSE = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF"]
+    # Approximate ICE Dollar Index composition, renormalized without SEK (no liquid quote available
+    # on Twelve Data for USD/SEK at retail tier). Sign convention: +weight means pair rising = USD rising.
+    FX_DOLLAR_INDEX_WEIGHTS = {
+        "EUR/USD": -0.601, "USD/JPY": 0.142, "GBP/USD": -0.124, "USD/CAD": 0.095, "USD/CHF": 0.038,
+    }
+    # Streamed pairs whose ATR-based "expected daily range" bounds drive stream.py's perimeter alerts.
+    FX_STREAMED_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY"]
+
+    def get_forex_session_label(self, now_utc=None):
+        """
+        Forex has no single RTH — it's Sydney -> Tokyo -> London -> New York in a 24/5 relay.
+        London/New York overlap (12:00-16:00 UTC) is the highest-liquidity window; that's the
+        window worth flagging loudest since spreads tighten and breakouts are most reliable there.
+        """
+        now_utc = now_utc or datetime.utcnow()
+        if now_utc.weekday() == 5 or (now_utc.weekday() == 6 and now_utc.hour < 21) or (now_utc.weekday() == 4 and now_utc.hour >= 21):
+            return "MARKET CLOSED (Weekend)"
+        h = now_utc.hour
+        sydney = h >= 21 or h < 6
+        tokyo = 0 <= h < 9
+        london = 7 <= h < 16
+        new_york = 12 <= h < 21
+        if london and new_york:
+            return "🔥 LONDON/NY OVERLAP (Peak Liquidity)"
+        if tokyo and sydney:
+            return "ASIA SESSION (Sydney/Tokyo)"
+        if london:
+            return "LONDON SESSION"
+        if new_york:
+            return "NEW YORK SESSION"
+        if tokyo:
+            return "TOKYO SESSION"
+        if sydney:
+            return "SYDNEY SESSION (Thin Liquidity)"
+        return "TRANSITION WINDOW"
+
+    def calculate_synthetic_dollar_index(self, quotes):
+        """Own weighted-basket Dollar Index derived from the tracked majors — no reliance on a
+        third-party DXY ticker (Twelve Data doesn't carry one reliably at this tier)."""
+        score = 0.0
+        for pair, weight in self.FX_DOLLAR_INDEX_WEIGHTS.items():
+            q = quotes.get(pair, {})
+            if "percent_change" in q:
+                score += float(q["percent_change"]) * weight
+        return score
+
+    def calculate_fx_pivot_points(self, symbol):
+        """Classic floor pivots from the prior completed session — S/R levels for range/breakout calls."""
+        df = self.fetch_crypto_ohlc(symbol, outputsize=3)
+        if df is None or len(df) < 2:
+            return None
+        prev = df.iloc[-2]
+        pivot = (prev["high"] + prev["low"] + prev["close"]) / 3
+        rng = prev["high"] - prev["low"]
+        return {
+            "pivot": pivot, "r1": 2 * pivot - prev["low"], "s1": 2 * pivot - prev["high"],
+            "r2": pivot + rng, "s2": pivot - rng,
+        }
+
+    def calculate_fx_trend_confluence(self, symbol):
+        """Multi-timeframe (1h/4h/1day) Supertrend alignment — a directional confidence score,
+        not a single noisy timeframe call. +/-3 = full agreement across all three horizons."""
+        from essentials_tools import get_trend_alignment
+        score, tags = 0, []
+        for tf in ("1h", "4h", "1day"):
+            _, is_bullish = get_trend_alignment(symbol, self.api_key, interval=tf)
+            score += 1 if is_bullish else -1
+            tags.append(f"{tf}:{'🟢' if is_bullish else '🔴'}")
+        if score >= 2:
+            tag = "🟢🟢 STRONG BULLISH CONFLUENCE"
+        elif score <= -2:
+            tag = "🔴🔴 STRONG BEARISH CONFLUENCE"
+        else:
+            tag = "🟡 MIXED / CHOPPY"
+        return tag, " ".join(tags)
+
+    def update_fx_volatility_bounds(self, symbol):
+        """ATR(14)-based expected daily range, feeding stream.py's real-time perimeter alerts —
+        forex has no options chain for an implied expected move, so ATR is the honest substitute."""
+        df = self.fetch_crypto_ohlc(symbol, outputsize=20)
+        if df is None or len(df) < 15:
+            return None
+        high_low = df["high"] - df["low"]
+        high_cp = (df["high"] - df["close"].shift()).abs()
+        low_cp = (df["low"] - df["close"].shift()).abs()
+        atr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1).rolling(14).mean().iloc[-1]
+        last_close = df["close"].iloc[-1]
+        self.db.update_state(f"{symbol}_upper_noise", last_close + atr)
+        self.db.update_state(f"{symbol}_lower_noise", last_close - atr)
+        return float(atr)
+
+    def assess_risk_sentiment_regime(self, quotes):
+        """USD/JPY direction (carry-trade unwind barometer) + Gold direction = a quick risk-on/off
+        read. JPY strengthening fast (USD/JPY falling) while gold rallies is the classic risk-off
+        signature; both reversing is risk-on. This is the cross-asset signal worth syncing to
+        WEBHOOK_MARKET_ANALYSIS when it's unambiguous."""
+        usdjpy = quotes.get("USD/JPY", {})
+        gold_quote = self._fetch_twelve_data_quotes(["XAU/USD"]).get("XAU/USD", {})
+        usdjpy_chg = float(usdjpy.get("percent_change", 0.0)) if "percent_change" in usdjpy else 0.0
+        gold_chg = float(gold_quote.get("percent_change", 0.0)) if "percent_change" in gold_quote else 0.0
+
+        if usdjpy_chg <= -0.3 and gold_chg >= 0.3:
+            return "🔴 RISK-OFF", "Yen strengthening + Gold bid — classic carry-trade unwind signature.", usdjpy_chg, gold_chg
+        if usdjpy_chg >= 0.3 and gold_chg <= -0.3:
+            return "🟢 RISK-ON", "Yen weakening + Gold offered — capital rotating back into carry/risk assets.", usdjpy_chg, gold_chg
+        return "🟡 MIXED", "No clear carry-trade signature today.", usdjpy_chg, gold_chg
+
     def generate_forex_matrix_payload(self):
-        fx_universe = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF"]
+        fx_universe = self.FX_UNIVERSE
         quotes = self._fetch_twelve_data_quotes(fx_universe)
         if not quotes: return None
-            
+
         table_rows, composite_trigger = [], 0.0
         for symbol in fx_universe:
             s_data = quotes.get(symbol, {})
@@ -287,19 +478,68 @@ class HighFidelityAnalyticsEngine:
                 pct_change = float(s_data.get("percent_change", 0.0))
                 composite_trigger += abs(pct_change)
                 table_rows.append(f"{symbol:<9} {price:<9.4f} {pct_change:+.2f}%")
-                
+
         if not table_rows: return None
         if not self.db.track_and_limit_alerts("matrix_forex_state", f"FX_VAR_{round(composite_trigger, 2)}", composite_trigger, max_broadcasts=3, threshold_pct=0.05):
             return None
 
         matrix_body = "\n".join(table_rows)
-        return f"**1-Day Cross-Sectional Relative Performance**\n```js\nPair      Price     Daily Change\n────────────────────────────────\n{matrix_body}\n```"
+        session = self.get_forex_session_label()
+        synthetic_dxy = self.calculate_synthetic_dollar_index(quotes)
+        dxy_arrow = "🟢▲" if synthetic_dxy > 0 else ("🔴▼" if synthetic_dxy < 0 else "⚪")
+
+        return (
+            f"**Session: {session}**\n"
+            f"**Synthetic Dollar Index (own basket calc): {dxy_arrow} {synthetic_dxy:+.2f}%**\n\n"
+            f"**1-Day Cross-Sectional Relative Performance**\n```js\nPair      Price     Daily Change\n────────────────────────────────\n{matrix_body}\n```"
+        )
+
+    CRYPTO_UNIVERSE = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "LINK/USD", "HBAR/USD"]
+
+    def fetch_fear_greed_index(self):
+        """Crypto Fear & Greed Index — free, no API key (alternative.me). Dopamine-relevant context line."""
+        try:
+            r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8).json()
+            entry = r.get("data", [{}])[0]
+            return {"value": int(entry.get("value", 50)), "label": entry.get("value_classification", "Neutral")}
+        except Exception as e:
+            logger.error(f"Fear & Greed Index fetch failed: {e}")
+            return None
+
+    def fetch_crypto_ohlc(self, symbol, outputsize=60):
+        """Daily OHLCV for chart snapshots (BTC/USD, ETH/USD, ADA/USD, HBAR/USD, XRP/USD, etc.)."""
+        data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": str(outputsize)})
+        if not data or "values" not in data:
+            return None
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        for col in ("open", "high", "low", "close"):
+            df[col] = df[col].astype(float)
+        # Crypto pairs on Twelve Data's free/standard plan often omit volume entirely.
+        df["volume"] = df["volume"].astype(float) if "volume" in df.columns else 0.0
+        return df.iloc[::-1].reset_index(drop=True)
+
+    def find_biggest_mover(self, quotes, universe):
+        """Returns (symbol, price, change, pct_change) for the single largest |% change| in the given universe."""
+        best = None
+        for symbol in universe:
+            s_data = quotes.get(symbol, {})
+            if "close" not in s_data:
+                continue
+            pct_change = float(s_data.get("percent_change", 0.0))
+            if best is None or abs(pct_change) > abs(best[3]):
+                best = (symbol, float(s_data["close"]), float(s_data.get("change", 0.0)), pct_change)
+        return best
+
+    def find_biggest_crypto_mover(self, quotes):
+        """Backward-compatible wrapper — biggest mover within the crypto universe specifically."""
+        return self.find_biggest_mover(quotes, self.CRYPTO_UNIVERSE)
 
     def generate_crypto_matrix_payload(self):
-        crypto_universe = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "LINK/USD"]
+        crypto_universe = self.CRYPTO_UNIVERSE
         quotes = self._fetch_twelve_data_quotes(crypto_universe)
         if not quotes: return None
-            
+
         table_rows, composite_trigger = [], 0.0
         for symbol in crypto_universe:
             s_data = quotes.get(symbol, {})
@@ -315,7 +555,9 @@ class HighFidelityAnalyticsEngine:
             return None
 
         matrix_body = "\n".join(table_rows)
-        return f"**1-Day Relative Performance Index**\n```js\nTicker  Spot Price  Daily Change\n────────────────────────────────\n{matrix_body}\n```"
+        fng = self.fetch_fear_greed_index()
+        fng_line = f"\nFear & Greed Index: **{fng['value']}** ({fng['label']})" if fng else ""
+        return f"**1-Day Relative Performance Index**\n```js\nTicker  Spot Price  Daily Change\n────────────────────────────────\n{matrix_body}\n```{fng_line}"
 
     def generate_ex_dividend_radar(self, universe=["SCHD", "JEPI", "JEPQ", "DIVO", "O", "MAIN", "ARCC", "MO", "VZ", "PFE"]):
         """
@@ -351,97 +593,307 @@ class HighFidelityAnalyticsEngine:
         # Sort sequentially by closest action date
         return sorted(results, key=lambda x: x["days_away"])
 
+    def generate_income_etf_pulse(self):
+        """
+        Tracks the 10 most popular income-generating CC ETFs and REITs.
+        Surfaces next ex-dividend date, annualized yield, and urgency tags.
+        Sorted by soonest ex-date, then yield descending.
+        """
+        ETF_META = {
+            "JEPI":  {"name": "JPMorgan Equity Prem Income",  "type": "CC ETF",   "freq": "Monthly", "moat": True},
+            "JEPQ":  {"name": "JPMorgan Nasdaq Equity Prem",  "type": "CC ETF",   "freq": "Monthly", "moat": True},
+            "DIVO":  {"name": "Amplify CWP Enh Dividend",     "type": "CC ETF",   "freq": "Monthly", "moat": True},
+            "XYLD":  {"name": "Global X S&P 500 Covered Call","type": "CC ETF",   "freq": "Monthly", "moat": False},
+            "QYLD":  {"name": "Global X Nasdaq Covered Call", "type": "CC ETF",   "freq": "Monthly", "moat": False},
+            "RYLD":  {"name": "Global X Russell 2000 CC",     "type": "CC ETF",   "freq": "Monthly", "moat": False},
+            "SCHD":  {"name": "Schwab US Dividend Equity",    "type": "Div ETF",  "freq": "Quarterly","moat": True},
+            "O":     {"name": "Realty Income Corp",           "type": "REIT",     "freq": "Monthly", "moat": True},
+            "MAIN":  {"name": "Main Street Capital",          "type": "BDC",      "freq": "Monthly", "moat": True},
+            "ARCC":  {"name": "Ares Capital Corp",            "type": "BDC",      "freq": "Quarterly","moat": True},
+        }
+        tickers = list(ETF_META.keys())
+        results = []
+        today = datetime.now()
+
+        # Batch quote fetch for all tickers
+        quotes = self._fetch_twelve_data_quotes(tickers)
+
+        for sym in tickers:
+            try:
+                meta = ETF_META[sym]
+                q = quotes.get(sym, {})
+                spot = float(q.get("close", 0.0))
+                if spot == 0.0:
+                    continue
+
+                # Pull ex-dividend date + amount
+                div_data = self._execute_query("complex_data/dividends", {"symbol": sym})
+                ex_date_str, div_amount, days_away = None, 0.0, 999
+                if div_data and "data" in div_data:
+                    for div in div_data["data"]:
+                        ex_raw = div.get("ex_date")
+                        if not ex_raw:
+                            continue
+                        ex_dt = datetime.strptime(ex_raw, "%Y-%m-%d")
+                        if ex_dt >= today:
+                            ex_date_str = ex_raw
+                            div_amount = float(div.get("amount", 0.0))
+                            days_away = (ex_dt - today).days
+                            break
+
+                # Annualized yield proxy from dividend amount
+                if div_amount > 0 and spot > 0:
+                    freq_mult = 12 if meta["freq"] == "Monthly" else 4
+                    ann_yield = (div_amount * freq_mult) / spot * 100
+                else:
+                    ann_yield = 0.0
+
+                # Urgency tag
+                if days_away <= 3:
+                    urgency = "🔥 IMMINENT"
+                elif days_away <= 7:
+                    urgency = "⚡ THIS WEEK"
+                elif days_away <= 14:
+                    urgency = "📅 UPCOMING"
+                else:
+                    urgency = "🔍 WATCH"
+
+                moat_tag = "✅" if meta["moat"] else "⚠️"
+                results.append({
+                    "symbol":     sym,
+                    "name":       meta["name"],
+                    "type":       meta["type"],
+                    "freq":       meta["freq"],
+                    "spot":       spot,
+                    "div_amount": div_amount,
+                    "ann_yield":  ann_yield,
+                    "ex_date":    ex_date_str or "TBD",
+                    "days_away":  days_away,
+                    "urgency":    urgency,
+                    "moat":       moat_tag,
+                })
+
+            except Exception as e:
+                logger.error(f"Income ETF pulse failed for {sym}: {e}")
+
+        # Sort by soonest ex-date, then yield descending
+        return sorted(results, key=lambda x: (x["days_away"], -x["ann_yield"]))
+
     def generate_dividend_wheel_candidates(self):
         """
-        Upgraded Wheel Screening: Incorporates Structural Trend tracking (200 SMA) 
-        to prevent yield traps, and relaxes strict OI/Greek dropouts.
+        v2 Wheel Screener — Institutional-grade dividend stock scanner.
+
+        Filters:
+        - DTE: 21-45 days (optimal theta burn for dividend stocks)
+        - Delta: 0.20-0.35 (high PoP without yield-trap exposure)
+        - RSI-14: ≤ 65 (no overbought entries; <30 = oversold gem)
+        - Bollinger %B: <0.8 (not in upper band = don't sell puts at highs)
+        - IVR proxy: 20-85% (avoid dead IV and crush risk from too-elevated IV)
+        - Trend: price vs SMA50/SMA200 dual-filter
+
+        Enrichment per candidate:
+        - Break-even cost basis = strike - premium
+        - % downside protected = (spot - break_even) / spot * 100
+        - 3% capital sizing at $10k and $25k account sizes
+        - Finnhub: payout ratio, dividend growth 5yr, safety grade
+
+        Returns top 5 by composite score.
         """
-        dividend_universe = ["BAC", "KO", "PFE", "VZ", "CSCO", "T", "F", "WFC", "KMI", "MO", "BMY", "MDT", "O", "SCHD"] 
+        WHEEL_UNIVERSE = [
+            # Dividend Aristocrats
+            "KO", "JNJ", "PG", "MMM", "ABT", "MCD", "CL", "WMT",
+            # High-yield Dividend Stocks
+            "MO", "T", "VZ", "PFE", "BMY", "KMI",
+            # REITs
+            "O", "MPW", "STAG",
+            # BDCs
+            "MAIN", "ARCC",
+            # Banks / Financials
+            "BAC", "WFC",
+            # Tech Dividend
+            "CSCO", "IBM",
+        ]
         candidates = []
-        target_dte_min = 15
-        target_dte_max = 45
-        
-        for symbol in dividend_universe:
+        TARGET_DTE_MIN, TARGET_DTE_MAX = 21, 45
+        DELTA_MIN, DELTA_MAX = 0.20, 0.35
+        IVR_MIN, IVR_MAX = 20.0, 85.0
+
+        for symbol in WHEEL_UNIVERSE:
             try:
-                # 1. Yield vs Risk: Pull technical structure to assess safety
-                ts_data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "200"})
-                spot = 0.0
-                sma_200 = 0.0
-                trend_status = "NEUTRAL"
-                
-                if ts_data and "values" in ts_data and len(ts_data["values"]) >= 50:
-                    df_ts = pd.DataFrame(ts_data["values"])
-                    df_ts["close"] = df_ts["close"].astype(float)
-                    spot = df_ts["close"].iloc[0] # Most recent spot
-                    if len(df_ts) == 200:
-                        sma_200 = df_ts["close"].mean()
-                        trend_status = "🟢 BULLISH TRENCH" if spot > sma_200 else "🔴 BEARISH TRAP"
+                # ── 1. TIME SERIES: Spot, SMA50, SMA200, RSI-14, BB%B ──────
+                ts_data = self._execute_query(
+                    "time_series",
+                    {"symbol": symbol, "interval": "1day", "outputsize": "200"}
+                )
+                if not ts_data or "values" not in ts_data or len(ts_data["values"]) < 30:
+                    continue
+
+                df_ts = pd.DataFrame(ts_data["values"])
+                df_ts["close"] = df_ts["close"].astype(float)
+                df_ts = df_ts.iloc[::-1].reset_index(drop=True)  # oldest → newest
+
+                spot = df_ts["close"].iloc[-1]
+                if spot == 0:
+                    continue
+
+                # SMA filters (trend bias)
+                sma50  = df_ts["close"].rolling(50).mean().iloc[-1]
+                sma200 = df_ts["close"].rolling(200).mean().iloc[-1] if len(df_ts) >= 200 else sma50
+                if spot > sma200:
+                    trend_status = "🟢 ABOVE 200-SMA"
                 else:
-                    spot_data = self._execute_query("price", {"symbol": symbol})
-                    if not spot_data or "price" not in spot_data: continue
-                    spot = float(spot_data["price"])
+                    trend_status = "🔴 BELOW 200-SMA"
+                sma50_tag = "↑ SMA50" if spot > sma50 else "↓ SMA50"
 
-                if spot == 0: continue
+                # RSI-14 from price series
+                delta_prices = df_ts["close"].diff()
+                gain = delta_prices.clip(lower=0).rolling(14).mean()
+                loss = (-delta_prices.clip(upper=0)).rolling(14).mean()
+                rs = gain / (loss + 1e-9)
+                rsi14 = (100 - 100 / (1 + rs)).iloc[-1]
+                if rsi14 > 65:
+                    continue  # Overbought — skip
 
-                # 2. Options Architecture
+                rsi_tag = "🟢 OVERSOLD GEM" if rsi14 < 30 else ("🟡 NEUTRAL RSI" if rsi14 < 55 else "🟠 ELEVATED RSI")
+
+                # Bollinger Band %B (20-period, 2σ)
+                bb_mid   = df_ts["close"].rolling(20).mean()
+                bb_std   = df_ts["close"].rolling(20).std()
+                bb_upper = (bb_mid + 2 * bb_std).iloc[-1]
+                bb_lower = (bb_mid - 2 * bb_std).iloc[-1]
+                bb_pct_b = (spot - bb_lower) / (bb_upper - bb_lower + 1e-9)
+                if bb_pct_b >= 0.80:
+                    continue  # Price in upper band — no CSP entries here
+
+                bb_zone = "🔵 LOWER BAND" if bb_pct_b < 0.3 else ("🟡 MID-BAND" if bb_pct_b < 0.6 else "🟠 UPPER-MID BAND")
+
+                # ── 2. HV30 for IVR proxy ────────────────────────────────
+                hv30 = self.calculate_historical_volatility(symbol, lookback=30)
+
+                # ── 3. OPTIONS CHAIN ─────────────────────────────────────
                 chain = self._execute_query("options/chain", {"symbol": symbol})
-                if not chain or "data" not in chain: continue
+                if not chain or "data" not in chain:
+                    continue
 
                 df = pd.DataFrame(chain["data"])
-                if df.empty: continue
-                
+                if df.empty:
+                    continue
+
                 df["expiration_date"] = pd.to_datetime(df["expiration_date"])
-                df["strike"] = df["strike"].astype(float)
-                
-                today = pd.Timestamp.today()
-                df["dte"] = (df["expiration_date"] - today).dt.days
-                
-                # Graceful degradation for API latency on greeks/OI
-                df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                df["strike"]          = df["strike"].astype(float)
+                today_ts              = pd.Timestamp.today()
+                df["dte"]             = (df["expiration_date"] - today_ts).dt.days
+
+                df["open_interest"]    = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
                 df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
-                
+
                 if "delta" in df.columns:
                     df["delta"] = pd.to_numeric(df["delta"], errors="coerce").fillna(0).abs()
-                    # Patch latent zero-delta returns from the data provider
                     df.loc[df["delta"] == 0, "delta"] = ((spot - df["strike"]) / spot).clip(0.01, 0.99)
                 else:
                     df["delta"] = ((spot - df["strike"]) / spot).clip(0.01, 0.99)
-                
+
                 if "bid" in df.columns and "ask" in df.columns:
-                    df["mid"] = (pd.to_numeric(df["bid"], errors="coerce") + pd.to_numeric(df["ask"], errors="coerce")) / 2
+                    df["mid"] = (
+                        pd.to_numeric(df["bid"], errors="coerce") +
+                        pd.to_numeric(df["ask"], errors="coerce")
+                    ) / 2
                 else:
-                    df["mid"] = df["strike"] * 0.015  # Fallback 1.5% premium math
-                
-                # Filter limits relaxed to prevent silent loop failures
-                df_filtered = df[(df["type"] == "put") & 
-                                 (df["dte"] >= target_dte_min) & (df["dte"] <= target_dte_max) & 
-                                 (df["delta"] >= 0.15) & (df["delta"] <= 0.35) &
-                                 (df["open_interest"] >= 10)].copy()
-                
-                if df_filtered.empty: continue
-                
-                df_filtered["score"] = (1 - df_filtered["delta"]) * (250 / (df_filtered["dte"] + 5)) * (df_filtered["mid"] / df_filtered["strike"])
-                
-                best_option = df_filtered.loc[df_filtered["score"].idxmax()]
-                annualized_roi = (best_option["mid"] / best_option["strike"]) * (365 / best_option["dte"]) * 100
-                
+                    df["mid"] = df["strike"] * 0.015
+
+                # Theta proxy from mid / DTE (annualized daily decay)
+                df["theta_proxy"] = df["mid"] / (df["dte"] + 1)
+
+                # Primary filter
+                df_f = df[
+                    (df["type"] == "put") &
+                    (df["dte"] >= TARGET_DTE_MIN) & (df["dte"] <= TARGET_DTE_MAX) &
+                    (df["delta"] >= DELTA_MIN) & (df["delta"] <= DELTA_MAX) &
+                    (df["open_interest"] >= 10)
+                ].copy()
+
+                if df_f.empty:
+                    continue
+
+                # ATM IV for IVR proxy
+                atm_iv_raw = df_f["implied_volatility"].median()
+                atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
+                ivr_proxy = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
+                if ivr_proxy < IVR_MIN or ivr_proxy > IVR_MAX:
+                    continue  # IV environment not favorable for premium selling
+
+                ivr_tag = "LOW IV" if ivr_proxy < 35 else ("MID IV" if ivr_proxy < 60 else "ELEVATED IV")
+
+                # Composite score: low delta + short DTE + premium yield
+                df_f = df_f.copy()
+                df_f["score"] = (
+                    (1 - df_f["delta"]) *
+                    (250 / (df_f["dte"] + 5)) *
+                    (df_f["mid"] / df_f["strike"])
+                )
+                best     = df_f.loc[df_f["score"].idxmax()]
+                premium  = float(best["mid"])
+                strike   = float(best["strike"])
+                dte      = int(best["dte"])
+
+                annualized_roi = (premium / strike) * (365 / dte) * 100
+                break_even     = round(strike - premium, 2)
+                pct_downside   = round((spot - break_even) / spot * 100, 1)
+
+                # 3% Capital Sizing
+                contracts_10k = max(1, int(10_000 * 0.03 / (strike * 100)))
+                contracts_25k = max(1, int(25_000 * 0.03 / (strike * 100)))
+
+                # ── 4. Fundamental Enrichment (Twelve Data statistics + dividends) ──
+                fh = self._fetch_td_fundamentals(symbol)
+                payout_ratio = None
+                div_growth_5y = None
+                safety_grade  = "N/A"
+                if fh:
+                    payout_ratio  = fh.get("payout_ratio")
+                    div_growth_5y = fh.get("div_growth_5y")
+                    if payout_ratio is not None:
+                        if payout_ratio < 60:
+                            safety_grade = "✅ SAFE"
+                        elif payout_ratio < 80:
+                            safety_grade = "⚠️ MODERATE"
+                        else:
+                            safety_grade = "🚨 DANGER"
+
                 candidates.append({
-                    "symbol": symbol,
-                    "spot": spot,
-                    "trend": trend_status,
-                    "strike": best_option["strike"],
-                    "dte": int(best_option["dte"]),
-                    "expiration": best_option["expiration_date"].strftime('%Y-%m-%d'),
-                    "premium": best_option["mid"],
-                    "delta": best_option["delta"],
-                    "chance_of_profit": (1 - best_option["delta"]) * 100,
-                    "annualized_roi": annualized_roi,
-                    "score": best_option["score"]
+                    "symbol":         symbol,
+                    "spot":           spot,
+                    "trend":          trend_status,
+                    "sma50_tag":      sma50_tag,
+                    "rsi14":          round(float(rsi14), 1),
+                    "rsi_tag":        rsi_tag,
+                    "bb_pct_b":       round(float(bb_pct_b), 2),
+                    "bb_zone":        bb_zone,
+                    "strike":         strike,
+                    "dte":            dte,
+                    "expiration":     best["expiration_date"].strftime("%Y-%m-%d"),
+                    "premium":        round(premium, 2),
+                    "delta":          round(float(best["delta"]), 2),
+                    "theta_daily":    round(float(best["theta_proxy"]), 4),
+                    "iv":             round(atm_iv, 1),
+                    "ivr_proxy":      round(ivr_proxy, 1),
+                    "ivr_tag":        ivr_tag,
+                    "pop":            round((1 - float(best["delta"])) * 100, 1),
+                    "annualized_roi": round(annualized_roi, 1),
+                    "break_even":     break_even,
+                    "pct_downside":   pct_downside,
+                    "contracts_10k":  contracts_10k,
+                    "contracts_25k":  contracts_25k,
+                    "payout_ratio":   payout_ratio,
+                    "div_growth_5y":  div_growth_5y,
+                    "safety_grade":   safety_grade,
+                    "score":          float(best["score"]),
                 })
+
             except Exception as e:
-                logger.error(f"Dividend Wheel scan failed for {symbol}: {e}")
-                
-        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:3]
+                logger.error(f"Dividend Wheel v2 scan failed for {symbol}: {e}")
+
+        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
 
     def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):
         data = self._execute_query("time_series", {"symbol": symbol, "interval": "5min", "outputsize": str(lookback + 5)})
@@ -467,28 +919,138 @@ class HighFidelityAnalyticsEngine:
             return None
         except Exception as e: return None
 
-    def compile_tsp_allocation_matrix(self):
-        spy_quote = self._execute_query("quote", {"symbol": "SPY"})
-        vxf_quote = self._execute_query("quote", {"symbol": "VXF"})
-        agg_quote = self._execute_query("quote", {"symbol": "AGG"})
-        us10y_data = self._execute_query("price", {"symbol": "US10Y"})
-        ten_year_yield = float(us10y_data.get("price", 4.45)) if us10y_data else 4.45
-        
-        def parse_status(quote_data):
-            if not quote_data or "percent_change" not in quote_data: return "🟡 NEUTRAL | Feed Latency"
-            chg = float(quote_data["percent_change"])
-            if chg > 0.5: return f"🟢 BULLISH | Inflow Strength ({chg:+.2f}%)"
-            if chg < -0.5: return f"🔴 BEARISH | Liquidity Outflow ({chg:+.2f}%)"
-            return f"🟡 NEUTRAL | Compression ({chg:+.2f}%)"
+    # Official TSP individual funds + the benchmark each one tracks (for "what moved it" context).
+    # G Fund has no market benchmark — it's a unique non-marketable Treasury security, always flat/positive.
+    TSP_INDIVIDUAL_FUNDS = ["G Fund", "F Fund", "C Fund", "S Fund", "I Fund"]
+    TSP_BENCHMARK_PROXY = {
+        "C Fund": "SPY",   # S&P 500
+        "S Fund": "VXF",   # Dow Jones US Completion TSM proxy
+        "I Fund": "EFA",   # MSCI EAFE proxy
+        "F Fund": "AGG",   # Bloomberg US Aggregate Bond proxy
+    }
+    TSP_CSV_URL = "https://www.tsp.gov/data/fund-price-history.csv"
+    TSP_CACHE_PATH = os.path.join(BASE_DIR, "tsp_fund_prices.csv")
 
-        return (
-            f"**Thrift Savings Plan Dynamic Allocation Matrix**\n"
-            f"┣ **C-Fund (Large Cap ETF Proxy)**: {parse_status(spy_quote)}\n"
-            f"┣ **S-Fund (Small Cap Completion Proxy)**: {parse_status(vxf_quote)}\n"
-            f"┗ **F-Fund (Aggregate Bond Proxy)**: {parse_status(agg_quote)}\n\n"
-            f"**Macro Reference Yield (US10Y)**: `{ten_year_yield}%` \n"
-            f"💡 *Directive: Allocate to funds with positive underlying market momentum.*"
+    def fetch_tsp_share_prices(self, force_refresh=False):
+        """
+        Official daily TSP fund NAVs (G/F/C/S/I + all L funds) straight from tsp.gov — no API key.
+        tsp.gov fronts this file with CloudFront bot-protection that 403s without a same-site Referer;
+        a plain browser UA + Referer header is sufficient (no auth needed, it's public data).
+        Cached to disk and refreshed at most once per day to stay light on PythonAnywhere CPU quota.
+        """
+        cache_key = "tsp_csv_last_fetch_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if not force_refresh and os.path.exists(self.TSP_CACHE_PATH) and self.db.get_state(cache_key) == today_str:
+            return pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"]).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://www.tsp.gov/share-price-history/",
+            }
+            resp = requests.get(self.TSP_CSV_URL, headers=headers, timeout=20)
+            resp.raise_for_status()
+            with open(self.TSP_CACHE_PATH, "w") as f:
+                f.write(resp.text)
+            self.db.update_state(cache_key, today_str)
+            df = pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"])
+            return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+        except Exception as e:
+            logger.error(f"TSP share price fetch failed: {e}")
+            if os.path.exists(self.TSP_CACHE_PATH):
+                return pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"]).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+            return None
+
+    def calculate_rsi(self, series, period=14):
+        delta = series.diff()
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = (-delta.clip(upper=0)).rolling(period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1]) if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50.0
+
+    def generate_tsp_eod_report(self):
+        """
+        Real official TSP NAV move (most recent confirmed close) for every individual fund, plus:
+        - RSI(14) and 50/200-day SMA trend per fund — daily-bar indicators are actually valid here
+          since TSP funds price once a day (no point running intraday technicals on a NAV).
+        - Drawdown from 52-week high, for rebalancing/interfund-transfer context.
+        - A live same-day market read (SPY/AGG/EFA) so members know what's *likely* coming when
+          tonight's official NAV posts (~7PM ET), without presenting unconfirmed numbers as official.
+        Returns (payload_text, chart_bytes_or_None) and de-dupes per-calendar-day via the DB.
+        """
+        df = self.fetch_tsp_share_prices()
+        if df is None or df.empty or len(df) < 60:
+            return None, None
+
+        latest_date = df["Date"].iloc[-1].strftime("%Y-%m-%d")
+        last_reported = self.db.get_state("tsp_eod_last_reported_date")
+        if last_reported == latest_date:
+            return None, None  # Already reported this official close — avoid duplicate dispatch
+
+        fund_rows = []
+        chart_series = {}
+        for fund in self.TSP_INDIVIDUAL_FUNDS:
+            if fund not in df.columns:
+                continue
+            series = df[fund].dropna()
+            if len(series) < 60:
+                continue
+            chart_series[fund] = series
+
+            today_p, prev_p = series.iloc[-1], series.iloc[-2]
+            pct_change = ((today_p - prev_p) / prev_p) * 100
+
+            sma50 = series.rolling(50).mean().iloc[-1]
+            sma200 = series.rolling(200).mean().iloc[-1] if len(series) >= 200 else None
+            trend = "—"
+            if sma200 is not None:
+                trend = "🟢 Golden Cross (50>200)" if sma50 > sma200 else "🔴 Death Cross (50<200)"
+
+            rsi = self.calculate_rsi(series)
+            rsi_tag = "Overbought" if rsi >= 70 else ("Oversold" if rsi <= 30 else "Neutral")
+
+            high_52w = series.tail(252).max()
+            drawdown = ((today_p - high_52w) / high_52w) * 100
+
+            arrow = "🟢▲" if pct_change > 0 else ("🔴▼" if pct_change < 0 else "⚪")
+            fund_rows.append(
+                f"┣ **{fund}**: `${today_p:,.4f}` {arrow} `{pct_change:+.2f}%` | RSI {rsi:.0f} ({rsi_tag}) | "
+                f"{trend} | {drawdown:+.1f}% off 52w high"
+            )
+
+        if not fund_rows:
+            return None, None
+
+        # Live same-day market read — framed explicitly as a forward indicator, not official NAV.
+        live_lines = []
+        try:
+            proxy_quotes = self._fetch_twelve_data_quotes(list(self.TSP_BENCHMARK_PROXY.values()))
+            for fund, proxy in self.TSP_BENCHMARK_PROXY.items():
+                q = proxy_quotes.get(proxy, {})
+                if "percent_change" in q:
+                    pc = float(q["percent_change"])
+                    live_lines.append(f"┣ {fund} benchmark ({proxy}) is trading `{pc:+.2f}%` today → tonight's NAV should track this.")
+        except Exception as e:
+            logger.error(f"TSP live benchmark read failed: {e}")
+
+        live_block = ("\n\n**Live Market Read (unconfirmed until tonight's official post ~7PM ET):**\n" + "\n".join(live_lines)) if live_lines else ""
+
+        payload = (
+            f"⚡ **TSP END-OF-DAY ALLOCATION REPORT | Official Close: {latest_date}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n".join(fund_rows) +
+            f"\n┗ Final Actionable Posture: Favor funds showing Golden Cross + sub-70 RSI for new interfund transfers; "
+            f"funds deep off their 52w high with a Death Cross warrant a defensive (G/F) tilt."
+            + live_block
         )
+
+        self.db.update_state("tsp_eod_last_reported_date", latest_date)
+        return payload, chart_series
+
+    def compile_tsp_allocation_matrix(self):
+        """Lightweight intraday companion to the EOD report — same real official data, no chart."""
+        payload, _ = self.generate_tsp_eod_report()
+        return payload
 
     def calculate_clean_yield(self, ticker: str, latest_dividend: float, current_price: float) -> float:
         if current_price <= 0: return 0.0
@@ -511,7 +1073,11 @@ class HighFidelityAnalyticsEngine:
         except Exception: return 20.0
 
     def run_iv_crush_scan(self):
-        universe = ["AAPL", "NVDA", "MSFT"]
+        universe = [
+            "AAPL", "NVDA", "MSFT", "TSLA", "META",
+            "GOOGL", "AMZN", "AMD", "AVGO", "NFLX",
+            "SPY", "QQQ", "CRM", "COIN", "BABA"
+        ]
         results = []
         for symbol in universe:
             hv_30 = self.calculate_historical_volatility(symbol)
@@ -519,11 +1085,130 @@ class HighFidelityAnalyticsEngine:
             if not chain or "data" not in chain or not chain["data"]: continue
             try:
                 df_options = pd.DataFrame(chain["data"])
-                df_options["implied_volatility"] = df_options["implied_volatility"].astype(float)
-                atm_iv = df_options["implied_volatility"].median() * 100
-                results.append({"symbol": symbol, "hv": round(hv_30, 1), "iv": round(atm_iv, 1), "spread": round(atm_iv - hv_30, 1)})
-            except Exception: pass
-        return results
+                df_options["implied_volatility"] = pd.to_numeric(
+                    df_options["implied_volatility"], errors="coerce"
+                ).fillna(0)
+                atm_iv_raw = df_options["implied_volatility"].median()
+                # Twelve Data returns IV as decimal (0.35 = 35%) — normalize to percentage
+                atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
+                spread = round(atm_iv - hv_30, 1)
+                # Only surface tickers where IV is meaningfully elevated above HV30
+                if spread >= 5.0:
+                    results.append({
+                        "symbol": symbol,
+                        "hv": round(hv_30, 1),
+                        "iv": round(atm_iv, 1),
+                        "spread": spread
+                    })
+            except Exception as e:
+                logger.error(f"IV crush scan failed for {symbol}: {e}")
+        # Sort by highest IV premium above HV30 (most crush-favorable first)
+        return sorted(results, key=lambda x: x["spread"], reverse=True)
+
+    def scan_unusual_options_flow(self, universe=None):
+        """
+        Replicates Cheddar Flow / Unusual Whales sweep detection using Twelve Data options/chain.
+
+        Detects two signal types:
+        1. SWEEP — volume:OI ratio > 2.0x on a single strike (fresh directional positioning)
+        2. OI_SKEW — aggregate put:call OI ratio reveals institutional hedging vs. accumulation bias
+
+        Returns top signals sorted by conviction (volume magnitude).
+        """
+        if universe is None:
+            universe = [
+                "SPY", "QQQ", "AAPL", "NVDA", "MSFT",
+                "TSLA", "META", "AMD", "AMZN", "GOOGL",
+                "IWM", "COIN", "AVGO", "NFLX", "SMCI"
+            ]
+
+        sweeps, skews = [], []
+
+        for symbol in universe:
+            try:
+                chain = self._execute_query("options/chain", {"symbol": symbol})
+                if not chain or "data" not in chain or not chain["data"]:
+                    continue
+
+                df = pd.DataFrame(chain["data"])
+                df["strike"] = df["strike"].astype(float)
+                df["open_interest"] = pd.to_numeric(
+                    df.get("open_interest", 0), errors="coerce"
+                ).fillna(0)
+                df["implied_volatility"] = pd.to_numeric(
+                    df.get("implied_volatility", 0), errors="coerce"
+                ).fillna(0)
+                df["volume"] = pd.to_numeric(
+                    df.get("volume", 0), errors="coerce"
+                ).fillna(0)
+
+                # ── SWEEP DETECTOR ──────────────────────────────────────
+                # Fresh positioning: volume far exceeds existing open interest
+                df["vol_oi_ratio"] = df["volume"] / (df["open_interest"] + 1)
+                sweep_candidates = df[
+                    (df["vol_oi_ratio"] > 2.0) & (df["volume"] > 200)
+                ].copy()
+
+                if not sweep_candidates.empty:
+                    top = sweep_candidates.loc[sweep_candidates["volume"].idxmax()]
+                    sweep_type = str(top.get("type", "unknown")).upper()
+                    iv_pct = float(top["implied_volatility"])
+                    if iv_pct < 5.0:
+                        iv_pct = iv_pct * 100
+
+                    expiry_raw = str(top.get("expiration_date", ""))[:10]
+                    dte = 0
+                    try:
+                        dte = max(0, (pd.to_datetime(expiry_raw) - pd.Timestamp.today()).days)
+                    except Exception:
+                        pass
+
+                    sweeps.append({
+                        "symbol": symbol,
+                        "type": "SWEEP",
+                        "direction": sweep_type,
+                        "strike": float(top["strike"]),
+                        "expiration": expiry_raw,
+                        "dte": dte,
+                        "volume": int(top["volume"]),
+                        "open_interest": int(top["open_interest"]),
+                        "vol_oi_ratio": round(float(top["vol_oi_ratio"]), 1),
+                        "iv": round(iv_pct, 1),
+                        "conviction": "HIGH" if top["vol_oi_ratio"] > 5.0 else "MODERATE"
+                    })
+
+                # ── PUT/CALL OI SKEW DETECTOR ────────────────────────────
+                # Aggregate OI imbalance reveals institutional macro sentiment
+                total_call_oi = df[df["type"] == "call"]["open_interest"].sum()
+                total_put_oi = df[df["type"] == "put"]["open_interest"].sum()
+
+                if total_call_oi > 0 and total_put_oi > 0:
+                    pc_ratio = total_put_oi / total_call_oi
+                    # Only flag meaningful skew: hedging (>1.5) or aggressive calls (<0.6)
+                    if pc_ratio > 1.5 or pc_ratio < 0.6:
+                        direction = "BEARISH HEDGE" if pc_ratio > 1.5 else "AGGRESSIVE CALL BUY"
+                        # Skip if this symbol already has a sweep (avoid double-entry)
+                        if not any(s["symbol"] == symbol for s in sweeps):
+                            skews.append({
+                                "symbol": symbol,
+                                "type": "OI_SKEW",
+                                "direction": direction,
+                                "strike": 0.0,
+                                "expiration": "N/A",
+                                "dte": 0,
+                                "volume": 0,
+                                "open_interest": int(total_call_oi + total_put_oi),
+                                "vol_oi_ratio": round(float(pc_ratio), 2),
+                                "iv": 0.0,
+                                "conviction": "MODERATE"
+                            })
+
+            except Exception as e:
+                logger.error(f"Unusual flow scan failed for {symbol}: {e}")
+
+        # Sweeps by vol:OI magnitude first, then OI skews
+        sweeps.sort(key=lambda x: x["vol_oi_ratio"], reverse=True)
+        return sweeps[:5] + skews[:3]  # Max 8 signals
 
     def calculate_gex_profile(self, symbol="SPY"):
         chain = self._execute_query("options/chain", {"symbol": symbol})

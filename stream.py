@@ -34,11 +34,13 @@ WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") # Explicit Crypto Allocation
 
 try:
-    from essentials_tools import send_essentials_embed
+    from essentials_tools import send_essentials_embed, send_essentials_embed_with_chart, generate_candlestick_chart
     HAS_ESSENTIALS = True
 except ImportError:
     HAS_ESSENTIALS = False
     def send_essentials_embed(*args, **kwargs): pass
+    def send_essentials_embed_with_chart(*args, **kwargs): pass
+    def generate_candlestick_chart(*args, **kwargs): return None
 
 # =====================================================================
 # THREAD 1: REST Polling Agent
@@ -199,6 +201,14 @@ class RealTimeTickAgent:
                 webhook = WEBHOOK_CRYPTO or WEBHOOK_MARKET_ANALYSIS
                 if webhook and HAS_ESSENTIALS:
                     payload = f"🪙 **[BTC/USD Telemetry]**\n┣ Spot Rate: `${price:,.2f}`\n┗ ⚠️ Hourly Velocity Breach: `{pct_change*100:+.2f}%` directional momentum."
+                    try:
+                        ohlc = HighFidelityAnalyticsEngine().fetch_crypto_ohlc("BTC/USD", outputsize=60)
+                        if ohlc is not None and not ohlc.empty:
+                            chart_bytes = generate_candlestick_chart("BTC/USD", ohlc, last_change=price - self.btc_window[0][1], last_change_pct=pct_change * 100)
+                            send_essentials_embed_with_chart(webhook, "⚡ Volatility Sentry Trigger", payload, chart_bytes, color=0xf39c12)
+                            return
+                    except Exception as e:
+                        logger.error(f"BTC chart attach failed, falling back to text-only: {e}")
                     send_essentials_embed(webhook, "⚡ Volatility Sentry Trigger", payload, 0xf39c12)
 
     def on_message(self, ws, message):

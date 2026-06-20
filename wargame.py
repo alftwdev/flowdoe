@@ -18,6 +18,7 @@ from analytics import HighFidelityAnalyticsEngine
 from database import EcosystemDatabase
 import monitor
 import cross_asset
+from essentials_tools import generate_candlestick_chart
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | WARGAME | %(message)s")
 logger = logging.getLogger("Wargame")
@@ -215,6 +216,30 @@ def execute_wargame(mock_put, mock_post, mock_get):
         logger.error(f"[FAIL] Forex Matrix: {e}")
         failed += 1
 
+    # --- PHASE 5B: Forex Global-Macro Tools (session, synthetic DXY, pivots, confluence, risk regime) ---
+    logger.info("\n>>> PHASE 5B: FOREX GLOBAL-MACRO TOOLSET <<<")
+    try:
+        session = engine.get_forex_session_label()
+        fx_quotes = engine._fetch_twelve_data_quotes(engine.FX_UNIVERSE)
+        dxy = engine.calculate_synthetic_dollar_index(fx_quotes)
+        pivots = engine.calculate_fx_pivot_points("EUR/USD")
+        assert pivots is not None, "Pivot points returned None"
+        confluence_tag, confluence_detail = engine.calculate_fx_trend_confluence("EUR/USD")
+        atr = engine.update_fx_volatility_bounds("EUR/USD")
+        assert atr is not None and atr > 0, "ATR volatility bounds calc failed"
+        regime, explanation, usdjpy_chg, gold_chg = engine.assess_risk_sentiment_regime(fx_quotes)
+        mover = engine.find_biggest_mover(fx_quotes, engine.FX_UNIVERSE)
+        ohlc = engine.fetch_crypto_ohlc(mover[0], outputsize=30) if mover else None
+        chart_bytes = generate_candlestick_chart(mover[0], ohlc, last_change=mover[2], last_change_pct=mover[3]) if ohlc is not None and not ohlc.empty else None
+        logger.info(
+            f"[PASS] Session={session} | SynthDXY={dxy:+.2f}% | Pivot(EURUSD)={pivots['pivot']:.4f} | "
+            f"Confluence={confluence_tag} | ATR={atr:.4f} | Regime={regime} | Chart={'ok' if chart_bytes else 'n/a'}"
+        )
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Forex global-macro toolset: {e}")
+        failed += 1
+
     # --- PHASE 6: Dividend Wheel Candidates ---
     logger.info("\n>>> PHASE 6: DIVIDEND WHEEL CANDIDATES <<<")
     try:
@@ -225,15 +250,22 @@ def execute_wargame(mock_put, mock_post, mock_get):
         logger.error(f"[FAIL] Dividend Wheel: {e}")
         failed += 1
 
-    # --- PHASE 7: TSP Allocation Matrix ---
-    logger.info("\n>>> PHASE 7: TSP ALLOCATION MATRIX <<<")
+    # --- PHASE 7: TSP End-of-Day Report (real tsp.gov NAV data + chart) ---
+    logger.info("\n>>> PHASE 7: TSP END-OF-DAY REPORT <<<")
     try:
-        tsp = engine.compile_tsp_allocation_matrix()
-        assert tsp is not None, "TSP matrix returned None"
-        logger.info(f"[PASS] TSP Matrix generated")
+        from essentials_tools import generate_line_comparison_chart
+        original_dedupe = db.get_state("tsp_eod_last_reported_date")
+        db.update_state("tsp_eod_last_reported_date", "1970-01-01")  # force a fresh build for the test
+        tsp_payload, fund_series = engine.generate_tsp_eod_report()
+        assert tsp_payload is not None, "TSP EOD report returned None"
+        assert fund_series and "C Fund" in fund_series, "TSP fund series missing C Fund"
+        chart_bytes = generate_line_comparison_chart(fund_series, "TSP Funds Test Chart")
+        assert chart_bytes and len(chart_bytes) > 100, "TSP chart bytes empty/too small"
+        db.update_state("tsp_eod_last_reported_date", original_dedupe)  # restore so real cron isn't double-fired or skipped
+        logger.info(f"[PASS] TSP EOD report ({len(tsp_payload)} chars) + chart ({len(chart_bytes)} bytes) generated from real tsp.gov data")
         passed += 1
     except Exception as e:
-        logger.error(f"[FAIL] TSP Matrix: {e}")
+        logger.error(f"[FAIL] TSP EOD report: {e}")
         failed += 1
 
     # --- PHASE 8: VIX CVR Signal ---
@@ -287,6 +319,92 @@ def execute_wargame(mock_put, mock_post, mock_get):
         passed += 1
     except Exception as e:
         logger.error(f"[FAIL] Credit stress / DB: {e}")
+        failed += 1
+
+    # --- PHASE 12: Crypto Chart Snapshot + Fear & Greed ---
+    logger.info("\n>>> PHASE 12: CRYPTO CHART SNAPSHOT <<<")
+    try:
+        from essentials_tools import generate_candlestick_chart
+        ohlc = engine.fetch_crypto_ohlc("BTC/USD", outputsize=30)
+        assert ohlc is not None and not ohlc.empty, "Crypto OHLC fetch returned empty"
+        chart_bytes = generate_candlestick_chart("BTC/USD", ohlc, last_change=120.5, last_change_pct=1.85)
+        assert chart_bytes and len(chart_bytes) > 100, "Chart bytes empty/too small"
+        mover = engine.find_biggest_crypto_mover({"BTC/USD": {"close": "68500", "percent_change": "1.85"}})
+        assert mover is not None, "Biggest mover detection failed"
+        fng = engine.fetch_fear_greed_index()
+        logger.info(f"[PASS] Crypto chart ({len(chart_bytes)} bytes), mover={mover[0]}, F&G={'fetched' if fng else 'unavailable (non-fatal)'}")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Crypto chart snapshot: {e}")
+        failed += 1
+
+    # --- PHASE 13: BTC <-> SPY Correlation Sync ---
+    logger.info("\n>>> PHASE 13: BTC<->SPY CORRELATION SYNC <<<")
+    try:
+        from essentials_tools import calculate_correlation, get_trend_alignment
+        btc_ohlc = engine.fetch_crypto_ohlc("BTC/USD", outputsize=20)
+        spy_ohlc = engine.fetch_crypto_ohlc("SPY", outputsize=20)
+        assert btc_ohlc is not None and spy_ohlc is not None, "OHLC fetch failed for correlation inputs"
+        corr = calculate_correlation(btc_ohlc['close'].tolist(), spy_ohlc['close'].tolist())
+        trend, is_bullish = get_trend_alignment("BTC/USD", os.getenv("TWELVE_DATA_API_KEY"))
+        logger.info(f"[PASS] Correlation={corr:+.2f}, BTC trend={trend}")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] BTC/SPY correlation sync: {e}")
+        failed += 1
+
+    # --- PHASE 14: Futures Board + Market Profile Chart ---
+    logger.info("\n>>> PHASE 14: FUTURES BOARD + CHART <<<")
+    try:
+        cross_asset.run_futures_board()
+        logger.info("[PASS] Futures board dispatched")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Futures board: {e}")
+        failed += 1
+
+    # --- PHASE 15: TQQQ Tactical Sniper (regime/Greeks/exit-signal pipeline) ---
+    logger.info("\n>>> PHASE 15: TQQQ TACTICAL SNIPER <<<")
+    try:
+        import tqqq as tqqq_module
+        original_market_hours = tqqq_module.is_market_hours
+        tqqq_module.is_market_hours = lambda: True
+
+        sniper = tqqq_module.TQQQTacticalSniper()
+        daily = sniper.fetch_daily_baseline()
+        intraday = sniper.fetch_intraday_metrics()
+        assert daily and intraday, "TQQQ daily/intraday fetch failed"
+
+        tqqq_daily = sniper.fetch_tqqq_daily_series()
+        vix_price, vix_z = sniper.fetch_vix()
+        breadth = sniper.fetch_breadth()
+        atr_pct = tqqq_module.calculate_atr_pct(tqqq_daily) if tqqq_daily is not None else 0.02
+
+        # Force an oversold extreme to exercise the full BTO + Greeks + dispatch path
+        intraday_forced = dict(intraday, z_score=-2.3, vol_z=2.5)
+        setup = sniper.evaluate_snipe(daily, intraday_forced, vix_price, vix_z, breadth, atr_pct)
+        assert setup is not None, "evaluate_snipe returned None for a forced oversold extreme"
+        sniper.dispatch_intelligence(setup, tqqq_daily)
+
+        # Exercise the exit-signal path on a simulated open position
+        db.update_state("tqqq_open_position", {
+            "contract": "CALL", "entry_tqqq_spot": setup["tqqq_spot"], "entry_z_score": -2.3,
+            "strike": setup.get("real_strike") or setup.get("bs_strike", 0.0), "expiry": "12/31/2026",
+            "dte_at_entry": 15, "entry_time": "2026-01-01T00:00:00",
+        })
+        sniper.check_open_position_for_exit(dict(intraday, z_score=0.1), atr_pct)
+        assert db.get_state("tqqq_open_position") is None, "Exit signal failed to clear open position state"
+
+        sniper.dispatch_regime_vital_sign(daily, breadth, vix_price, vix_z)
+
+        tqqq_module.is_market_hours = original_market_hours
+        logger.info(
+            f"[PASS] TQQQ sniper: setup={setup['action']} {setup['contract']} "
+            f"(downgrade={setup.get('downgrade_reason')}), exit-signal cleared, regime sync dispatched"
+        )
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] TQQQ Tactical Sniper: {e}")
         failed += 1
 
     logger.info("\n" + "=" * 62)

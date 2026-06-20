@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import json
 import logging
@@ -8,6 +9,10 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 from email.message import EmailMessage
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 from security import encode_canary
 
@@ -114,14 +119,138 @@ def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_
         logger.error(f"Discord secure dispatch failed: {e}")
         return False
 
+@benchmark_latency
+def send_essentials_embed_with_chart(webhook_url, title, description, chart_bytes, color=0x00ff00, user_id=None):
+    """Same uniform embed format as send_essentials_embed, but attaches a generated chart PNG as the embed image."""
+    if user_id is None:
+        import hashlib
+        user_id = int(hashlib.sha256(webhook_url.encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
+    canary_string = encode_canary(int(user_id))
+    secured_description = f"{description}\n{canary_string}"
+
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": secured_description,
+            "color": color,
+            "image": {"url": "attachment://chart.png"},
+            "footer": {"text": "ESSENTIALS Macro-Quant Architecture | Data Secured"}
+        }]
+    }
+
+    try:
+        files = {
+            "payload_json": (None, json.dumps(payload)),
+            "file": ("chart.png", chart_bytes, "image/png")
+        }
+        r = requests.post(webhook_url, files=files, timeout=10)
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        logger.error(f"Discord chart dispatch failed: {e}")
+        return send_essentials_embed(webhook_url, title, description, color, user_id)
+
+def generate_candlestick_chart(label, df, last_change=None, last_change_pct=None):
+    """
+    Finviz-style dark candlestick + volume snapshot. Expects df with columns:
+    datetime (datetime64), open, high, low, close, volume — ascending order.
+    No mplfinance dependency — hand-rolled to keep PythonAnywhere installs minimal.
+    """
+    df = df.copy().reset_index(drop=True)
+    df['x'] = mdates.date2num(df['datetime'])
+    width = (df['x'].diff().median() or 0.6) * 0.6
+    has_volume = 'volume' in df.columns and df['volume'].sum() > 0
+
+    if has_volume:
+        fig, (ax, vol_ax) = plt.subplots(
+            2, 1, figsize=(9, 5.5), dpi=120, sharex=True,
+            gridspec_kw={"height_ratios": [4, 1], "hspace": 0.05}
+        )
+        axes = (ax, vol_ax)
+    else:
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=120)
+        axes = (ax,)
+
+    fig.patch.set_facecolor("#0d1117")
+    for a in axes:
+        a.set_facecolor("#0d1117")
+        a.tick_params(colors="white", labelsize=8)
+        for spine in a.spines.values():
+            spine.set_color("#30363d")
+        a.grid(color="#21262d", linewidth=0.5)
+
+    up_color, down_color = "#3fb950", "#f85149"
+    for _, row in df.iterrows():
+        color = up_color if row['close'] >= row['open'] else down_color
+        ax.plot([row['x'], row['x']], [row['low'], row['high']], color=color, linewidth=0.8)
+        body_low = min(row['open'], row['close'])
+        body_height = max(abs(row['close'] - row['open']), (row['high'] - row['low']) * 0.01)
+        ax.add_patch(plt.Rectangle((row['x'] - width / 2, body_low), width, body_height, color=color))
+        if has_volume:
+            vol_ax.bar(row['x'], row['volume'], width=width, color=color, alpha=0.7)
+
+    last_price = df['close'].iloc[-1]
+    title_suffix = ""
+    if last_change is not None and last_change_pct is not None:
+        arrow = "▲" if last_change >= 0 else "▼"
+        title_suffix = f"  {arrow} {last_change:+.2f} ({last_change_pct:+.2f}%)"
+    ax.set_title(f"{label}{title_suffix}", color="white", fontsize=12, loc="left")
+    ax.axhline(last_price, color="#f1c40f", linewidth=0.8, linestyle=":")
+    ax.text(df['x'].iloc[-1], last_price, f" {last_price:,.2f}", color="#0d1117",
+            backgroundcolor="#f1c40f", fontsize=8, va="center")
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
+    fig.autofmt_xdate()
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.12)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+def generate_line_comparison_chart(series_dict, title, lookback=90):
+    """
+    Normalized (rebased to 100) multi-line performance comparison — e.g. TSP funds G/F/C/S/I
+    over the trailing N days, so members can see relative performance at a glance.
+    series_dict: {label: pandas.Series of prices, ascending by date}
+    """
+    fig, ax = plt.subplots(figsize=(9, 5), dpi=120)
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#0d1117")
+
+    palette = ["#58a6ff", "#3fb950", "#f1c40f", "#f85149", "#a371f7", "#ff9f43", "#1abc9c"]
+    for i, (label, series) in enumerate(series_dict.items()):
+        s = series.tail(lookback).reset_index(drop=True)
+        if s.empty or s.iloc[0] == 0:
+            continue
+        rebased = (s / s.iloc[0]) * 100
+        ax.plot(rebased.index, rebased.values, label=label, color=palette[i % len(palette)], linewidth=1.5)
+
+    ax.axhline(100, color="#30363d", linewidth=0.8, linestyle="--")
+    ax.set_title(title, color="white", fontsize=11)
+    ax.set_ylabel("Rebased to 100", color="white", fontsize=8)
+    ax.tick_params(colors="white", labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color("#30363d")
+    ax.legend(facecolor="#161b22", edgecolor="#30363d", labelcolor="white", fontsize=8, loc="best")
+    ax.grid(color="#21262d", linewidth=0.5)
+    fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.1)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
 # --- ANALYTICS & INSTITUTIONAL INDICATORS ---
 def calculate_correlation(btc_prices, spy_prices):
     if not btc_prices or not spy_prices or len(btc_prices) != len(spy_prices): return 1.0
     df = pd.DataFrame({'BTC': btc_prices, 'SPY': spy_prices})
     return df['BTC'].corr(df['SPY'])
 
-def get_trend_alignment(symbol, td_api_key):
-    url = f"https://api.twelvedata.com/supertrend?symbol={symbol}&interval=1h&apikey={td_api_key}"
+def get_trend_alignment(symbol, td_api_key, interval="1h"):
+    url = f"https://api.twelvedata.com/supertrend?symbol={symbol}&interval={interval}&apikey={td_api_key}"
     try:
         response = requests.get(url, timeout=10).json()
         if "values" not in response or not response["values"]:
