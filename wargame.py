@@ -291,6 +291,12 @@ def execute_wargame(mock_put, mock_post, mock_get):
     # --- PHASE 10: Cross-Asset Futures (bypass market hours for wargame) ---
     logger.info("\n>>> PHASE 10: CROSS-ASSET FUTURES PROFILE <<<")
     try:
+        # run_intraday_futures_update writes SPY/QQQ _poc/_vwap/_vah/_val/_session to the REAL
+        # database using the mocked $580 SIM_STATE spot — save/restore so production state (read
+        # by analytics.py's market-analysis morning/intraday/EOD reports) isn't left contaminated.
+        profile_keys = [f"{sym}_{field}" for sym in ("SPY", "QQQ") for field in ("poc", "vwap", "vah", "val", "session")]
+        saved_profile_state = {k: db.get_state(k) for k in profile_keys}
+
         # Override market hours guard so wargame can validate any time of day
         original_fn = getattr(cross_asset, 'is_market_hours', None)
         if original_fn:
@@ -298,6 +304,9 @@ def execute_wargame(mock_put, mock_post, mock_get):
         cross_asset.run_intraday_futures_update()
         if original_fn:
             cross_asset.is_market_hours = original_fn
+
+        for k, v in saved_profile_state.items():
+            db.update_state(k, v)
         logger.info("[PASS] Cross-asset futures update executed")
         passed += 1
     except Exception as e:
@@ -410,15 +419,49 @@ def execute_wargame(mock_put, mock_post, mock_get):
     # --- PHASE 16: VIXY Proxy + Pre-Market Primer (VIX-404 fix verification) ---
     logger.info("\n>>> PHASE 16: VIXY PROXY & PRE-MARKET PRIMER <<<")
     try:
+        # generate_premarket_primer writes SPY_expected_upper/lower to the REAL database even
+        # under the mock HTTP layer (only requests.get is mocked, not the DB) — save/restore so
+        # this test doesn't contaminate production state with the mocked $580 SIM_STATE spot.
+        saved_upper = db.get_state("SPY_expected_upper")
+        saved_lower = db.get_state("SPY_expected_lower")
+
         vix_price, vix_z = engine.fetch_vixy_proxy()
         assert vix_price > 0, "VIXY proxy price fetch failed"
         primer = engine.generate_premarket_primer("SPY")
         assert primer is not None, "Pre-market primer returned None"
         assert "VIX" not in primer.replace("VIXY", ""), "Primer still references the dead VIX symbol"
+
+        db.update_state("SPY_expected_upper", saved_upper)
+        db.update_state("SPY_expected_lower", saved_lower)
         logger.info(f"[PASS] VIXY={vix_price:.2f} (z {vix_z:+.2f}σ), primer generated ({len(primer)} chars)")
         passed += 1
     except Exception as e:
         logger.error(f"[FAIL] VIXY proxy / primer: {e}")
+        failed += 1
+
+    # --- PHASE 17: Unified Market Analysis Hub (morning/intraday/EOD + announcements teaser) ---
+    logger.info("\n>>> PHASE 17: MARKET ANALYSIS HUB (MORNING/INTRADAY/EOD) <<<")
+    try:
+        morning_payload, morning_snap = engine.generate_market_analysis_morning_report()
+        assert morning_payload and "TODAY'S CONVICTION" in morning_payload, "Morning report malformed"
+        assert "conviction_bias" in morning_snap, "Snapshot missing conviction_bias"
+
+        intraday_payload = engine.generate_market_analysis_intraday_report()
+        assert intraday_payload and "INTRADAY PULSE" in intraday_payload, "Intraday report malformed"
+
+        eod_payload, eod_snap = engine.generate_market_analysis_eod_report()
+        assert eod_payload and "END-OF-DAY RECAP" in eod_payload, "EOD report malformed"
+
+        teaser = engine.generate_announcements_teaser(87.5, 580.0, 582.3, eod_snap)
+        assert teaser and "DAILY ACCURACY INDEX" in teaser, "Announcements teaser malformed"
+
+        logger.info(
+            f"[PASS] Morning/Intraday/EOD reports generated, conviction={morning_snap['conviction_bias']}, "
+            f"teaser ({len(teaser)} chars)"
+        )
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Market Analysis Hub: {e}")
         failed += 1
 
     logger.info("\n" + "=" * 62)

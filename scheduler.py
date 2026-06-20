@@ -29,9 +29,56 @@ WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS") 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
+def dispatch_conviction_sync(engine, snap, report_label):
+    """
+    The reverse feed: every sector channel (futures/crypto/forex/TQQQ) already pushes a
+    cross-asset signal INTO Market Analysis. This closes the loop — Market Analysis pushes a
+    condensed version of its synthesized conviction back OUT to each child channel, so the whole
+    ecosystem starts the day reading from the same master view, not just feeding a one-way sink.
+    Gated to fire once per report per day (dedup via DB), so this doesn't become a fourth alert
+    stream competing with each channel's own native content.
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    dedupe_key = f"conviction_sync_{report_label}_{today_str}"
+    if engine.db.get_state(dedupe_key):
+        return
+    engine.db.update_state(dedupe_key, True)
+
+    bias, score = snap["conviction_bias"], snap["conviction_score"]
+    color = 0x2ecc71 if score >= 2 else (0xe74c3c if score <= -2 else 0x95a5a6)
+    header = f"⚡ **MARKET ANALYSIS CONVICTION SYNC | {report_label.upper()}**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    footer = f"┗ Master Conviction: {bias} (score {score:+d}/4)\n*Full cross-asset breakdown in Market Analysis.*"
+
+    targets = {
+        WEBHOOK_FUTURES: (
+            f"{header}┣ SPY POC ${snap['futures_poc']:,.2f} | Gamma: {snap['gex']['market_state']}\n"
+            f"┣ VIXY z {snap['vixy_z']:+.2f}σ | Breadth {snap['breadth']:.0%}\n{footer}"
+        ),
+        WEBHOOK_CRYPTO: (
+            f"{header}┣ Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap.get("fng") else header
+        ) + f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}",
+        WEBHOOK_FOREX: (
+            f"{header}┣ Synthetic Dollar Index {snap['synthetic_dxy']:+.2f}%\n"
+            f"┣ Risk Regime: {snap['risk_regime']} | USD/JPY {snap.get('usdjpy_chg', 0):+.2f}% | Gold {snap.get('gold_chg', 0):+.2f}%\n{footer}"
+        ),
+        WEBHOOK_OPTIONS: (
+            f"{header}┣ Gamma: {snap['gex']['market_state']} | Flip ${snap['gex']['flip_strike']:,.2f}\n"
+            f"┣ VIXY z {snap['vixy_z']:+.2f}σ\n{footer}"
+        ),
+        WEBHOOK_INCOME: (
+            f"{header}┣ Credit Stress (HY Spread): {snap['credit_spread']:.2f}%\n"
+            f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}"
+        ),
+    }
+    for webhook, payload in targets.items():
+        if webhook:
+            send_essentials_embed(webhook, f"Market Analysis Sync | {report_label}", payload, color)
+    logger.info(f"Conviction sync ({report_label}) cross-dispatched to {sum(1 for w in targets if w)} channels.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday"])
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -164,6 +211,15 @@ def main():
                 if primer_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
 
+            # ── MARKET ANALYSIS: Unified Morning Brief + reverse-feed conviction sync ──
+            try:
+                morning_brief, morning_snap = engine.generate_market_analysis_morning_report()
+                if morning_brief and WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", morning_brief, 0x1abc9c)
+                    dispatch_conviction_sync(engine, morning_snap, "morning")
+            except Exception as e:
+                logger.error(f"Market analysis morning brief failed: {e}")
+
             # ── OPTIONS CHANNEL: Pre-Market GEX + VIX Brief ──────────────
             # Gives options traders their day-start context before the open.
             try:
@@ -205,43 +261,71 @@ def main():
 
             logger.info("Morning primers successfully compiled and dispatched.")
 
+        elif args.mode == "market_intraday":
+            # Mid-day check-in: is today tracking the morning call, or has the tape diverged?
+            # No new cron slot exists for this yet — add one around 12:00-13:00 ET to PythonAnywhere's
+            # scheduled tasks: `python3.10 /home/alftw/scripts/scheduler.py --mode market_intraday`
+            try:
+                intraday_brief = engine.generate_market_analysis_intraday_report()
+                if intraday_brief and WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | INTRADAY PULSE", intraday_brief, 0xf1c40f)
+                    logger.info("Intraday pulse dispatched.")
+            except Exception as e:
+                logger.error(f"Market analysis intraday report failed: {e}")
+
         elif args.mode == "eod":
             for ticker in ["SPY", "QQQ"]:
                 eod_payload = engine.generate_eod_reconciliation(ticker)
                 if eod_payload and WEBHOOK_MARKET:
                     send_essentials_embed(WEBHOOK_MARKET, f"SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
-            
+
+            # ── MARKET ANALYSIS: Unified EOD Recap + reverse-feed conviction sync ──
+            eod_snap = None
+            try:
+                eod_brief, eod_snap = engine.generate_market_analysis_eod_report()
+                if eod_brief and WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | END-OF-DAY RECAP", eod_brief, 0x2c3e50)
+                    dispatch_conviction_sync(engine, eod_snap, "eod")
+            except Exception as e:
+                logger.error(f"Market analysis EOD recap failed: {e}")
+
             today_str = datetime.now().strftime("%Y-%m-%d")
             prediction_key = f"market_prediction_SPY_{today_str}"
             saved_state = engine.db.get_state(prediction_key)
-            
+
             if saved_state:
                 try:
                     predicted_target = float(saved_state)
                     price_data = engine._execute_query("price", {"symbol": "SPY"})
-                    
+
                     if price_data and "price" in price_data:
                         actual_close = float(price_data["price"])
                         accuracy_score = engine.calculate_accuracy_rating(predicted_target, actual_close)
-                        
-                        acc_payload = (
-                            f"Quant Forecast Accuracy Index\n"
-                            f"┣ Session Date: `{today_str}`\n"
-                            f"┣ Model Predictive Accuracy: `{accuracy_score}%`\n\n"
-                            f"Session Performance Breakdown:\n"
-                            f"┣ Algorithmic Target Projected: `${predicted_target:,.2f}`\n"
-                            f"┣ Institutional Closing Print: `${actual_close:,.2f}`\n"
-                            f"┗ Net Variance Delta: `${abs(actual_close - predicted_target):,.2f}`\n\n"
-                            f"*Ecosystem Performance Verification: Session calculation finalized and archived.*"
-                        )
-                        
+
+                        # Public, non-paywalled "bait" channel — proves the math works without
+                        # giving away the full depth. Includes a real cross-asset stat (crypto
+                        # mover, Fear & Greed) alongside the accuracy number for extra pull.
+                        if eod_snap is not None:
+                            acc_payload = engine.generate_announcements_teaser(accuracy_score, predicted_target, actual_close, eod_snap)
+                        else:
+                            acc_payload = (
+                                f"Quant Forecast Accuracy Index\n"
+                                f"┣ Session Date: `{today_str}`\n"
+                                f"┣ Model Predictive Accuracy: `{accuracy_score}%`\n\n"
+                                f"Session Performance Breakdown:\n"
+                                f"┣ Algorithmic Target Projected: `${predicted_target:,.2f}`\n"
+                                f"┣ Institutional Closing Print: `${actual_close:,.2f}`\n"
+                                f"┗ Net Variance Delta: `${abs(actual_close - predicted_target):,.2f}`\n\n"
+                                f"*Ecosystem Performance Verification: Session calculation finalized and archived.*"
+                            )
+
                         if WEBHOOK_ANNOUNCEMENTS:
                             send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
                     else:
                         logger.warning("EOD Accuracy: Failed to fetch final closing price from Twelve Data.")
                 except Exception as e:
                     logger.error(f"EOD Accuracy Calculation Error: {e}")
-            
+
             vix_signal = engine.evaluate_vix_cvr_reversal()
             if vix_signal and WEBHOOK_MARKET:
                 v_payload = (

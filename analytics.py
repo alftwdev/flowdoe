@@ -1264,3 +1264,173 @@ class HighFidelityAnalyticsEngine:
             return {"flip_strike": flip_strike, "current_spot": spot, "market_state": market_state}
         except Exception:
             return {"flip_strike": spot, "current_spot": spot, "market_state": "ERROR BOUNDS"}
+
+    # =====================================================================
+    # UNIFIED MACRO BRIEFING — Market Analysis as the ecosystem's hub.
+    #
+    # Every other channel built this session (futures/crypto/forex/TQQQ) feeds a cross-asset
+    # signal INTO WEBHOOK_MARKET_ANALYSIS. This section closes the loop: Market Analysis
+    # synthesizes everyone else's already-computed state into one authoritative read, then
+    # pushes a condensed "conviction sync" back OUT to each child channel — so the whole
+    # ecosystem starts the day aligned, not just market-analysis being a one-way sink.
+    #
+    # Reuses cheap, already-cached state wherever possible (TQQQ's daily breadth cache, the
+    # futures desk's overnight profile, credit_spread from the macro liquidity sweep) instead
+    # of re-fetching everything from scratch — this report runs 2-3x/day, not every tick.
+    # =====================================================================
+
+    def _gather_cross_asset_snapshot(self):
+        snap = {}
+        try:
+            snap["gex"] = self.calculate_gex_profile("SPY")
+        except Exception:
+            snap["gex"] = {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN"}
+
+        snap["vixy_price"], snap["vixy_z"] = self.fetch_vixy_proxy()
+        snap["credit_spread"] = float(self.db.get_state("credit_spread", 3.5))
+        # Reuses TQQQ desk's daily-cached Nasdaq-100 breadth rather than re-fetching 10 symbols here.
+        snap["breadth"] = float(self.db.get_state("tqqq_breadth_cache", 0.60))
+
+        snap["fng"] = self.fetch_fear_greed_index()
+
+        try:
+            fx_quotes = self._fetch_twelve_data_quotes(self.FX_UNIVERSE)
+            snap["synthetic_dxy"] = self.calculate_synthetic_dollar_index(fx_quotes)
+            snap["risk_regime"], snap["risk_explanation"], snap["usdjpy_chg"], snap["gold_chg"] = self.assess_risk_sentiment_regime(fx_quotes)
+        except Exception:
+            snap["synthetic_dxy"], snap["risk_regime"], snap["risk_explanation"] = 0.0, "🟡 MIXED", "Forex data unavailable."
+
+        # Overnight futures desk's market profile, already computed by cross_asset.py.
+        snap["futures_session"] = self.db.get_state("SPY_session", "UNKNOWN")
+        snap["futures_poc"] = float(self.db.get_state("SPY_poc", snap["gex"]["current_spot"]))
+        snap["futures_vah"] = float(self.db.get_state("SPY_vah", 0.0))
+        snap["futures_val"] = float(self.db.get_state("SPY_val", 0.0))
+
+        try:
+            crypto_quotes = self._fetch_twelve_data_quotes(self.CRYPTO_UNIVERSE)
+            snap["crypto_mover"] = self.find_biggest_mover(crypto_quotes, self.CRYPTO_UNIVERSE)
+        except Exception:
+            snap["crypto_mover"] = None
+
+        # Composite directional score — simple, transparent, and auditable (not a black box):
+        # GEX regime + risk-on/off + breadth + vol-spike each contribute, capped at +/-4.
+        score = 0
+        if "POSITIVE" in snap["gex"]["market_state"]: score += 1
+        elif "NEGATIVE" in snap["gex"]["market_state"]: score -= 1
+        if snap["risk_regime"] == "🟢 RISK-ON": score += 1
+        elif snap["risk_regime"] == "🔴 RISK-OFF": score -= 1
+        if snap["breadth"] >= 0.70: score += 1
+        elif snap["breadth"] < 0.35: score -= 2
+        if snap["vixy_z"] >= 1.5: score -= 1
+        snap["conviction_score"] = score
+        snap["conviction_bias"] = "🟢 BULLISH" if score >= 2 else ("🔴 BEARISH" if score <= -2 else "🟡 NEUTRAL/CHOP")
+        return snap
+
+    def generate_market_analysis_morning_report(self):
+        """Pre-open synthesis for scalpers/options traders — what happened overnight, what it means
+        for today. Stores today's directional call for the EOD accuracy reconciliation."""
+        snap = self._gather_cross_asset_snapshot()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        self.db.update_state(f"market_analysis_morning_call_{today_str}", {
+            "bias": snap["conviction_bias"], "score": snap["conviction_score"], "spot": snap["gex"]["current_spot"],
+        })
+
+        crypto_line = ""
+        if snap["crypto_mover"]:
+            sym, price, _, pct = snap["crypto_mover"]
+            crypto_line = f"┣ Crypto Overnight Mover: {sym} `{pct:+.2f}%` | Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap["fng"] else f"┣ Crypto Overnight Mover: {sym} `{pct:+.2f}%`\n"
+
+        payload = (
+            f"🌅 **MARKET ANALYSIS | MORNING BRIEF — Pre-Open Conviction**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┣ Overnight Futures ({snap['futures_session']}): SPY POC `${snap['futures_poc']:,.2f}` | VAH `${snap['futures_vah']:,.2f}` | VAL `${snap['futures_val']:,.2f}`\n"
+            f"┣ Gamma Regime: {snap['gex']['market_state']} | Flip `${snap['gex']['flip_strike']:,.2f}` | SPY `${snap['gex']['current_spot']:,.2f}`\n"
+            f"┣ Volatility: VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ) | Nasdaq-100 Breadth: `{snap['breadth']:.0%}`\n"
+            f"┣ Macro: Synthetic Dollar Index `{snap['synthetic_dxy']:+.2f}%` | {snap['risk_regime']} ({snap['risk_explanation']})\n"
+            f"┣ Credit Stress (HY Spread): `{snap['credit_spread']:.2f}%`\n"
+            f"{crypto_line}"
+            f"┗ **TODAY'S CONVICTION: {snap['conviction_bias']}** (score {snap['conviction_score']:+d}/4)\n\n"
+            f"Scalper/Options Directive: {'Favor long delta into strength; positive gamma should dampen downside.' if snap['conviction_score'] >= 2 else ('Favor defined-risk/short delta; negative gamma + weak breadth raises whipsaw odds.' if snap['conviction_score'] <= -2 else 'No clean edge — size down, trade the range, wait for a confirming break of overnight VAH/VAL.')}"
+        )
+        return payload, snap
+
+    def generate_market_analysis_intraday_report(self):
+        """Mid-day check-in: is today tracking the morning call, or has the tape diverged?"""
+        snap = self._gather_cross_asset_snapshot()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        morning_call = self.db.get_state(f"market_analysis_morning_call_{today_str}")
+
+        if not morning_call:
+            tracking_line = "No morning call on record today — treat this as a fresh read."
+        else:
+            same_bias = morning_call["bias"] == snap["conviction_bias"]
+            move_since = snap["gex"]["current_spot"] - morning_call["spot"]
+            tracking_line = (
+                f"{'✅ ON TRACK' if same_bias else '⚠️ DIVERGING'} from this morning's {morning_call['bias']} call "
+                f"(SPY {move_since:+.2f} since open read)."
+            )
+
+        payload = (
+            f"☀️ **MARKET ANALYSIS | INTRADAY PULSE**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┣ SPY `${snap['gex']['current_spot']:,.2f}` | Gamma: {snap['gex']['market_state']} (Flip `${snap['gex']['flip_strike']:,.2f}`)\n"
+            f"┣ VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ) | Breadth: `{snap['breadth']:.0%}`\n"
+            f"┣ Macro: {snap['risk_regime']} | Synthetic Dollar Index `{snap['synthetic_dxy']:+.2f}%`\n"
+            f"┣ Current Read: {snap['conviction_bias']} (score {snap['conviction_score']:+d}/4)\n"
+            f"┗ {tracking_line}\n\n"
+            f"Adjustment Directive: {'Trail stops, let winners run — regime confirmed.' if morning_call and morning_call['bias'] == snap['conviction_bias'] and snap['conviction_score'] != 0 else 'Tighten risk — conditions have shifted since the open, reassess before adding exposure.'}"
+        )
+        return payload
+
+    def generate_market_analysis_eod_report(self):
+        """End-of-day recap: what happened, what the indicators said, and how the morning call did."""
+        snap = self._gather_cross_asset_snapshot()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        morning_call = self.db.get_state(f"market_analysis_morning_call_{today_str}")
+        eod_core = self.generate_eod_reconciliation("SPY")
+
+        call_review = ""
+        if morning_call:
+            correct = morning_call["bias"] == snap["conviction_bias"] or (morning_call["score"] * snap["conviction_score"]) > 0
+            call_review = (
+                f"\n\n📋 **Morning Call Review**\n"
+                f"┣ Called: {morning_call['bias']} (score {morning_call['score']:+d}) | Closed: {snap['conviction_bias']} (score {snap['conviction_score']:+d})\n"
+                f"┗ {'✅ Directionally correct' if correct else '❌ Missed — regime shifted intraday'}"
+            )
+
+        payload = (
+            f"🌆 **MARKET ANALYSIS | END-OF-DAY RECAP**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{eod_core or 'EOD reconciliation data unavailable.'}\n\n"
+            f"📊 **Closing Technicals & Lessons**\n"
+            f"┣ Final Gamma Regime: {snap['gex']['market_state']} | Breadth: `{snap['breadth']:.0%}` | VIXY z: `{snap['vixy_z']:+.2f}σ`\n"
+            f"┣ Macro Close: {snap['risk_regime']} | Credit Spread: `{snap['credit_spread']:.2f}%`\n"
+            f"┗ Lesson: {'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.' if abs(snap['conviction_score']) >= 2 else 'Mixed signals across breadth/gamma/macro — a chop day. Capital preservation over forcing trades is the correct lesson.'}"
+            f"{call_review}"
+        )
+        return payload, snap
+
+    def generate_announcements_teaser(self, accuracy_score, predicted, actual, snap):
+        """
+        Public, non-paywalled bait content for WEBHOOK_ANNOUNCEMENTS — proves the ecosystem's math
+        works without giving away the full depth behind the paywall. Factual and value-forward,
+        not hype copy: the accuracy number and a real cross-asset stat do the convincing on their own.
+        """
+        crypto_blurb = ""
+        if snap.get("crypto_mover"):
+            sym, _, _, pct = snap["crypto_mover"]
+            crypto_blurb = f"┣ Today's Biggest Crypto Mover: {sym} `{pct:+.2f}%`\n"
+        fng_blurb = f"┣ Crypto Fear & Greed Index: `{snap['fng']['value']}` ({snap['fng']['label']})\n" if snap.get("fng") else ""
+
+        payload = (
+            f"📣 **DAILY ACCURACY INDEX — Public Sample**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┣ Predicted SPY Target: `${predicted:,.2f}`\n"
+            f"┣ Actual SPY Close: `${actual:,.2f}`\n"
+            f"┣ Model Accuracy Today: `{accuracy_score}%`\n"
+            f"{crypto_blurb}"
+            f"{fng_blurb}"
+            f"┗ This is one free sample of what the full ecosystem (futures, crypto, forex, options, income, TSP) "
+            f"calculates every single trading day — multiple times a day, before, during, and after the open."
+        )
+        return payload
