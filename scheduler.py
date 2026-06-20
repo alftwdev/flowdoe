@@ -168,16 +168,18 @@ def main():
             # Gives options traders their day-start context before the open.
             try:
                 gex = engine.calculate_gex_profile("SPY")
-                vix_data = engine._execute_query("price", {"symbol": "VIX"})
-                vix_spot = float(vix_data.get("price", 15.0)) if vix_data else 15.0
+                # "VIX" 404s at this Twelve Data plan tier — VIXY proxy + its OWN z-score (relative
+                # fear-spike, not an absolute level that drifts with VIXY's contango decay over time).
+                vix_spot, vix_z = engine.fetch_vixy_proxy()
                 spy_spot = gex.get("current_spot", 0.0)
                 flip = gex.get("flip_strike", 0.0)
                 gex_state = gex.get("market_state", "UNKNOWN")
 
-                # Determine premium environment
-                if vix_spot < 14:
-                    premium_env = "SUPPRESSED — Low premium, avoid naked shorts. Prefer debit structures."
-                elif vix_spot < 18:
+                # Determine premium environment — relative to VIXY's own recent baseline, not a
+                # fixed absolute threshold (see fetch_vixy_proxy() docstring for why).
+                if vix_z < -0.75:
+                    premium_env = "SUPPRESSED — Low relative premium, avoid naked shorts. Prefer debit structures."
+                elif vix_z < 0.75:
                     premium_env = "BALANCED — Moderate IV. Credit spreads and iron condors viable."
                 else:
                     premium_env = "RICH — Elevated IV. Premium sellers have statistical edge today."
@@ -190,7 +192,7 @@ def main():
 
                 options_brief = (
                     f"Pre-market options environment for today's session:\n\n"
-                    f"┣ VIX: `{vix_spot:.2f}` | Premium: {premium_env}\n"
+                    f"┣ VIXY: `{vix_spot:.2f}` (z {vix_z:+.2f}σ) | Premium: {premium_env}\n"
                     f"┣ SPY Spot: `${spy_spot:.2f}` | GEX Flip: `${flip:.2f}`\n"
                     f"┣ Gamma Regime: {gex_state}\n"
                     f"┗ Dealer Behavior: {gamma_context}\n\n"
@@ -243,9 +245,9 @@ def main():
             vix_signal = engine.evaluate_vix_cvr_reversal()
             if vix_signal and WEBHOOK_MARKET:
                 v_payload = (
-                    f"Larry Connors CVR VIX Reversal Signal\n\n"
+                    f"Larry Connors CVR Reversal Signal (VIXY proxy — VIX index unavailable at this data tier)\n\n"
                     f"┣ Action: `{vix_signal['signal']}`\n"
-                    f"┣ VIX Spot: `{vix_signal['vix_spot']:.2f}`\n"
+                    f"┣ VIXY Spot: `{vix_signal['vixy_spot']:.2f}`\n"
                     f"┗ Technical Confirmation: {vix_signal['condition']}\n\n"
                     f"Context: This is an institutional-grade counter-trend indicator. Capitalize on the volatility contraction/expansion."
                 )
@@ -459,12 +461,12 @@ def main():
             # Provides meaningful context even on quiet days.
             if not iv_dispatched and not flow_dispatched:
                 gex = engine.calculate_gex_profile("SPY")
-                vix_data = engine._execute_query("price", {"symbol": "VIX"})
-                vix_spot = float(vix_data.get("price", 15.0)) if vix_data else 15.0
+                # "VIX" 404s at this Twelve Data plan tier — VIXY proxy + its OWN z-score.
+                vix_spot, vix_z = engine.fetch_vixy_proxy()
 
-                if vix_spot < 15:
-                    vix_env = "LOW VOLATILITY — Premium sellers in a drought. Prefer debit spreads or condors."
-                elif vix_spot < 20:
+                if vix_z < -0.75:
+                    vix_env = "LOW RELATIVE VOLATILITY — Premium sellers in a drought. Prefer debit spreads or condors."
+                elif vix_z < 0.75:
                     vix_env = "MODERATE VOLATILITY — Balanced premium. Credit spreads statistically favorable."
                 else:
                     vix_env = "ELEVATED VOLATILITY — Rich premium. Ideal for iron condors & covered calls."
@@ -474,12 +476,12 @@ def main():
 
                 outlook_payload = (
                     f"No IV crush or unusual flow signals detected this session.\n\n"
-                    f"┣ VIX Spot: `{vix_spot:.2f}` | Regime: {vix_env}\n"
+                    f"┣ VIXY: `{vix_spot:.2f}` (z {vix_z:+.2f}σ) | Regime: {vix_env}\n"
                     f"┣ SPY Gamma Posture: {gex_state}\n"
                     f"┣ GEX Flip Level: `${flip:.2f}` (dealer hedging pivot)\n"
-                    f"┗ Directive: {'Wait for VIX expansion above 16 for optimal credit premium.' if vix_spot < 16 else 'Premium environment is active. Screen for setups on earnings or macro events.'}\n\n"
+                    f"┗ Directive: {'Wait for a volatility expansion for optimal credit premium.' if vix_z < 0 else 'Premium environment is active. Screen for setups on earnings or macro events.'}\n\n"
                     f"Context: When both IV and flow are quiet, capital preservation > new entries. "
-                    f"Watch for VIX spike or unusual volume tomorrow morning."
+                    f"Watch for a volatility spike or unusual volume tomorrow morning."
                 )
                 send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS MARKET PULSE | Conditions Overview", outlook_payload, 0x3498db)
                 logger.info("Options fallback market conditions snapshot dispatched.")

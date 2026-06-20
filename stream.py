@@ -222,13 +222,16 @@ class RealTimeTickAgent:
                 self.evaluate_proximity_metrics(symbol, price)
             elif symbol == "BTC/USD":
                 self.process_crypto_volatility(price)
-            elif symbol == "VIX":
-                db.update_state("vix_iv_index", price)
+            elif symbol == "VIXY":
+                # "VIX" 404s on this Twelve Data plan tier (confirmed across the ecosystem) — this
+                # subscription previously silently never received a single tick. VIXY is a proxy
+                # ETF, not the real index, so this is a rough real-time tape, not a calibrated level.
+                db.update_state("vixy_price_realtime", price)
         except Exception: pass
 
     def on_open(self, ws):
         logger.info("Websocket pipeline connected. Initializing unified stream monitor...")
-        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIX,XAU/USD,EUR/USD,GBP/USD,USD/JPY,BTC/USD"}}))
+        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIXY,XAU/USD,EUR/USD,GBP/USD,USD/JPY,BTC/USD"}}))
 
     def on_error(self, ws, error): pass
     def on_close(self, ws, close_status_code, close_msg): logger.debug("Stream dropped. Re-establishing...")

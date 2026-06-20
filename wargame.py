@@ -407,6 +407,20 @@ def execute_wargame(mock_put, mock_post, mock_get):
         logger.error(f"[FAIL] TQQQ Tactical Sniper: {e}")
         failed += 1
 
+    # --- PHASE 16: VIXY Proxy + Pre-Market Primer (VIX-404 fix verification) ---
+    logger.info("\n>>> PHASE 16: VIXY PROXY & PRE-MARKET PRIMER <<<")
+    try:
+        vix_price, vix_z = engine.fetch_vixy_proxy()
+        assert vix_price > 0, "VIXY proxy price fetch failed"
+        primer = engine.generate_premarket_primer("SPY")
+        assert primer is not None, "Pre-market primer returned None"
+        assert "VIX" not in primer.replace("VIXY", ""), "Primer still references the dead VIX symbol"
+        logger.info(f"[PASS] VIXY={vix_price:.2f} (z {vix_z:+.2f}σ), primer generated ({len(primer)} chars)")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] VIXY proxy / primer: {e}")
+        failed += 1
+
     logger.info("\n" + "=" * 62)
     status_tag = "✅ ALL SYSTEMS GO" if failed == 0 else f"⚠️ {failed} FAILURE(S) DETECTED"
     logger.info(f"  WARGAME COMPLETE: {passed} PASSED | {failed} FAILED — {status_tag}")

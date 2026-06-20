@@ -29,6 +29,30 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"API Execution Failure ({endpoint}): {e}")
             return None
 
+    def fetch_vixy_proxy(self):
+        """
+        The bare "VIX" symbol 404s on every Twelve Data endpoint at this plan tier (cash index
+        access requires a higher tier) — confirmed across this file, scheduler.py, and stream.py,
+        all of which were silently falling back to hardcoded defaults (15.0) instead of real data.
+        VIXY (VIX futures ETF) resolves fine, but its absolute price isn't on the same scale as the
+        VIX index and decays over time via contango, so any fixed "VIX > 16" style threshold drifts
+        wrong. This returns (price, z_score vs its own 20D mean) — use the z-score for regime
+        classification (relative fear spike), and the price only as a rough expected-move input.
+        """
+        try:
+            data = self._execute_query("time_series", {"symbol": "VIXY", "interval": "1day", "outputsize": "20"})
+            if not data or "values" not in data:
+                return 20.0, 0.0
+            closes = np.array([float(v["close"]) for v in data["values"]], dtype=float)
+            if len(closes) < 10:
+                return 20.0, 0.0
+            current, mean, std = closes[0], closes.mean(), closes.std()
+            z = (current - mean) / std if std > 0 else 0.0
+            return float(current), float(z)
+        except Exception as e:
+            logger.error(f"VIXY proxy fetch failed: {e}")
+            return 20.0, 0.0
+
     def _fetch_fred_metric(self, series_id):
         url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={self.fred_api_key}&file_type=json&sort_order=desc&limit=1"
         try:
@@ -146,7 +170,9 @@ class HighFidelityAnalyticsEngine:
             return 0.0
 
     def evaluate_vix_cvr_reversal(self):
-        data = self._execute_query("time_series", {"symbol": "VIX", "interval": "1day", "outputsize": "20"})
+        """CVR pattern logic doesn't depend on VIX's absolute scale — VIXY's own 15D high/low
+        breakout-rejection pattern works identically. Was previously dead (VIX 404'd -> always None)."""
+        data = self._execute_query("time_series", {"symbol": "VIXY", "interval": "1day", "outputsize": "20"})
         if not data or "values" not in data: return None
         
         try:
@@ -173,15 +199,15 @@ class HighFidelityAnalyticsEngine:
             if c_high > max_high_15 and c_close < c_open:
                 return {
                     "signal": "🟢 MARKET BUY TRIGGER",
-                    "condition": f"VIX established new 15-Day High ({c_high:.2f}) but violently rejected and closed below open ({c_close:.2f} < {c_open:.2f}).",
-                    "vix_spot": c_close
+                    "condition": f"VIXY established new 15-Day High ({c_high:.2f}) but violently rejected and closed below open ({c_close:.2f} < {c_open:.2f}).",
+                    "vixy_spot": c_close
                 }
-                
+
             if c_low < min_low_15 and c_close > c_open:
                 return {
                     "signal": "🔴 MARKET SELL TRIGGER",
-                    "condition": f"VIX established new 15-Day Low ({c_low:.2f}) but bounced and closed above open ({c_close:.2f} > {c_open:.2f}).",
-                    "vix_spot": c_close
+                    "condition": f"VIXY established new 15-Day Low ({c_low:.2f}) but bounced and closed above open ({c_close:.2f} > {c_open:.2f}).",
+                    "vixy_spot": c_close
                 }
                 
             return None
@@ -223,26 +249,35 @@ class HighFidelityAnalyticsEngine:
 
     def generate_premarket_primer(self, symbol="SPY"):
         try:
-            quote_data = self._fetch_twelve_data_quotes([symbol, "VIX"])
+            quote_data = self._fetch_twelve_data_quotes([symbol])
             if not quote_data or symbol not in quote_data: return None
-            
+
             sym_quote = quote_data.get(symbol, {})
-            vix_quote = quote_data.get("VIX", {})
-            
+
             spot = float(sym_quote.get("close", 0.0))
             prev_close = float(sym_quote.get("previous_close", spot))
-            vix_spot = float(vix_quote.get("close", 15.0))  
-            
+
             if spot == 0.0: return None
-            
+
             gap_pct = ((spot - prev_close) / prev_close) * 100
             inventory = "🟢 OVERNIGHT LONG" if gap_pct > 0 else "🔴 OVERNIGHT SHORT"
-            
-            expected_move_pct = vix_spot / 16.0 
+
+            # Expected move now derived from the underlying's OWN realized volatility instead of a
+            # VIX quote that always 404'd and silently fell back to a constant 15.0 — this was
+            # producing the same wrong expected-move band every single morning regardless of actual
+            # conditions, which also fed stream.py's live SPY/QQQ perimeter-breach alerts downstream.
+            daily_data = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "21"})
+            expected_move_pct = 1.0  # conservative fallback if history fetch fails
+            if daily_data and "values" in daily_data and len(daily_data["values"]) >= 11:
+                closes = np.array([float(v["close"]) for v in daily_data["values"]], dtype=float)[::-1]
+                returns = np.diff(closes) / closes[:-1]
+                expected_move_pct = float(np.std(returns[-20:]) * 100)
+            vix_spot_display, vix_z = self.fetch_vixy_proxy()
+
             expected_move_dollars = spot * (expected_move_pct / 100)
             upper_bound = spot + expected_move_dollars
             lower_bound = spot - expected_move_dollars
-            
+
             self.db.update_state(f"{symbol}_expected_upper", upper_bound)
             self.db.update_state(f"{symbol}_expected_lower", lower_bound)
 
@@ -255,7 +290,7 @@ class HighFidelityAnalyticsEngine:
                 f"**Macro Positioning (Overnight Inventory)**\n"
                 f"┣ **Pre-Market Spot**: `${spot:,.2f}`\n"
                 f"┣ **Overnight Gap**: `{gap_pct:+.2f}%` ({inventory})\n"
-                f"┗ **Implied VIX Volatility**: `{vix_spot}%`\n\n"
+                f"┗ **{symbol} Realized Volatility (20D)**: `{expected_move_pct:.2f}%/day` | VIXY {vix_spot_display:.2f} (z {vix_z:+.2f}σ)\n\n"
                 f"🎯 **MATHEMATICAL EXPECTED MOVES (1 Standard Deviation)**\n"
                 f"┣ 🔼 **Ceiling (Call Resistance)**: `${upper_bound:,.2f}`\n"
                 f"┗ 🔽 **Floor (Put Support)**: `${lower_bound:,.2f}`\n\n"
