@@ -984,6 +984,11 @@ class HighFidelityAnalyticsEngine:
             }
             resp = requests.get(self.TSP_CSV_URL, headers=headers, timeout=20)
             resp.raise_for_status()
+            # Sanity check before overwriting a previously-good cache — a truncated/garbage
+            # response (network hiccup, unexpected redirect, etc.) must not destroy the last
+            # known-good NAV data that reports already depend on.
+            if not resp.text or len(resp.text) < 200 or "Date" not in resp.text:
+                raise ValueError(f"TSP CSV response looks invalid ({len(resp.text or '')} chars) — refusing to overwrite cache")
             with open(self.TSP_CACHE_PATH, "w") as f:
                 f.write(resp.text)
             self.db.update_state(cache_key, today_str)

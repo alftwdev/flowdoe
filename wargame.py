@@ -54,6 +54,7 @@ def mock_requests_get(url, *args, **kwargs):
         def __init__(self, data, status_code=200):
             self._data = data
             self.status_code = status_code
+            self.text = "" if isinstance(data, dict) else str(data)
         def json(self): return self._data
         def raise_for_status(self): pass
 
@@ -253,7 +254,15 @@ def execute_wargame(mock_put, mock_post, mock_get):
     # --- PHASE 7: TSP End-of-Day Report (real tsp.gov NAV data + chart) ---
     logger.info("\n>>> PHASE 7: TSP END-OF-DAY REPORT <<<")
     try:
+        import shutil
         from essentials_tools import generate_line_comparison_chart
+        # fetch_tsp_share_prices can be forced into a real-network-style fetch under the mock
+        # layer (e.g. on a daily-cache rollover) — back up the actual disk cache file too, not
+        # just DB state, since a bad mocked response would otherwise overwrite real NAV data.
+        tsp_cache_backup = engine.TSP_CACHE_PATH + ".wargame_backup"
+        if os.path.exists(engine.TSP_CACHE_PATH):
+            shutil.copy(engine.TSP_CACHE_PATH, tsp_cache_backup)
+
         original_dedupe = db.get_state("tsp_eod_last_reported_date")
         db.update_state("tsp_eod_last_reported_date", "1970-01-01")  # force a fresh build for the test
         tsp_payload, fund_series = engine.generate_tsp_eod_report()
@@ -262,11 +271,19 @@ def execute_wargame(mock_put, mock_post, mock_get):
         chart_bytes = generate_line_comparison_chart(fund_series, "TSP Funds Test Chart")
         assert chart_bytes and len(chart_bytes) > 100, "TSP chart bytes empty/too small"
         db.update_state("tsp_eod_last_reported_date", original_dedupe)  # restore so real cron isn't double-fired or skipped
+
+        if os.path.exists(tsp_cache_backup):
+            shutil.move(tsp_cache_backup, engine.TSP_CACHE_PATH)
         logger.info(f"[PASS] TSP EOD report ({len(tsp_payload)} chars) + chart ({len(chart_bytes)} bytes) generated from real tsp.gov data")
         passed += 1
     except Exception as e:
         logger.error(f"[FAIL] TSP EOD report: {e}")
         failed += 1
+    finally:
+        tsp_cache_backup = engine.TSP_CACHE_PATH + ".wargame_backup"
+        if os.path.exists(tsp_cache_backup):
+            import shutil as _shutil
+            _shutil.move(tsp_cache_backup, engine.TSP_CACHE_PATH)
 
     # --- PHASE 8: VIX CVR Signal ---
     logger.info("\n>>> PHASE 8: VIX CVR COUNTER-TREND SIGNAL <<<")
@@ -534,6 +551,38 @@ def execute_wargame(mock_put, mock_post, mock_get):
         passed += 1
     except Exception as e:
         logger.error(f"[FAIL] Cross-sector accuracy ledger: {e}")
+        failed += 1
+
+    # --- PHASE 19: Market Structure Toolkit (FVG, liquidity sweep, equal highs/lows) ---
+    logger.info("\n>>> PHASE 19: MARKET STRUCTURE TOOLKIT (FVG/SWEEP/EQH-EQL) <<<")
+    try:
+        from market_structure import detect_fvgs, detect_liquidity_sweep, detect_equal_highs_lows, analyze_market_structure
+        import pandas as pd
+
+        # Hand-built synthetic OHLC with a known, unambiguous bullish FVG (candle0 high=100,
+        # candle2 low=105 -> gap 100-105) — a precise correctness check, not just "did it run."
+        synthetic = pd.DataFrame({
+            "open":  [98, 102, 106, 107, 108, 109, 110],
+            "high":  [100, 104, 109, 110, 111, 112, 113],
+            "low":   [97, 101, 105, 106, 107, 108, 109],
+            "close": [99, 103, 108, 108, 109, 110, 111],
+        })
+        fvgs = detect_fvgs(synthetic, atr_mult=0.0)
+        assert any(f["type"] == "bullish" and f["top"] == 105.0 and f["bottom"] == 100.0 for f in fvgs), \
+            f"Known bullish FVG (100-105) not detected: {fvgs}"
+
+        sweep = detect_liquidity_sweep(synthetic, lookback=3)  # may be None on this short synthetic series — just must not crash
+        eqh, eql = detect_equal_highs_lows(synthetic, lookback=7, swing_lookback=1)
+
+        # Real-data smoke test on actual TQQQ history
+        tqqq_daily = HighFidelityAnalyticsEngine().fetch_crypto_ohlc("TQQQ", outputsize=60)
+        result = analyze_market_structure(tqqq_daily)
+        assert "setup" in result and "bias" in result and "detail" in result, f"Structure result malformed: {result}"
+
+        logger.info(f"[PASS] FVG math verified exact, sweep/EQH-EQL ran clean, real TQQQ structure: {result['setup']} ({result['bias']})")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Market structure toolkit: {e}")
         failed += 1
 
     logger.info("\n" + "=" * 62)

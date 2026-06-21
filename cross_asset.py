@@ -9,6 +9,7 @@ import pytz
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from market_structure import analyze_market_structure
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
@@ -107,6 +108,8 @@ def fetch_profile_time_series(symbol, outputsize=190):
         df['datetime_est'] = df['datetime'].dt.tz_localize('UTC').dt.tz_convert('America/New_York')
         df['close'] = df['close'].astype(float)
         df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
         df['volume'] = df['volume'].astype(int)
         return df[::-1].reset_index(drop=True)
     except Exception as e:
@@ -293,6 +296,10 @@ def run_intraday_futures_update():
 
         cvd_bias = "Buyers absorbing offers (bullish delta)" if cvd_now > 0 else "Sellers absorbing bids (bearish delta)"
 
+        # Price-action market structure — fair value gaps, liquidity sweeps, equal highs/lows —
+        # computed on the same active_df already fetched above, so this costs zero extra API calls.
+        structure = analyze_market_structure(active_df)
+
         should_send, status_tag = evaluate_gatekeeper(f"futures_{sym}", spot, major_threshold=5.0)
 
         if should_send:
@@ -305,6 +312,7 @@ def run_intraday_futures_update():
                 f"┣ Value Area Low:     ${profile['val']:,.2f}\n"
                 f"┣ Cumulative Delta:   {cvd_now:+,.0f} | {cvd_bias}\n"
                 f"┣ Current Posture:    {posture}\n"
+                f"┣ Market Structure:   {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
                 f"┗ Tactical Directive: Core setups are highly optimal when fading value boundaries (${profile['val']:,.2f} - ${profile['vah']:,.2f})."
             )
             try:

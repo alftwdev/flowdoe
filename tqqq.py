@@ -12,6 +12,7 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 from database import EcosystemDatabase
 from essentials_tools import send_essentials_embed
+from market_structure import analyze_market_structure
 
 logger = logging.getLogger("TQQQ_Sniper")
 if not logger.handlers:
@@ -477,9 +478,20 @@ class TQQQTacticalSniper:
         setup = self.enrich_with_self_derived_greeks(setup, tqqq_daily)
         is_live = setup['action'] != "MONITORING SETUP"
 
+        # Price-action structure (FVGs, liquidity sweeps, equal highs/lows) on TQQQ's own daily
+        # series — already fetched for the Greeks calc above, so this is free. Used as a
+        # confluence booster on the dispatched language, not a hard gate, so it doesn't further
+        # reduce an already-conservative signal frequency.
+        structure = analyze_market_structure(tqqq_daily) if tqqq_daily is not None else None
+        expected_bias = "BULLISH" if setup["contract"] == "CALL" else "BEARISH"
+        structure_confirms = structure is not None and structure["bias"] == expected_bias
+
         if is_live:
             title = f"TQQQ OPTIONS SNIPER | BTO {setup['contract']} EXECUTION"
-            status_tag = "🎯 GOLDEN SETUP — LIVE EXECUTION SIGNAL"
+            status_tag = (
+                "🎯🎯 GOLDEN SETUP — STRUCTURE-CONFIRMED LIVE EXECUTION" if structure_confirms
+                else "🎯 GOLDEN SETUP — LIVE EXECUTION SIGNAL"
+            )
             color = 0x2ecc71 if setup["contract"] == "CALL" else 0xe74c3c
         else:
             title = "TQQQ OPTIONS DESK | Setup Under Construction"
@@ -512,6 +524,10 @@ class TQQQTacticalSniper:
                 f"┣ Breakeven: ${setup['bs_breakeven']:.2f} | ATR-Projected Move ({setup.get('real_dte', 15)}D): ${setup['expected_move']:.2f}\n"
             )
         rr_line = f"┣ Risk/Reward (premium vs. ATR-projected move): 1:{setup['risk_reward']:.1f}\n" if setup.get("risk_reward") else ""
+        structure_line = ""
+        if structure and structure["setup"] != "NO STRUCTURE SETUP":
+            confirm_tag = " ✅ CONFIRMS DIRECTION" if structure_confirms else ""
+            structure_line = f"┣ Market Structure: {structure['setup']} ({structure['bias']}){confirm_tag} — {structure['detail']}\n"
 
         posture = "ABOVE VWAP" if setup["qqq_spot"] > setup["qqq_vwap"] else "BELOW VWAP"
         macro = "BULL REGIME" if setup["qqq_spot"] > setup["sma200"] else "BEAR REGIME"
@@ -532,6 +548,7 @@ class TQQQTacticalSniper:
             f"┣ Est. Cost: {prem_line}\n"
             f"{bs_block}"
             f"{rr_line}"
+            f"{structure_line}"
             f"┗ Stop: −35% premium or 15m pivot break\n\n"
             f"Take Profit: Scale 50% at +100%, trail remainder with 15m 21-EMA\n"
             f"Exit Signal: Will fire automatically when Z-score reverts or reverses — watch this channel."
@@ -620,7 +637,7 @@ class TQQQTacticalSniper:
 
         db.update_state("tqqq_open_position", None)
 
-    def dispatch_market_outlook(self, daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq):
+    def dispatch_market_outlook(self, daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily=None):
         """
         Sends a brief options conditions snapshot when no active TQQQ entry exists.
         Breaks silence with value — prevents the channel going dark.
@@ -637,6 +654,11 @@ class TQQQTacticalSniper:
         vwap_pos = "ABOVE VWAP" if spot > vwap else "BELOW VWAP"
         condition = "COMPRESSION ZONE" if abs(z) < 1.0 else "BUILDING PRESSURE"
 
+        structure = analyze_market_structure(tqqq_daily) if tqqq_daily is not None else None
+        structure_line = ""
+        if structure and structure["setup"] != "NO STRUCTURE SETUP":
+            structure_line = f"┣ Market Structure: {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
+
         outlook = (
             f"No active TQQQ entry setup — current conditions:\n\n"
             f"┣ QQQ Spot: ${spot:,.2f} | VWAP: ${vwap:,.2f} ({vwap_pos})\n"
@@ -644,6 +666,7 @@ class TQQQTacticalSniper:
             f"┣ Volume Pressure: {vol_z:+.2f}σ\n"
             f"┣ Macro Regime: {bias} (SMA200: ${sma200:,.2f} | SMA50: ${sma50:,.2f})\n"
             f"┣ VIXY {vix_price:.2f} (z {vix_z:+.2f}σ) | Nasdaq-100 Breadth: {breadth:.0%} | TQQQ ATR%: {atr_pct_tqqq:.1%}\n"
+            f"{structure_line}"
             f"┗ Status: {condition} — await Z ≥ ±1.8σ with vol surge for entry"
         )
 
@@ -727,7 +750,7 @@ class TQQQTacticalSniper:
             ):
                 self.dispatch_intelligence(setup, tqqq_daily)
         else:
-            self.dispatch_market_outlook(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq)
+            self.dispatch_market_outlook(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily)
 
 
 if __name__ == "__main__":
