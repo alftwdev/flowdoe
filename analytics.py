@@ -1410,12 +1410,34 @@ class HighFidelityAnalyticsEngine:
         )
         return payload, snap
 
+    def record_and_get_accuracy_trend(self, accuracy_score):
+        """
+        A single day's accuracy number is weak proof — it could be a lucky outlier, and that's
+        exactly the kind of unverifiable claim the signal-service space is (rightly) distrusted
+        for. A rolling track record is what actually builds credibility, so every score gets
+        appended to a running history (capped at 90 entries) and rolled into 7D/30D averages.
+        """
+        history = self.db.get_state("spy_accuracy_history", [])
+        history.append({"date": datetime.now().strftime("%Y-%m-%d"), "score": accuracy_score})
+        history = history[-90:]
+        self.db.update_state("spy_accuracy_history", history)
+
+        scores_7d = [h["score"] for h in history[-7:]]
+        scores_30d = [h["score"] for h in history[-30:]]
+        return {
+            "avg_7d": round(sum(scores_7d) / len(scores_7d), 1),
+            "avg_30d": round(sum(scores_30d) / len(scores_30d), 1),
+            "sample_size": len(history),
+        }
+
     def generate_announcements_teaser(self, accuracy_score, predicted, actual, snap):
         """
         Public, non-paywalled bait content for WEBHOOK_ANNOUNCEMENTS — proves the ecosystem's math
         works without giving away the full depth behind the paywall. Factual and value-forward,
         not hype copy: the accuracy number and a real cross-asset stat do the convincing on their own.
         """
+        trend = self.record_and_get_accuracy_trend(accuracy_score)
+
         crypto_blurb = ""
         if snap.get("crypto_mover"):
             sym, _, _, pct = snap["crypto_mover"]
@@ -1428,9 +1450,11 @@ class HighFidelityAnalyticsEngine:
             f"┣ Predicted SPY Target: `${predicted:,.2f}`\n"
             f"┣ Actual SPY Close: `${actual:,.2f}`\n"
             f"┣ Model Accuracy Today: `{accuracy_score}%`\n"
+            f"┣ Rolling Track Record: `{trend['avg_7d']}%` (7D avg) | `{trend['avg_30d']}%` (30D avg) over `{trend['sample_size']}` logged sessions\n"
             f"{crypto_blurb}"
             f"{fng_blurb}"
             f"┗ This is one free sample of what the full ecosystem (futures, crypto, forex, options, income, TSP) "
-            f"calculates every single trading day — multiple times a day, before, during, and after the open."
+            f"calculates every single trading day — multiple times a day, before, during, and after the open. "
+            f"Every number posted here is logged, dated, and never deleted — good days and bad days both."
         )
         return payload

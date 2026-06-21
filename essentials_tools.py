@@ -119,6 +119,36 @@ def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_
         logger.error(f"Discord secure dispatch failed: {e}")
         return False
 
+def _stamp_chart_watermark(chart_bytes, trace_code):
+    """
+    Per-channel leak trace stamped directly into the chart pixels — the text canary only protects
+    the embed description, so a screenshot cropped to just the image had zero protection until now.
+    Deliberately a small, low-opacity corner tag rather than a full diagonal overlay (the old
+    ocr.py/visuals.py approach, which existed but was never actually wired into any dispatch path):
+    a visible-but-unobtrusive tag survives screenshotting/recompression (unlike LSB steganography,
+    which doesn't) and doesn't degrade chart readability for legitimate subscribers.
+    """
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.open(io.BytesIO(chart_bytes)).convert("RGBA")
+        # Draw on a separate transparent layer and alpha-composite it — drawing fill alpha directly
+        # onto the base image gets flattened away by convert("RGB") and renders fully opaque instead.
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        tag = f"ESSENTIALS · {trace_code}"
+        margin = 6
+        bbox = draw.textbbox((0, 0), tag)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x, y = img.width - tw - margin - 4, img.height - th - margin - 4
+        draw.text((x, y), tag, fill=(255, 255, 255, 100))
+        img = Image.alpha_composite(img, overlay)
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"Chart watermark stamp failed, dispatching unstamped: {e}")
+        return chart_bytes
+
 @benchmark_latency
 def send_essentials_embed_with_chart(webhook_url, title, description, chart_bytes, color=0x00ff00, user_id=None):
     """Same uniform embed format as send_essentials_embed, but attaches a generated chart PNG as the embed image."""
@@ -127,6 +157,8 @@ def send_essentials_embed_with_chart(webhook_url, title, description, chart_byte
         user_id = int(hashlib.sha256(webhook_url.encode()).hexdigest()[:8], 16) & 0x7FFFFFFF
     canary_string = encode_canary(int(user_id))
     secured_description = f"{description}\n{canary_string}"
+    trace_code = format(int(user_id) & 0xFFFFFF, "06X")
+    chart_bytes = _stamp_chart_watermark(chart_bytes, trace_code)
 
     payload = {
         "embeds": [{
@@ -134,7 +166,7 @@ def send_essentials_embed_with_chart(webhook_url, title, description, chart_byte
             "description": secured_description,
             "color": color,
             "image": {"url": "attachment://chart.png"},
-            "footer": {"text": "ESSENTIALS Macro-Quant Architecture | Data Secured"}
+            "footer": {"text": f"ESSENTIALS Macro-Quant Architecture | Data Secured · {trace_code}"}
         }]
     }
 

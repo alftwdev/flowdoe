@@ -124,9 +124,14 @@ def calculate_atr_pct(df, period=14):
 
 
 class TQQQTacticalSniper:
-    # Top-10 QQQ holdings by weight (trimmed from the reference top-20 to bound API cost) —
-    # breadth is cached once per day, not re-fetched every sweep, since it's a slow-moving signal.
-    BREADTH_HOLDINGS = ["MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "TSLA", "COST", "NFLX"]
+    # Full top-20 QQQ holdings by weight, matching the reference architecture exactly — restored
+    # from a cost-trimmed top-10 now that the live key is confirmed on Twelve Data's Venture tier
+    # (610 credits/min vs. free tier's 8/min), which removes the original cost constraint. Still
+    # cached once per day, not re-fetched every sweep, since breadth is an inherently slow-moving signal.
+    BREADTH_HOLDINGS = [
+        "MSFT", "AAPL", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "COST",
+        "NFLX", "AMD", "ADBE", "QCOM", "INTC", "INTU", "CSCO", "TXN", "AMGN", "HON",
+    ]
 
     def __init__(self):
         self.symbol = "TQQQ"

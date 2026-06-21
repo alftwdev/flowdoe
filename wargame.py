@@ -442,6 +442,14 @@ def execute_wargame(mock_put, mock_post, mock_get):
     # --- PHASE 17: Unified Market Analysis Hub (morning/intraday/EOD + announcements teaser) ---
     logger.info("\n>>> PHASE 17: MARKET ANALYSIS HUB (MORNING/INTRADAY/EOD) <<<")
     try:
+        # Same class of bug as Phases 10/16: these calls write REAL database state (today's morning
+        # call, and — critically — the rolling accuracy history that the public Announcements teaser
+        # reads) using mocked SIM_STATE data. Save/restore so this test can't corrupt the production
+        # track record this phase exists specifically to validate.
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        saved_morning_call = db.get_state(f"market_analysis_morning_call_{today_str}")
+        saved_accuracy_history = db.get_state("spy_accuracy_history")
+
         morning_payload, morning_snap = engine.generate_market_analysis_morning_report()
         assert morning_payload and "TODAY'S CONVICTION" in morning_payload, "Morning report malformed"
         assert "conviction_bias" in morning_snap, "Snapshot missing conviction_bias"
@@ -455,6 +463,8 @@ def execute_wargame(mock_put, mock_post, mock_get):
         teaser = engine.generate_announcements_teaser(87.5, 580.0, 582.3, eod_snap)
         assert teaser and "DAILY ACCURACY INDEX" in teaser, "Announcements teaser malformed"
 
+        db.update_state(f"market_analysis_morning_call_{today_str}", saved_morning_call)
+        db.update_state("spy_accuracy_history", saved_accuracy_history)
         logger.info(
             f"[PASS] Morning/Intraday/EOD reports generated, conviction={morning_snap['conviction_bias']}, "
             f"teaser ({len(teaser)} chars)"
