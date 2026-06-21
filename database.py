@@ -129,9 +129,14 @@ class EcosystemDatabase:
                 result = cursor.fetchone()
                 if result:
                     try:
-                        return json.loads(result[0])
+                        value = json.loads(result[0])
                     except json.JSONDecodeError:
                         return result[0]
+                    # A stored explicit null is treated the same as "key absent" — every caller's
+                    # default exists precisely to handle "no usable value yet," and an explicit
+                    # None (often written by a save/restore guard for a key that never existed)
+                    # is exactly that case, not a meaningfully different one.
+                    return value if value is not None else default
                 return default
         except sqlite3.OperationalError:
             return default

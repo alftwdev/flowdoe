@@ -78,7 +78,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard"])
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -150,6 +150,17 @@ def main():
                             )
                             send_essentials_embed(WEBHOOK_MARKET, "FOREX → GLOBAL MACRO SIGNAL SYNC", regime_payload, 0x16a085)
                             logger.info(f"Dispatched FX risk regime sync ({regime})")
+
+                            # Ledger: only logged when the regime is unambiguous (RISK-ON/OFF), same
+                            # gate as the dispatch above — MIXED makes no claim, so nothing is logged.
+                            spy_price_data = engine._execute_query("price", {"symbol": "SPY"})
+                            if spy_price_data and "price" in spy_price_data:
+                                direction = "UP" if regime == "🟢 RISK-ON" else "DOWN"
+                                today_str = datetime.now().strftime("%Y-%m-%d")
+                                engine.log_ledger_prediction(
+                                    "forex", f"SPY_{today_str}", direction, float(spy_price_data["price"]),
+                                    ticker="SPY", context=regime
+                                )
                 except Exception as e:
                     logger.error(f"FX risk regime sync failed: {e}")
 
@@ -273,7 +284,29 @@ def main():
             except Exception as e:
                 logger.error(f"Market analysis intraday report failed: {e}")
 
+        elif args.mode == "weekly_scorecard":
+            # Cross-sector accuracy proof point — public to Announcements (the "bait"), full
+            # depth also mirrored to Market Analysis for subscribers. New cron slot needed, once
+            # weekly (e.g. Friday EOD): `python3.10 /home/alftw/scripts/scheduler.py --mode weekly_scorecard`
+            try:
+                scorecard = engine.generate_ecosystem_scorecard()
+                if scorecard:
+                    if WEBHOOK_ANNOUNCEMENTS:
+                        send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
+                    if WEBHOOK_MARKET:
+                        send_essentials_embed(WEBHOOK_MARKET, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
+                    logger.info("Weekly ecosystem scorecard dispatched.")
+            except Exception as e:
+                logger.error(f"Weekly scorecard generation failed: {e}")
+
         elif args.mode == "eod":
+            try:
+                graded = engine.sweep_and_grade_pending("forex", min_age_days=1)
+                if graded:
+                    logger.info(f"Forex ledger: graded {graded} pending risk-regime call(s).")
+            except Exception as e:
+                logger.error(f"Forex ledger sweep failed: {e}")
+
             for ticker in ["SPY", "QQQ"]:
                 eod_payload = engine.generate_eod_reconciliation(ticker)
                 if eod_payload and WEBHOOK_MARKET:

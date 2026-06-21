@@ -1430,6 +1430,135 @@ class HighFidelityAnalyticsEngine:
             "sample_size": len(history),
         }
 
+    def get_accuracy_trend(self):
+        """Read-only version of record_and_get_accuracy_trend — for callers that just want the
+        current rolling average without logging a new (possibly duplicate) entry."""
+        history = self.db.get_state("spy_accuracy_history", [])
+        if not history:
+            return {"avg_7d": 0.0, "avg_30d": 0.0, "sample_size": 0}
+        scores_7d = [h["score"] for h in history[-7:]]
+        scores_30d = [h["score"] for h in history[-30:]]
+        return {
+            "avg_7d": round(sum(scores_7d) / len(scores_7d), 1),
+            "avg_30d": round(sum(scores_30d) / len(scores_30d), 1),
+            "sample_size": len(history),
+        }
+
+    # =====================================================================
+    # CROSS-SECTOR ACCURACY LEDGER
+    #
+    # The SPY morning-target accuracy above only grades one prediction a day. Every sector this
+    # ecosystem touches makes its own falsifiable directional claims (TQQQ's BTO signals, the
+    # Cornerstone RO-risk-score, forex's risk-on/off regime call) but none of them were graded
+    # against what actually happened. This is the generic log/grade primitive every sector wires
+    # into — one shared mechanism instead of bespoke tracking code per script, and critically:
+    # a prediction is only ever logged when a real directional claim was made (no signal = no
+    # entry), so the win rate can't be inflated by counting "no comment" as "correct."
+    # =====================================================================
+
+    def log_ledger_prediction(self, sector, prediction_id, direction, reference_value, ticker="SPY", context=""):
+        """direction: 'UP' or 'DOWN'. Stored pending until graded."""
+        key = f"ledger_pending_{sector}_{prediction_id}"
+        self.db.update_state(key, {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "direction": direction,
+            "reference_value": reference_value,
+            "ticker": ticker,
+            "context": context,
+        })
+        idx_key = f"ledger_pending_index_{sector}"
+        idx = self.db.get_state(idx_key, [])
+        if prediction_id not in idx:
+            idx.append(prediction_id)
+        self.db.update_state(idx_key, idx)
+
+    def grade_ledger_prediction(self, sector, prediction_id, actual_value):
+        """Grades a pending prediction against the actual outcome value and files it into history."""
+        key = f"ledger_pending_{sector}_{prediction_id}"
+        pending = self.db.get_state(key)
+        if not pending:
+            return None
+        actual_direction = "UP" if actual_value > pending["reference_value"] else "DOWN"
+        correct = pending["direction"] == actual_direction
+
+        history_key = f"ledger_history_{sector}"
+        history = self.db.get_state(history_key, [])
+        history.append({
+            "date": pending["date"], "predicted": pending["direction"], "actual": actual_direction,
+            "correct": correct, "context": pending["context"],
+        })
+        self.db.update_state(history_key, history[-200:])
+        self.db.update_state(key, None)
+
+        idx_key = f"ledger_pending_index_{sector}"
+        idx = self.db.get_state(idx_key, [])
+        if prediction_id in idx:
+            idx.remove(prediction_id)
+            self.db.update_state(idx_key, idx)
+        return correct
+
+    def sweep_and_grade_pending(self, sector, min_age_days):
+        """
+        For sectors that can't grade immediately at an exit event (Cornerstone, forex) — sweeps
+        every pending prediction old enough that its outcome is now knowable, fetches the current
+        price for its reference ticker, and grades it. Safe to call daily; entries younger than
+        min_age_days are simply left pending for a future sweep.
+        """
+        idx_key = f"ledger_pending_index_{sector}"
+        idx = self.db.get_state(idx_key, [])
+        now = datetime.now()
+        graded = 0
+        for prediction_id in list(idx):
+            pending = self.db.get_state(f"ledger_pending_{sector}_{prediction_id}")
+            if not pending:
+                idx.remove(prediction_id)
+                continue
+            try:
+                age_days = (now - datetime.strptime(pending["date"], "%Y-%m-%d %H:%M:%S")).days
+            except Exception:
+                age_days = min_age_days  # malformed date — grade now rather than leak forever
+            if age_days >= min_age_days:
+                price_data = self._execute_query("price", {"symbol": pending["ticker"]})
+                if price_data and "price" in price_data:
+                    self.grade_ledger_prediction(sector, prediction_id, float(price_data["price"]))
+                    graded += 1
+                    if prediction_id in idx:
+                        idx.remove(prediction_id)
+        self.db.update_state(idx_key, idx)
+        return graded
+
+    def get_ledger_winrate(self, sector, lookback=30):
+        history = self.db.get_state(f"ledger_history_{sector}", [])
+        recent = history[-lookback:]
+        if not recent:
+            return None
+        wins = sum(1 for h in recent if h["correct"])
+        return {"wins": wins, "total": len(recent), "win_rate": round(wins / len(recent) * 100, 1)}
+
+    def generate_ecosystem_scorecard(self):
+        """
+        Weekly cross-sector proof point: every sector's graded win rate in one place. This is the
+        thing that's hard for a generic AI assistant to replicate — a persistent, honest, dated
+        ledger across multiple asset classes, not a sharper prompt.
+        """
+        spy_trend = self.get_accuracy_trend()
+        sector_lines = []
+        for sector, display in (("tqqq", "TQQQ Sniper"), ("cornerstone", "Cornerstone RO Risk"), ("forex", "Forex Risk Regime")):
+            wr = self.get_ledger_winrate(sector)
+            if wr:
+                sector_lines.append(f"┣ {display}: `{wr['win_rate']}%` win rate ({wr['wins']}/{wr['total']} graded calls)")
+            else:
+                sector_lines.append(f"┣ {display}: No graded calls yet — building track record")
+
+        payload = (
+            f"📊 **ECOSYSTEM WEEKLY SCORECARD — Every Sector, Graded**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┣ SPY Morning-Target Accuracy: `{spy_trend['avg_7d']}%` (7D avg) | `{spy_trend['avg_30d']}%` (30D avg) over `{spy_trend['sample_size']}` sessions\n"
+            + "\n".join(sector_lines) +
+            f"\n┗ Nothing here is cherry-picked — every call is logged at the moment it's made and graded against what actually happened, win or lose."
+        )
+        return payload
+
     def generate_announcements_teaser(self, accuracy_score, predicted, actual, snap):
         """
         Public, non-paywalled bait content for WEBHOOK_ANNOUNCEMENTS — proves the ecosystem's math

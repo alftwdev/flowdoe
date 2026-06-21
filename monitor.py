@@ -182,6 +182,21 @@ def get_ticker_report(session, ticker):
     ex_div_near = is_near_ex_dividend_window()
     ro_score, ro_tier = calculate_ro_risk_score(sec_shield, z_premium, premium, whale_status, credit_spread, ex_div_near)
 
+    # Ledger: only log a prediction when a real risk claim is actually made (ELEVATED/CRITICAL or
+    # an N-2 hit) — "no signal" days aren't logged, so the win rate can't be inflated by counting
+    # quiet days as free wins. Graded 5 trading days later by sweep_and_grade_pending() in
+    # send_daily_pulse, once the outcome window has actually played out.
+    if ro_tier in ("ELEVATED", "CRITICAL") or "N-2" in sec_shield:
+        try:
+            from analytics import HighFidelityAnalyticsEngine
+            prediction_id = f"{ticker}_{datetime.now().strftime('%Y%m%d')}"
+            HighFidelityAnalyticsEngine().log_ledger_prediction(
+                "cornerstone", prediction_id, "DOWN", price, ticker=ticker,
+                context=f"RO score {ro_score} ({ro_tier})"
+            )
+        except Exception as e:
+            logger.error(f"Cornerstone ledger logging failed: {e}")
+
     # Strategy Logic Flow
     z_tag = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
     rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
@@ -324,6 +339,14 @@ def send_daily_pulse(is_test=False):
             logger.info("Daily pulse already dispatched today — skipping duplicate call.")
             return
         db.update_state("last_monitor_pulse_date", current_date)
+
+    try:
+        from analytics import HighFidelityAnalyticsEngine
+        graded = HighFidelityAnalyticsEngine().sweep_and_grade_pending("cornerstone", min_age_days=5)
+        if graded:
+            logger.info(f"Cornerstone ledger: graded {graded} pending RO-risk call(s).")
+    except Exception as e:
+        logger.error(f"Cornerstone ledger sweep failed: {e}")
 
     full_report, worst_tier = compute_cornerstone_reports()
     title = "☕️ Cornerstone Flowstate Update" + (" - 🧪 Test Only" if is_test else "")

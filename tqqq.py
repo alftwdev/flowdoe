@@ -541,6 +541,7 @@ class TQQQTacticalSniper:
             send_essentials_embed(WEBHOOK_TRADE_SIGNALS, title, payload, color)
 
         if is_live:
+            prediction_id = f"{setup['contract']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             db.update_state("tqqq_open_position", {
                 "contract": setup["contract"],
                 "entry_tqqq_spot": setup["tqqq_spot"],
@@ -549,7 +550,17 @@ class TQQQTacticalSniper:
                 "expiry": setup.get("real_expiry"),
                 "dte_at_entry": setup.get("real_dte", 15),
                 "entry_time": datetime.now().isoformat(),
+                "prediction_id": prediction_id,
             })
+            try:
+                from analytics import HighFidelityAnalyticsEngine
+                direction = "UP" if setup["contract"] == "CALL" else "DOWN"
+                HighFidelityAnalyticsEngine().log_ledger_prediction(
+                    "tqqq", prediction_id, direction, setup["tqqq_spot"], ticker="TQQQ",
+                    context=f"{setup['contract']} @ Z{setup['z_score']:+.2f}σ"
+                )
+            except Exception as e:
+                logger.error(f"TQQQ ledger logging failed: {e}")
             logger.info(f"Open position recorded: {setup['contract']} @ TQQQ ${setup['tqqq_spot']:.2f}")
 
     def check_open_position_for_exit(self, intraday, atr_pct_tqqq):
@@ -599,6 +610,14 @@ class TQQQTacticalSniper:
         if WEBHOOK_TRADE_SIGNALS:
             send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ OPTIONS SNIPER | EXIT SIGNAL", payload, 0x3498db)
         logger.info(f"Exit signal dispatched: {exit_reason}")
+
+        if tqqq_spot and "prediction_id" in position:
+            try:
+                from analytics import HighFidelityAnalyticsEngine
+                HighFidelityAnalyticsEngine().grade_ledger_prediction("tqqq", position["prediction_id"], tqqq_spot)
+            except Exception as e:
+                logger.error(f"TQQQ ledger grading failed: {e}")
+
         db.update_state("tqqq_open_position", None)
 
     def dispatch_market_outlook(self, daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq):
@@ -684,6 +703,15 @@ class TQQQTacticalSniper:
 
         # Exits take priority over new entries every sweep.
         self.check_open_position_for_exit(intraday, atr_pct_tqqq)
+
+        # Defensive sweep: a position that's gone 25+ days without a natural exit trigger (e.g. a
+        # script restart lost the open-position state's exit watch) shouldn't sit ungraded forever —
+        # max realistic DTE here is ~21-30 days, so anything older is force-graded and cleared.
+        try:
+            from analytics import HighFidelityAnalyticsEngine
+            HighFidelityAnalyticsEngine().sweep_and_grade_pending("tqqq", min_age_days=25)
+        except Exception as e:
+            logger.error(f"TQQQ defensive ledger sweep failed: {e}")
 
         # Market-wide regime vital sign, independent of whether a trade setup exists.
         self.dispatch_regime_vital_sign(daily, breadth, vix_price, vix_z)

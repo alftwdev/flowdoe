@@ -11,7 +11,7 @@ import logging
 import sqlite3
 import requests
 from unittest.mock import patch
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Import actual ecosystem modules
 from analytics import HighFidelityAnalyticsEngine
@@ -281,7 +281,20 @@ def execute_wargame(mock_put, mock_post, mock_get):
     # --- PHASE 9: Monitor Daily Pulse (test mode bypasses dupe guard) ---
     logger.info("\n>>> PHASE 9: MONITOR DAILY PULSE (TEST MODE) <<<")
     try:
+        # send_daily_pulse runs the Cornerstone ledger sweep for real, which grades any REAL
+        # pending RO-risk predictions using MOCKED price data (requests.get is patched) — that
+        # would silently corrupt a live prediction's grade. Full snapshot/restore: the sweep
+        # mutates and removes pending entries in place, so the index alone isn't enough to undo.
+        saved_cs_history = db.get_state("ledger_history_cornerstone", [])
+        saved_cs_index = db.get_state("ledger_pending_index_cornerstone") or []
+        saved_cs_pending = {pid: db.get_state(f"ledger_pending_cornerstone_{pid}") for pid in saved_cs_index}
+
         monitor.send_daily_pulse(is_test=True)
+
+        db.update_state("ledger_history_cornerstone", saved_cs_history)
+        db.update_state("ledger_pending_index_cornerstone", saved_cs_index)
+        for pid, val in saved_cs_pending.items():
+            db.update_state(f"ledger_pending_cornerstone_{pid}", val)
         logger.info("[PASS] Monitor daily pulse dispatched via test mode")
         passed += 1
     except Exception as e:
@@ -379,6 +392,13 @@ def execute_wargame(mock_put, mock_post, mock_get):
         original_market_hours = tqqq_module.is_market_hours
         tqqq_module.is_market_hours = lambda: True
 
+        # dispatch_intelligence logs a real ledger entry whenever the forced setup is_live — true
+        # today only because real ATR conditions happen to downgrade it to MONITORING, which is
+        # fragile (silently starts contaminating the real TQQQ ledger the moment ATR normalizes).
+        # Save/restore regardless of which branch fires this run.
+        saved_tqqq_ledger_history = db.get_state("ledger_history_tqqq", [])
+        saved_tqqq_ledger_index = db.get_state("ledger_pending_index_tqqq", [])
+
         sniper = tqqq_module.TQQQTacticalSniper()
         daily = sniper.fetch_daily_baseline()
         intraday = sniper.fetch_intraday_metrics()
@@ -406,6 +426,8 @@ def execute_wargame(mock_put, mock_post, mock_get):
 
         sniper.dispatch_regime_vital_sign(daily, breadth, vix_price, vix_z)
 
+        db.update_state("ledger_history_tqqq", saved_tqqq_ledger_history)
+        db.update_state("ledger_pending_index_tqqq", saved_tqqq_ledger_index)
         tqqq_module.is_market_hours = original_market_hours
         logger.info(
             f"[PASS] TQQQ sniper: setup={setup['action']} {setup['contract']} "
@@ -447,8 +469,8 @@ def execute_wargame(mock_put, mock_post, mock_get):
         # reads) using mocked SIM_STATE data. Save/restore so this test can't corrupt the production
         # track record this phase exists specifically to validate.
         today_str = datetime.now().strftime("%Y-%m-%d")
-        saved_morning_call = db.get_state(f"market_analysis_morning_call_{today_str}")
-        saved_accuracy_history = db.get_state("spy_accuracy_history")
+        saved_morning_call = db.get_state(f"market_analysis_morning_call_{today_str}", {})
+        saved_accuracy_history = db.get_state("spy_accuracy_history", [])
 
         morning_payload, morning_snap = engine.generate_market_analysis_morning_report()
         assert morning_payload and "TODAY'S CONVICTION" in morning_payload, "Morning report malformed"
@@ -472,6 +494,46 @@ def execute_wargame(mock_put, mock_post, mock_get):
         passed += 1
     except Exception as e:
         logger.error(f"[FAIL] Market Analysis Hub: {e}")
+        failed += 1
+
+    # --- PHASE 18: Cross-Sector Accuracy Ledger (log/grade/sweep/scorecard) ---
+    logger.info("\n>>> PHASE 18: CROSS-SECTOR ACCURACY LEDGER <<<")
+    try:
+        test_sector = "wargame_test_sector"  # isolated namespace — never read by any real report
+        saved_history = db.get_state(f"ledger_history_{test_sector}", [])
+        saved_index = db.get_state(f"ledger_pending_index_{test_sector}", [])
+
+        engine.log_ledger_prediction(test_sector, "T1", "UP", 100.0, ticker="SPY", context="wargame")
+        correct = engine.grade_ledger_prediction(test_sector, "T1", 105.0)
+        assert correct is True, "Correct UP call graded as incorrect"
+
+        engine.log_ledger_prediction(test_sector, "T2", "DOWN", 100.0, ticker="SPY", context="wargame")
+        incorrect = engine.grade_ledger_prediction(test_sector, "T2", 105.0)
+        assert incorrect is False, "Incorrect DOWN call graded as correct"
+
+        wr = engine.get_ledger_winrate(test_sector)
+        assert wr is not None and wr["total"] == 2 and wr["wins"] == 1, f"Win rate aggregation wrong: {wr}"
+
+        # sweep_and_grade_pending: a stale pending entry should be graded AND fully removed from
+        # the index (regression check for the double-write bug fixed this session).
+        old_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+        db.update_state(f"ledger_pending_{test_sector}_T3", {
+            "date": old_date, "direction": "UP", "reference_value": 100.0, "ticker": "SPY", "context": "wargame"
+        })
+        db.update_state(f"ledger_pending_index_{test_sector}", ["T3"])
+        graded = engine.sweep_and_grade_pending(test_sector, min_age_days=5)
+        assert graded == 1, f"Sweep graded {graded}, expected 1"
+        assert db.get_state(f"ledger_pending_index_{test_sector}") == [], "Sweep left a stale entry in the pending index"
+
+        scorecard = engine.generate_ecosystem_scorecard()
+        assert scorecard and "ECOSYSTEM WEEKLY SCORECARD" in scorecard, "Scorecard malformed"
+
+        db.update_state(f"ledger_history_{test_sector}", saved_history)
+        db.update_state(f"ledger_pending_index_{test_sector}", saved_index)
+        logger.info(f"[PASS] Ledger log/grade/sweep verified, win rate calc correct, scorecard ({len(scorecard)} chars)")
+        passed += 1
+    except Exception as e:
+        logger.error(f"[FAIL] Cross-sector accuracy ledger: {e}")
         failed += 1
 
     logger.info("\n" + "=" * 62)

@@ -36,13 +36,17 @@ ET = pytz.timezone("America/New_York")
 # Tracked instruments. "native" = real continuous futures symbol attempted first on Twelve Data.
 # "proxy" = ETF/index fallback used only if the native futures symbol has no data on the current plan.
 FUTURES_BOARD = {
-    "Crude Oil":   {"native": "CL1/USD", "proxy": "USO",  "futures_label": "/CL"},
-    "Natural Gas": {"native": "NG1/USD", "proxy": "UNG",  "futures_label": "/NG"},
-    "Gold":        {"native": "GC1/USD", "proxy": "GLD",  "futures_label": "/GC"},
-    "Dow":         {"native": "YM1/USD", "proxy": "DIA",  "futures_label": "/YM"},
-    "S&P 500":     {"native": "ES1/USD", "proxy": "SPY",  "futures_label": "/ES"},
-    "Nasdaq 100":  {"native": "NQ1/USD", "proxy": "QQQ",  "futures_label": "/NQ"},
-    "Russell 2000": {"native": "RTY1/USD", "proxy": "IWM", "futures_label": "/RTY"},
+    # Verified live against Twelve Data's actual /commodities catalog (32 entries total) — WTI/USD
+    # and XAU/USD are real spot quotes, not guessed symbols. Confirmed Twelve Data carries NO
+    # equity index futures (ES/NQ/YM/RTY) and NO natural gas at any tier, including Venture — those
+    # four stay honestly proxy-only rather than guessing at futures-style symbols that 404.
+    "Crude Oil":   {"native": "WTI/USD", "proxy": "USO",  "futures_label": "/CL"},
+    "Natural Gas": {"native": None,      "proxy": "UNG",  "futures_label": "/NG"},
+    "Gold":        {"native": "XAU/USD", "proxy": "GLD",  "futures_label": "/GC"},
+    "Dow":         {"native": None,      "proxy": "DIA",  "futures_label": "/YM"},
+    "S&P 500":     {"native": None,      "proxy": "SPY",  "futures_label": "/ES"},
+    "Nasdaq 100":  {"native": None,      "proxy": "QQQ",  "futures_label": "/NQ"},
+    "Russell 2000": {"native": None,     "proxy": "IWM", "futures_label": "/RTY"},
 }
 
 # Deep-dive market profile is only computed for the two instruments retail futures traders
@@ -110,11 +114,12 @@ def fetch_profile_time_series(symbol, outputsize=190):
         return None
 
 def fetch_board_quotes():
-    """Tries native continuous-futures symbols first, falls back to ETF proxy per instrument."""
+    """Tries the real spot symbol first (where Twelve Data actually carries one), falls back to ETF proxy."""
     out = {}
     for label, cfg in FUTURES_BOARD.items():
         quote = None
-        for symbol, mode in ((cfg["native"], "LIVE"), (cfg["proxy"], "PROXY")):
+        attempts = [(cfg["proxy"], "PROXY")] if cfg["native"] is None else [(cfg["native"], "LIVE"), (cfg["proxy"], "PROXY")]
+        for symbol, mode in attempts:
             try:
                 r = requests.get(f"https://api.twelvedata.com/quote?symbol={symbol}&apikey={TD_API_KEY}", timeout=10).json()
                 if r and "close" in r:
