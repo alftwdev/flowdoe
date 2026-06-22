@@ -129,9 +129,13 @@ def mock_requests_get(url, *args, **kwargs):
 
 
 def mock_requests_post(url, *args, **kwargs):
-    # Live passthrough: Discord + Pushover embeds fire for real QA verification
-    if "discord.com" in url or "pushover.net" in url:
-        return _original_post(url, *args, **kwargs)
+    # Discord/Pushover are now FULLY mocked — never passed through live. The previous "live
+    # passthrough for real QA verification" design fired real test dispatches built from
+    # SIM_STATE's fake data (e.g. spy_spot=580.0) straight into real production webhooks on every
+    # wargame run, which is exactly how a "TQQQ @ $580.00" test signal ended up in the real,
+    # subscriber-facing options channel. Manual end-to-end verification against real data should
+    # be done by calling the actual script functions directly (as established throughout this
+    # session), not by relying on wargame's mocked inputs reaching live channels.
     class MockResponse:
         status_code = 200
         def json(self): return {}
@@ -140,8 +144,6 @@ def mock_requests_post(url, *args, **kwargs):
 
 
 def mock_requests_put(url, *args, **kwargs):
-    if "discord.com" in url:
-        return _original_put(url, *args, **kwargs)
     class MockResponse:
         status_code = 204
     return MockResponse()
@@ -157,7 +159,7 @@ def mock_requests_put(url, *args, **kwargs):
 def execute_wargame(mock_put, mock_post, mock_get):
     logger.info("=" * 62)
     logger.info("  INITIATING OPERATION: MASTERMIND WARGAME")
-    logger.info("  Discord + Pushover are LIVE — embeds will fire to Discord.")
+    logger.info("  Discord + Pushover are fully mocked — no live dispatches will fire.")
     logger.info("=" * 62)
 
     engine = HighFidelityAnalyticsEngine()
