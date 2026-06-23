@@ -179,14 +179,22 @@ class RealTimeTickAgent:
             alert_id = f"perimeter_breach_{symbol.upper()}_UPPER"
             state_str = "VOLATILITY_CEILING_COMPRESSION"
             if db.track_and_limit_alerts(alert_id, state_str, price, max_broadcasts=1, threshold_pct=0.005):
-                payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Ceiling Compression reached."
+                payload = (
+                    f"┣ Spot Level: `{price:,.4f}`\n"
+                    f"┣ Volatility Ceiling Compression reached.\n"
+                    f"┗ ⚠️ Market trajectory: bearish (upside extended, mean-reversion risk into the ceiling)"
+                )
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0xe74c3c)
 
         elif price <= lower * (1.0 + precision_pct):
             alert_id = f"perimeter_breach_{symbol.upper()}_LOWER"
             state_str = "VOLATILITY_FLOOR_COMPRESSION"
             if db.track_and_limit_alerts(alert_id, state_str, price, max_broadcasts=1, threshold_pct=0.005):
-                payload = f"🎯 **[{symbol} Perimeter Alert]**\n┣ Spot Level: `{price:,.4f}`\n┗ ⚠️ Volatility Floor Compression reached."
+                payload = (
+                    f"┣ Spot Level: `{price:,.4f}`\n"
+                    f"┣ Volatility Floor Compression reached.\n"
+                    f"┗ ⚠️ Market trajectory: bullish (downside extended, mean-reversion bounce risk off the floor)"
+                )
                 send_essentials_embed(target_webhook, f"🚨 Volatility Boundary Hit: {symbol}", payload, 0x2ecc71)
 
     def process_crypto_volatility(self, price):

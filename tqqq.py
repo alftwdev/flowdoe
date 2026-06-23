@@ -661,11 +661,16 @@ class TQQQTacticalSniper:
 
         outlook = (
             f"No active TQQQ entry setup — current conditions:\n\n"
-            f"┣ QQQ Spot: ${spot:,.2f} | VWAP: ${vwap:,.2f} ({vwap_pos})\n"
+            f"┣ QQQ Spot: ${spot:,.2f}\n"
+            f"┣ VWAP: ${vwap:,.2f} ({vwap_pos})\n"
             f"┣ VWAP Z-Score: {z:+.2f}σ\n"
             f"┣ Volume Pressure: {vol_z:+.2f}σ\n"
-            f"┣ Macro Regime: {bias} (SMA200: ${sma200:,.2f} | SMA50: ${sma50:,.2f})\n"
-            f"┣ VIXY {vix_price:.2f} (z {vix_z:+.2f}σ) | Nasdaq-100 Breadth: {breadth:.0%} | TQQQ ATR%: {atr_pct_tqqq:.1%}\n"
+            f"┣ Macro Regime: {bias}\n"
+            f"┣ SMA200: ${sma200:,.2f}\n"
+            f"┣ SMA50: ${sma50:,.2f}\n"
+            f"┣ VIXY {vix_price:.2f} (z {vix_z:+.2f}σ)\n"
+            f"┣ Nasdaq-100 Breadth: {breadth:.0%}\n"
+            f"┣ TQQQ ATR%: {atr_pct_tqqq:.1%}\n"
             f"{structure_line}"
             f"┗ Status: {condition} — await Z ≥ ±1.8σ with vol surge for entry"
         )
@@ -678,7 +683,7 @@ class TQQQTacticalSniper:
             if WEBHOOK_TRADE_SIGNALS:
                 send_essentials_embed(
                     WEBHOOK_TRADE_SIGNALS,
-                    "TQQQ OPTIONS DESK | Market Conditions Snapshot",
+                    "TQQQ Flowstate",
                     outlook,
                     0x95a5a6
                 )

@@ -119,13 +119,16 @@ def main():
                             pivot_block = ""
                             if pivots:
                                 pivot_block = (
-                                    f"┣ Pivot: `{pivots['pivot']:.4f}` | R1: `{pivots['r1']:.4f}` | S1: `{pivots['s1']:.4f}`\n"
+                                    f"┣ Pivot: `{pivots['pivot']:.4f}`\n"
+                                    f"┣ R1: `{pivots['r1']:.4f}`\n"
+                                    f"┣ S1: `{pivots['s1']:.4f}`\n"
                                 )
                             fx_deep_dive = (
-                                f"┣ Spot: `{price:,.4f}` | Move: `{pct_change:+.2f}%`\n"
+                                f"┣ Spot: `{price:,.4f}`\n"
+                                f"┣ Move: `{pct_change:+.2f}%`\n"
                                 f"{pivot_block}"
-                                f"┣ Trend Confluence (1h/4h/1D): {confluence_tag}  [{confluence_detail}]\n"
-                                f"┗ Largest swing in today's major-pairs universe."
+                                f"┣ Trend Confluence (1h/4h/1D): {confluence_tag}\n"
+                                f"┗ Trajectory: [{confluence_detail}]"
                             )
                             send_essentials_embed_with_chart(
                                 WEBHOOK_FOREX, f"💱 FX MOVER OF THE DAY: {symbol}", fx_deep_dive, chart_bytes, color=0x34495e
@@ -582,25 +585,29 @@ def main():
                 vix_spot, vix_z = engine.fetch_vixy_proxy()
 
                 if vix_z < -0.75:
-                    vix_env = "LOW RELATIVE VOLATILITY — Premium sellers in a drought. Prefer debit spreads or condors."
+                    vix_env = "LOW RELATIVE VOLATILITY"
+                    vix_detail = "Premium sellers in a drought. Prefer debit spreads or condors."
                 elif vix_z < 0.75:
-                    vix_env = "MODERATE VOLATILITY — Balanced premium. Credit spreads statistically favorable."
+                    vix_env = "MODERATE VOLATILITY"
+                    vix_detail = "Balanced premium. Credit spreads statistically favorable."
                 else:
-                    vix_env = "ELEVATED VOLATILITY — Rich premium. Ideal for iron condors & covered calls."
+                    vix_env = "ELEVATED VOLATILITY"
+                    vix_detail = "Rich premium. Ideal for iron condors & covered calls."
 
                 gex_state = gex.get("market_state", "UNKNOWN")
                 flip = gex.get("flip_strike", 0.0)
 
                 outlook_payload = (
-                    f"No IV crush or unusual flow signals detected this session.\n\n"
-                    f"┣ VIXY: `{vix_spot:.2f}` (z {vix_z:+.2f}σ) | Regime: {vix_env}\n"
+                    f"┣ VIXY: `{vix_spot:.2f}` (z {vix_z:+.2f}σ)\n"
+                    f"┣ Regime: {vix_env} — {vix_detail}\n"
+                    f"┣ Whale Flow: Normal — no IV crush or unusual flow signals detected this session\n"
                     f"┣ SPY Gamma Posture: {gex_state}\n"
                     f"┣ GEX Flip Level: `${flip:.2f}` (dealer hedging pivot)\n"
                     f"┗ Directive: {'Wait for a volatility expansion for optimal credit premium.' if vix_z < 0 else 'Premium environment is active. Screen for setups on earnings or macro events.'}\n\n"
                     f"Context: When both IV and flow are quiet, capital preservation > new entries. "
                     f"Watch for a volatility spike or unusual volume tomorrow morning."
                 )
-                send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS MARKET PULSE | Conditions Overview", outlook_payload, 0x3498db)
+                send_essentials_embed(WEBHOOK_OPTIONS, "Options Market Flowstate", outlook_payload, 0x3498db)
                 logger.info("Options fallback market conditions snapshot dispatched.")
 
         elif args.mode == "gex":
