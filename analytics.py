@@ -3,7 +3,7 @@ import logging
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 
@@ -75,6 +75,48 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"Twelve Data batch error: {e}")
             return {}
 
+    def _fetch_dividend_history(self, symbol, span="5Y"):
+        """
+        Real Twelve Data endpoint — "complex_data/dividends" (used everywhere this was previously
+        called) is not a real route; it 404s on every single call, which is why every dividend
+        amount/yield/ex-date in the income channel was silently stuck at 0 / TBD. The real
+        endpoint is /dividends, returning {"dividends": [{"ex_date":..., "amount":...}, ...]}.
+        Returns history sorted newest-first, or [] on failure.
+        """
+        try:
+            data = self._execute_query("dividends", {"symbol": symbol, "range": span})
+            divs = data.get("dividends", []) if data else []
+            return sorted(divs, key=lambda d: d.get("ex_date", ""), reverse=True)
+        except Exception as e:
+            logger.error(f"Dividend history fetch failed for {symbol}: {e}")
+            return []
+
+    def _project_next_ex_date(self, div_history, today=None):
+        """
+        Twelve Data's dividends endpoint only returns REALIZED history, not an officially
+        announced forward calendar for these specific funds (confirmed live — dividends_calendar
+        doesn't cover them either). Projects the next ex-date from the fund's own historical
+        payment cadence (median interval between past ex-dates) — an honest estimate, not a
+        confirmed date, and callers should label it as such.
+        Returns (next_ex_date: datetime | None, estimated_amount: float, interval_days: int | None).
+        """
+        today = today or datetime.now()
+        if len(div_history) < 2:
+            return None, 0.0, None
+        try:
+            dates = [datetime.strptime(d["ex_date"], "%Y-%m-%d") for d in div_history]
+        except Exception:
+            return None, 0.0, None
+        intervals = sorted((dates[i] - dates[i + 1]).days for i in range(len(dates) - 1))
+        median_interval = intervals[len(intervals) // 2] if intervals else 0
+        if median_interval <= 0:
+            return None, 0.0, None
+        next_date = dates[0]
+        while next_date <= today:
+            next_date += timedelta(days=median_interval)
+        latest_amount = float(div_history[0].get("amount", 0.0))
+        return next_date, latest_amount, median_interval
+
     def _fetch_td_fundamentals(self, symbol):
         """
         Derives dividend safety metrics entirely from Twelve Data (no Finnhub required).
@@ -122,13 +164,8 @@ class HighFidelityAnalyticsEngine:
                 result["52w_low"]  = _safe_float(stk, "52_week_low",  "fifty_two_week_low")
 
             # ── 2. DIVIDEND HISTORY: Payout ratio + 5yr CAGR ─────────────────
-            div_data = self._execute_query("complex_data/dividends", {"symbol": symbol})
-            if div_data and "data" in div_data and div_data["data"]:
-                divs = sorted(
-                    div_data["data"],
-                    key=lambda x: x.get("ex_date", ""),
-                    reverse=True
-                )
+            divs = self._fetch_dividend_history(symbol, span="5Y")
+            if divs:
                 amounts = [float(d.get("amount", 0)) for d in divs if d.get("amount")]
 
                 # Annual dividend: sum of last 4 quarterly or 12 monthly payments
@@ -596,35 +633,31 @@ class HighFidelityAnalyticsEngine:
 
     def generate_ex_dividend_radar(self, universe=["SCHD", "JEPI", "JEPQ", "DIVO", "O", "MAIN", "ARCC", "MO", "VZ", "PFE"]):
         """
-        Pulls upcoming ex-dividend dates utilizing Twelve Data's complex_data endpoint.
+        Pulls upcoming ex-dividend dates via Twelve Data's real /dividends endpoint, projecting
+        the next date from historical cadence (see _project_next_ex_date — these funds aren't
+        covered by Twelve Data's forward dividends_calendar, confirmed live).
         Creates an actionable countdown for capital rotation.
         """
         results = []
         today = datetime.now()
         for sym in universe:
             try:
-                data = self._execute_query("complex_data/dividends", {"symbol": sym})
-                if not data or "data" not in data: continue
-                
-                # Find the immediate next upcoming ex-dividend date
-                for div in data["data"]:
-                    ex_date_str = div.get("ex_date")
-                    if not ex_date_str: continue
-                    
-                    ex_date = datetime.strptime(ex_date_str, "%Y-%m-%d")
-                    # Filter for distributions occurring within the next 14 days
-                    if ex_date >= today and (ex_date - today).days <= 14:
-                        amount = float(div.get("amount", 0.0))
-                        results.append({
-                            "symbol": sym,
-                            "ex_date": ex_date_str,
-                            "amount": amount,
-                            "days_away": (ex_date - today).days
-                        })
-                        break # Secure the immediate next date and move to next ticker
+                div_history = self._fetch_dividend_history(sym, span="2Y")
+                next_ex_date, amount, _ = self._project_next_ex_date(div_history, today)
+                if not next_ex_date:
+                    continue
+                days_away = (next_ex_date - today).days
+                if days_away <= 14:
+                    results.append({
+                        "symbol": sym,
+                        "ex_date": next_ex_date.strftime("%Y-%m-%d"),
+                        "amount": amount,
+                        "days_away": days_away,
+                        "estimated": True,
+                    })
             except Exception as e:
                 logger.error(f"Ex-Dividend radar failed for {sym}: {e}")
-                
+
         # Sort sequentially by closest action date
         return sorted(results, key=lambda x: x["days_away"])
 
@@ -661,20 +694,17 @@ class HighFidelityAnalyticsEngine:
                 if spot == 0.0:
                     continue
 
-                # Pull ex-dividend date + amount
-                div_data = self._execute_query("complex_data/dividends", {"symbol": sym})
-                ex_date_str, div_amount, days_away = None, 0.0, 999
-                if div_data and "data" in div_data:
-                    for div in div_data["data"]:
-                        ex_raw = div.get("ex_date")
-                        if not ex_raw:
-                            continue
-                        ex_dt = datetime.strptime(ex_raw, "%Y-%m-%d")
-                        if ex_dt >= today:
-                            ex_date_str = ex_raw
-                            div_amount = float(div.get("amount", 0.0))
-                            days_away = (ex_dt - today).days
-                            break
+                # Pull ex-dividend date + amount — projected from real historical cadence
+                # (Twelve Data's /dividends only returns realized history for these funds, no
+                # officially announced forward date; "complex_data/dividends" used previously
+                # was not even a real endpoint, which is why this was always stuck at 0/TBD).
+                div_history = self._fetch_dividend_history(sym, span="2Y")
+                next_ex_date, div_amount, _ = self._project_next_ex_date(div_history, today)
+                if next_ex_date:
+                    ex_date_str = next_ex_date.strftime("%Y-%m-%d") + " (est.)"
+                    days_away = (next_ex_date - today).days
+                else:
+                    ex_date_str, div_amount, days_away = None, 0.0, 999
 
                 # Annualized yield proxy from dividend amount
                 if div_amount > 0 and spot > 0:

@@ -132,6 +132,7 @@ def fetch_board_quotes():
                         "last": float(r["close"]),
                         "change": float(r.get("change", 0.0)),
                         "percent_change": float(r.get("percent_change", 0.0)),
+                        "proxy_symbol": symbol,
                     }
                     break
             except Exception as e:
@@ -229,7 +230,10 @@ def build_board_payload(board, session_label):
     rows = []
     for label, q in board.items():
         arrow = "🟢▲" if q["percent_change"] > 0 else ("🔴▼" if q["percent_change"] < 0 else "⚪")
-        tag = "" if q["mode"] == "LIVE" else " (proxy)"
+        # "(proxy)" alone isn't clear enough — a reader sees "S&P 500 /ES (proxy): 744.85" right
+        # next to a real index trading at ~7500 and assumes the number is wrong, not that it's
+        # SPY's own share price (~1/10th the index). Naming the actual ETF removes that ambiguity.
+        tag = "" if q["mode"] == "LIVE" else f" (ETF proxy: {q['proxy_symbol']} share price, not the index level)"
         rows.append(
             f"┣ {label} `{q['label']}`{tag}: `{q['last']:,.2f}` | {arrow} `{q['change']:+.2f}` (`{q['percent_change']:+.2f}%`)"
         )
