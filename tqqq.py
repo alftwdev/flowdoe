@@ -748,7 +748,14 @@ class TQQQTacticalSniper:
 
         if setup:
             alert_id = "tqqq_sniper_flow"
-            state_string = f"ACT_{setup['action'][:3]}_Z_{round(setup['z_score'], 1)}_CON_{setup['contract']}"
+            # Bucketed to the nearest 0.5σ, not 0.1σ — a Z-score slowly drifting -2.35 -> -2.64 ->
+            # -2.58 -> -2.55 -> -2.69 over an hour rounded to four DIFFERENT 0.1-precision state
+            # keys, which reset the 3-strike gatekeeper's "this is a new event" branch almost every
+            # sweep instead of recognizing it as the same ongoing setup — confirmed live, this fired
+            # 5 nearly-identical alerts in under an hour. Coarser bucketing collapses genuine noise
+            # in an unchanged regime into the same state so the strike-limit actually applies.
+            z_bucket = round(setup['z_score'] * 2) / 2
+            state_string = f"ACT_{setup['action'][:3]}_Z_{z_bucket}_CON_{setup['contract']}"
             if db.track_and_limit_alerts(
                 alert_id, state_string, setup['tqqq_spot'],
                 max_broadcasts=3, threshold_pct=0.01

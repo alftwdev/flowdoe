@@ -282,21 +282,40 @@ def calculate_correlation(btc_prices, spy_prices):
     return df['BTC'].corr(df['SPY'])
 
 def get_trend_alignment(symbol, td_api_key, interval="1h"):
-    url = f"https://api.twelvedata.com/supertrend?symbol={symbol}&interval={interval}&apikey={td_api_key}"
+    """
+    Returns (status_text, is_bullish). is_bullish is None when the read genuinely can't be
+    determined — callers MUST treat None as "unknown," never as a default direction.
+    Twelve Data's /supertrend response only ever returns {datetime, supertrend} — no "close"
+    field — so reading latest['close'] always silently evaluated to 0, which combined with the
+    old "fall back to is_bullish=True" behavior meant every single failed/missing read was
+    treated as bullish. Two symbols both failing independently (e.g. BTC/USD and SPY both
+    returning no price) would then spuriously "agree" with each other and produce a fabricated
+    alignment signal — confirmed live, this was firing real RISK-ON ALIGNMENT messages while both
+    legs displayed as NEUTRAL. Fixed by fetching the current price separately instead of assuming
+    the indicator endpoint includes it.
+    """
     try:
-        response = requests.get(url, timeout=10).json()
-        if "values" not in response or not response["values"]:
-            return "NEUTRAL (Market Closed)", True
-        latest = response['values'][0]
-        curr_price = float(latest.get('close', 0))
-        trend_val = float(latest.get('supertrend', 0))
-        if curr_price == 0 or trend_val == 0: return "NEUTRAL", True
+        st_response = requests.get(
+            f"https://api.twelvedata.com/supertrend?symbol={symbol}&interval={interval}&apikey={td_api_key}",
+            timeout=10,
+        ).json()
+        if "values" not in st_response or not st_response["values"]:
+            return "UNKNOWN (No Data)", None
+        trend_val = float(st_response["values"][0].get("supertrend", 0))
+
+        price_response = requests.get(
+            f"https://api.twelvedata.com/price?symbol={symbol}&apikey={td_api_key}", timeout=10
+        ).json()
+        curr_price = float(price_response.get("price", 0))
+
+        if curr_price == 0 or trend_val == 0:
+            return "UNKNOWN (No Data)", None
         is_bullish = curr_price > trend_val
         status = "🟢 BULLISH ALIGNMENT" if is_bullish else "🔴 BEARISH PRESSURE"
         return status, is_bullish
     except Exception as e:
         logger.error(f"Trend alignment computation failed for {symbol}: {e}")
-        return "NEUTRAL", True
+        return "UNKNOWN (No Data)", None
 
 def get_institutional_conviction(symbol, td_api_key):
     url = f"https://api.twelvedata.com/statistics?symbol={symbol}&apikey={td_api_key}"

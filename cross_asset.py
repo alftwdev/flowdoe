@@ -279,6 +279,14 @@ def run_intraday_futures_update():
 
         spot = df['close'].iloc[-1]
         profile = compute_market_profile_nodes(active_df)
+        # Degenerate case: too few distinct price levels (thin overnight/transition data) makes
+        # the value area collapse to a single price (VAH == POC == VAL), which makes the "fade
+        # value boundaries" directive meaningless — confirmed live, a /NQ dispatch showed exactly
+        # this. Skip this sweep rather than dispatch a zero-width boundary; more bars accumulate
+        # by the next sweep.
+        if profile["vah"] == profile["val"]:
+            logger.info(f"{label}: degenerate value area (insufficient distinct price levels) — skipping this sweep.")
+            continue
         active_df = active_df.copy()
         active_df['pv'] = active_df['close'] * active_df['volume']
         vwap = active_df['pv'].sum() / active_df['volume'].sum()

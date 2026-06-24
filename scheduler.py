@@ -201,7 +201,11 @@ def main():
                         corr = calculate_correlation(btc_ohlc['close'].tolist(), spy_ohlc['close'].tolist())
                         btc_trend, btc_bullish = get_trend_alignment("BTC/USD", TWELVE_DATA_API_KEY)
                         spy_trend, spy_bullish = get_trend_alignment("SPY", TWELVE_DATA_API_KEY)
-                        if abs(corr) >= 0.6 and btc_bullish == spy_bullish:
+                        # Explicit None check — get_trend_alignment returns None (not a default
+                        # direction) when a read genuinely fails. Without this guard, two
+                        # independent failures would both be None and "agree" by accident,
+                        # fabricating an alignment signal from a pair of missing data points.
+                        if btc_bullish is not None and spy_bullish is not None and abs(corr) >= 0.6 and btc_bullish == spy_bullish:
                             if engine.db.track_and_limit_alerts("btc_spy_correlation_sync", f"ALIGN_{btc_bullish}", corr, max_broadcasts=2, threshold_pct=0.2):
                                 posture = "RISK-ON ALIGNMENT" if btc_bullish else "RISK-OFF ALIGNMENT"
                                 corr_payload = (
