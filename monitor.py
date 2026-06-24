@@ -47,11 +47,36 @@ EX_DIV_WINDOW_DAYS = range(15, 20)
 RO_SCORE_WEIGHTS = {
     "sec_n2": 60, "z_danger": 25, "z_caution": 12, "premium_extreme": 10,
     "whale_distribution": 15, "credit_stress": 10, "ex_div_relief": -10,
+    "ro_season": 8, "crisis_amplification": 12,
 }
 
+# Verified against the real SEC filing history (CIKs above) across 2016-2025: in the years CLM/CRF
+# actually filed a Rights Offering (2021, 2022, 2025), the initial N-2 was filed in mid-to-late
+# February, with the N-2/A amendment ~6 weeks later in early April — and the post-amendment price
+# drop in each of those years (Apr 2021, Apr 2022) lines up within days of the N-2/A. 2023 and 2024
+# had zero N-2 activity and zero RO-attributable drops. This doesn't mean an RO is guaranteed every
+# February, but the historical base rate of one happening in this window is high enough to raise
+# the baseline risk score during it rather than wait for the filing to already be public.
+RO_FILING_SEASON = (2, 15, 4, 15)  # (start_month, start_day, end_month, end_day)
+
+# The worst CLM/CRF drawdowns analyzed back to 2020 (COVID, the Aug 5 2024 yen-carry-unwind crash)
+# almost all cluster on broad-market VIX-spike days, not idiosyncratic CLM/CRF news — these funds'
+# realized beta vs SPY is actually sub-1.0 in calm markets (~0.83-0.86, computed from 252D returns),
+# but they crash far harder than SPY's worst days during genuine crisis events (leverage convexity:
+# a fixed-dollar leverage amount becomes a larger % of NAV as equity shrinks in a selloff). A VIXY
+# volatility-spike flag catches this tail risk that a simple beta multiplier would miss.
+CRISIS_VIXY_Z_THRESHOLD = 1.5
+
 def check_sec_edgar(session, ticker):
-    """Scrapes SEC EDGAR in real-time for N-2/Rights Offering Filings."""
-    cik_map = {"CLM": "0000081074", "CRF": "0000084560"}
+    """
+    Scrapes SEC EDGAR in real-time for N-2/Rights Offering Filings.
+    CIKs verified live against SEC's company search (2026-06-23) — the previous hardcoded values
+    (0000081074 / 0000084560) 404 on EDGAR; they don't correspond to any real company. This
+    detector has never been able to find a real N-2 filing for either fund until this fix.
+    Real CIKs: CLM = Cornerstone Strategic Investment Fund (formerly Cornerstone Strategic Value
+    Fund / Clemente Global Growth Fund); CRF = Cornerstone Total Return Fund.
+    """
+    cik_map = {"CLM": "0000814083", "CRF": "0000033934"}
     cik = cik_map.get(ticker)
     if not cik: return "No N2/ RO detected"
     
@@ -95,6 +120,38 @@ def is_near_ex_dividend_window(today=None):
     today = today or datetime.now(pytz.timezone('Pacific/Honolulu'))
     return today.day in EX_DIV_WINDOW_DAYS
 
+def is_ro_filing_season(today=None):
+    """Mid-Feb through mid-April — see RO_FILING_SEASON note above for the historical evidence."""
+    today = today or datetime.now(pytz.timezone('Pacific/Honolulu'))
+    start_m, start_d, end_m, end_d = RO_FILING_SEASON
+    start = today.replace(month=start_m, day=start_d)
+    end = today.replace(month=end_m, day=end_d)
+    return start <= today <= end
+
+def check_crisis_amplification_risk(session):
+    """
+    Real computed VIXY (VIX futures ETF) z-score vs its own 20D mean — same self-normalizing
+    approach used elsewhere in the ecosystem (the real VIX index isn't available at this Twelve
+    Data plan tier). Returns (is_crisis_day, vixy_price, vixy_z).
+    """
+    try:
+        res = session.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": "VIXY", "interval": "1day", "outputsize": "20", "apikey": TD_API_KEY},
+            timeout=10,
+        ).json()
+        values = res.get("values", [])
+        if len(values) < 10:
+            return False, 0.0, 0.0
+        closes = [float(v["close"]) for v in values]
+        current, mean = closes[0], sum(closes) / len(closes)
+        std = (sum((c - mean) ** 2 for c in closes) / len(closes)) ** 0.5
+        z = (current - mean) / std if std > 0 else 0.0
+        return z >= CRISIS_VIXY_Z_THRESHOLD, current, z
+    except Exception as e:
+        logger.error(f"[Crisis Amplification Check Error] {e}")
+        return False, 0.0, 0.0
+
 def detect_whale_flow_direction(session, symbol):
     """
     Distinguishes whale ACCUMULATION from whale DISTRIBUTION (sell-off) — the generic
@@ -122,7 +179,8 @@ def detect_whale_flow_direction(session, symbol):
         logger.error(f"[Whale Flow Error] {symbol}: {e}")
         return "NORMAL", 1.0
 
-def calculate_ro_risk_score(sec_shield, z_premium, premium, whale_tag, credit_spread, ex_div_near):
+def calculate_ro_risk_score(sec_shield, z_premium, premium, whale_tag, credit_spread, ex_div_near,
+                             ro_season=False, crisis_day=False):
     """Composite Rights-Offering risk score (0-100) from every leading indicator we track."""
     score = 0
     if "N-2" in sec_shield:
@@ -137,6 +195,10 @@ def calculate_ro_risk_score(sec_shield, z_premium, premium, whale_tag, credit_sp
         score += RO_SCORE_WEIGHTS["whale_distribution"]
     if credit_spread > 4.5:
         score += RO_SCORE_WEIGHTS["credit_stress"]
+    if ro_season:
+        score += RO_SCORE_WEIGHTS["ro_season"]
+    if crisis_day:
+        score += RO_SCORE_WEIGHTS["crisis_amplification"]
     if ex_div_near and score > 0:
         score += RO_SCORE_WEIGHTS["ex_div_relief"]  # negative — scheduled dip context, not dilution risk
     score = max(0, min(100, score))
@@ -180,7 +242,12 @@ def get_ticker_report(session, ticker):
     # Macro overlay + scheduled ex-div context feed directly into the RO risk score below.
     credit_spread = float(db.get_state("credit_spread", 0.0))
     ex_div_near = is_near_ex_dividend_window()
-    ro_score, ro_tier = calculate_ro_risk_score(sec_shield, z_premium, premium, whale_status, credit_spread, ex_div_near)
+    ro_season = is_ro_filing_season()
+    crisis_day, vixy_price, vixy_z = check_crisis_amplification_risk(session)
+    ro_score, ro_tier = calculate_ro_risk_score(
+        sec_shield, z_premium, premium, whale_status, credit_spread, ex_div_near,
+        ro_season=ro_season, crisis_day=crisis_day,
+    )
 
     # Ledger: only log a prediction when a real risk claim is actually made (ELEVATED/CRITICAL or
     # an N-2 hit) — "no signal" days aren't logged, so the win rate can't be inflated by counting
@@ -202,6 +269,8 @@ def get_ticker_report(session, ticker):
     rsi_tag = "(neutral)" if 40 <= rsi <= 60 else ""
     prem_tag = "(neutral)" if 10 <= premium <= 20 else ""
     ex_div_line = "┣ Ex-Div Window: Active (scheduled distribution dip expected, not RO-related)\n" if ex_div_near else ""
+    ro_season_line = "┣ RO Filing Season: Active (mid-Feb to mid-Apr — historically when N-2 filings appear)\n" if ro_season else ""
+    crisis_line = f"┣ Market Stress: 🔴 CRISIS DAY (VIXY z {vixy_z:+.2f}σ) — leveraged tail-risk amplification active\n" if crisis_day else ""
 
     if "N-2" in sec_shield:
         status = "🚨 CRITICAL: N-2 DETECTED"
@@ -232,6 +301,8 @@ def get_ticker_report(session, ticker):
         f"┣ SEC: {sec_shield}\n"
         f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
         f"{ex_div_line}"
+        f"{ro_season_line}"
+        f"{crisis_line}"
         f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
         f"┣ Net Arbitrage Spread: +{s_net:.2f}%\n"
         f"┣ DRIP Alpha Capture: +{alpha_drip:.2f}%\n"
