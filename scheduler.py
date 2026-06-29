@@ -78,7 +78,16 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position"])
+    parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
+    parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
+    parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
+    parser.add_argument("--strike", type=float, help="wheel_position mode: strike price")
+    parser.add_argument("--expiration", type=str, help="wheel_position mode: YYYY-MM-DD")
+    parser.add_argument("--premium", type=float, help="wheel_position mode: premium collected per contract, in dollars")
+    parser.add_argument("--contracts", type=int, default=1, help="wheel_position mode: number of contracts")
+    parser.add_argument("--position-id", type=int, dest="position_id", help="wheel_position mode: id to close")
+    parser.add_argument("--status", type=str, default="CLOSED", choices=["CLOSED", "ASSIGNED", "EXPIRED", "ROLLED"], help="wheel_position mode: close status")
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -224,12 +233,9 @@ def main():
             logger.info("Macro matrix compilation and dispatch completed.")
 
         elif args.mode == "morning":
-            for ticker in ["SPY", "QQQ"]:
-                primer_payload = engine.generate_premarket_primer(ticker)
-                if primer_payload and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, f"STRATEGIC INTELLIGENCE: {ticker} Pre-Market Primer", primer_payload, 0x00ffff)
-
-            # ── MARKET ANALYSIS: Unified Morning Brief + reverse-feed conviction sync ──
+            # ── MARKET ANALYSIS: Single Unified Morning Brief + reverse-feed conviction sync ──
+            # Folds SPY/QQQ expected-move primers directly into the one brief below — three
+            # separate embeds covering the same overnight session collapsed into one report.
             try:
                 morning_brief, morning_snap = engine.generate_market_analysis_morning_report()
                 if morning_brief and WEBHOOK_MARKET:
@@ -248,6 +254,8 @@ def main():
                 spy_spot = gex.get("current_spot", 0.0)
                 flip = gex.get("flip_strike", 0.0)
                 gex_state = gex.get("market_state", "UNKNOWN")
+                pc_ratio = gex.get("pc_oi_ratio", 1.0)
+                pc_tag = gex.get("pc_tag", "N/A")
 
                 # Determine premium environment — relative to VIXY's own recent baseline, not a
                 # fixed absolute threshold (see fetch_vixy_proxy() docstring for why).
@@ -268,7 +276,7 @@ def main():
                     f"Pre-market options environment for today's session:\n\n"
                     f"┣ VIXY: `{vix_spot:.2f}` (z {vix_z:+.2f}σ) | Premium: {premium_env}\n"
                     f"┣ SPY Spot: `${spy_spot:.2f}` | GEX Flip: `${flip:.2f}`\n"
-                    f"┣ Gamma Regime: {gex_state}\n"
+                    f"┣ Gamma Regime: {gex_state} | P/C OI: `{pc_ratio:.2f}` ({pc_tag})\n"
                     f"┗ Dealer Behavior: {gamma_context}\n\n"
                     f"Bias: {'Favor BUY setups (positive gamma suppresses downside).' if 'POSITIVE' in gex_state else 'Elevated tail risk. Size down on directional plays. Spreads preferred.'}"
                 )
@@ -314,12 +322,9 @@ def main():
             except Exception as e:
                 logger.error(f"Forex ledger sweep failed: {e}")
 
-            for ticker in ["SPY", "QQQ"]:
-                eod_payload = engine.generate_eod_reconciliation(ticker)
-                if eod_payload and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, f"SYSTEMIC RECONCILIATION: {ticker} Tape Audit", eod_payload, 0x2ecc71)
-
-            # ── MARKET ANALYSIS: Unified EOD Recap + reverse-feed conviction sync ──
+            # ── MARKET ANALYSIS: Single Unified EOD Recap + reverse-feed conviction sync ──
+            # Folds SPY/QQQ tape audits and the VIX CVR reversal signal directly into the one
+            # recap below — four separate end-of-day embeds collapsed into one report.
             eod_snap = None
             try:
                 eod_brief, eod_snap = engine.generate_market_analysis_eod_report()
@@ -366,19 +371,7 @@ def main():
                 except Exception as e:
                     logger.error(f"EOD Accuracy Calculation Error: {e}")
 
-            vix_signal = engine.evaluate_vix_cvr_reversal()
-            if vix_signal and WEBHOOK_MARKET:
-                v_payload = (
-                    f"Larry Connors CVR Reversal Signal (VIXY proxy — VIX index unavailable at this data tier)\n\n"
-                    f"┣ Action: `{vix_signal['signal']}`\n"
-                    f"┣ VIXY Spot: `{vix_signal['vixy_spot']:.2f}`\n"
-                    f"┗ Technical Confirmation: {vix_signal['condition']}\n\n"
-                    f"Context: This is an institutional-grade counter-trend indicator. Capitalize on the volatility contraction/expansion."
-                )
-                color_code = 0xe74c3c if "SELL" in vix_signal['signal'] else 0x2ecc71
-                send_essentials_embed(WEBHOOK_MARKET, "VIX TACTICAL REVERSAL", v_payload, color_code)
-
-            logger.info("End-of-day tape audits successfully compiled and dispatched.")
+            logger.info("End-of-day tape audit successfully compiled and dispatched.")
 
         elif args.mode == "tsp":
             tsp_payload, fund_series = engine.generate_tsp_eod_report()
@@ -456,14 +449,20 @@ def main():
                             payout_tag = ""
                             if c.get("payout_ratio") is not None:
                                 payout_tag = f" | Payout Ratio: `{c['payout_ratio']:.0f}%`"
+                            div_line = ""
+                            if c.get("div_yield") is not None:
+                                div_line = f"┣ Dividend: Yield `{c['div_yield']:.1f}%` | {c['div_freq']} | Amount `${c['div_amount']:.4f}`/share\n"
 
                             wheel_payload += (
                                 f"**{c['symbol']}** | Spot: `${c['spot']:.2f}` | {c['trend']} {c['sma50_tag']}\n"
+                                f"┣ Strategy: {c['strategy']}\n"
                                 f"┣ RSI-14: `{c['rsi14']}` {c['rsi_tag']} | BB Zone: {c['bb_zone']}\n"
                                 f"┣ Setup: `STO ${c['strike']:.1f} Put` | Exp: `{c['expiration']}` ({c['dte']} DTE)\n"
                                 f"┣ Greeks: Δ `{c['delta']:.2f}` | θ ~`${c['theta_daily']:.3f}`/day | IV `{c['iv']:.1f}%` | IVR `{c['ivr_proxy']:.0f}%` ({c['ivr_tag']})\n"
+                                f"┣ Liquidity: Volume `{c['volume']:,}` | OI Range `{c['oi_low']:,}`–`{c['oi_high']:,}`\n"
                                 f"┣ Premium: `${c['premium']*100:.0f}/contract` | PoP: `{c['pop']:.1f}%` | Ann. ROI: `{c['annualized_roi']:.1f}%`\n"
                                 f"┣ Break-Even: `${c['break_even']:.2f}` | Downside Protected: `{c['pct_downside']:.1f}%`\n"
+                                f"{div_line}"
                                 f"┣ Sizing (3% rule): `{c['contracts_10k']}x @ $10k` | `{c['contracts_25k']}x @ $25k`\n"
                                 f"┗ Div Safety: {c['safety_grade']}{payout_tag}{div_growth_tag}\n\n"
                             )
@@ -529,6 +528,133 @@ def main():
                             logger.info(f"Ex-dividend radar dispatched: {len(ex_div_data)} upcoming events.")
             except Exception as e:
                 logger.error(f"Ex-dividend radar segment failed: {e}")
+
+            # ── SEGMENT 4: NEW/TRENDING CC ETF SCREENER (Module 3) ─────────────
+            # YieldMax / Roundhill / NEOS / TappAlpha discovery feed — surfaces names worth
+            # adding to the wheel universe. Yield, age, and AUM filters all pull real data;
+            # nothing here is a static watchlist.
+            try:
+                new_etfs = engine.generate_new_income_etf_screener()
+                if new_etfs:
+                    state_str = "_".join(f"{e['symbol']}{e['ann_yield']}" for e in new_etfs[:8])
+                    if engine.db.track_and_limit_alerts(
+                        "new_income_etf_screener_daily", state_str,
+                        sum(e['ann_yield'] for e in new_etfs), max_broadcasts=2, threshold_pct=0.05
+                    ):
+                        new_payload = "Trending Weekly/Monthly Income ETF Discovery — YieldMax / Roundhill / NEOS / TappAlpha\n\n"
+                        for e in new_etfs[:8]:
+                            new_payload += (
+                                f"**{e['symbol']}** | {e['family']} | {e['freq']}\n"
+                                f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
+                                f"┣ Trading History: `{e['trading_days']}` sessions\n"
+                                f"┗ Next Est. Pay Date: `{e['next_ex_date']}`\n\n"
+                            )
+                        new_payload += (
+                            "Filters: yield > 10% (real div history) | monthly/weekly pay | "
+                            "> 6mo trading history | AUM > $50M (where Twelve Data reports it)\n"
+                            "Directive: Research-stage only — confirm distribution sustainability before adding to wheel universe."
+                        )
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "NEW INCOME ETF RADAR | Trending CC ETF Discovery", new_payload, 0x9b59b6)
+                            logger.info(f"New income ETF screener dispatched: {len(new_etfs)} candidates.")
+            except Exception as e:
+                logger.error(f"New income ETF screener segment failed: {e}")
+
+        elif args.mode == "wheel_signals":
+            # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
+            # — wheeling these Tier 2 holdings (MAIN/MLPI/GPIQ/KQQQ/TDAQ) for long-term income is
+            # income-channel content, per explicit operator direction.
+            logger.info("Executing Wheel Signals: Tier 2 IV Rank Screener + Position DTE Countdown...")
+
+            # ── MODULE 1: TIER 2 IV RANK SCREENER ──────────────────────────────
+            try:
+                flagged = engine.generate_tier2_iv_rank_alerts()
+                if flagged:
+                    state_str = "_".join(f"{f['symbol']}{f['ivr_proxy']}" for f in flagged)
+                    if engine.db.track_and_limit_alerts(
+                        "tier2_iv_rank_screener", state_str,
+                        sum(f['ivr_proxy'] for f in flagged), max_broadcasts=3, threshold_pct=0.05
+                    ):
+                        ivr_payload = "Tier 2 Wheel Underlyings — Elevated IV Rank Detected\n\n"
+                        for f in flagged:
+                            setup_line = ""
+                            csp = f.get("csp_setup")
+                            if csp:
+                                setup_line = (
+                                    f"┣ Strategy: CSP (Cash-Secured Put)\n"
+                                    f"┣ Setup: `STO ${csp['strike']:.1f} Put` | Exp: `{csp['expiration']}` ({csp['dte']} DTE) | Δ `{csp['delta']:.2f}`\n"
+                                    f"┣ Premium: `${csp['premium']*100:.0f}/contract` | Volume: `{csp['volume']:,}` | OI Range `{csp['oi_low']:,}`–`{csp['oi_high']:,}`\n"
+                                )
+                            div_line = ""
+                            if f.get("div_yield") is not None:
+                                div_line = f"┣ Dividend: Yield `{f['div_yield']:.1f}%` | {f['div_freq']} | Amount `${f['div_amount']:.4f}`/share\n"
+                            ivr_payload += (
+                                f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
+                                f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | IVR Proxy: `{f['ivr_proxy']:.0f}%`\n"
+                                f"{setup_line}"
+                                f"{div_line}"
+                                f"┗ Spread Check: `{f['spread_pct']:.1f}%` of mid | Earnings Window: Clear\n\n"
+                            )
+                        ivr_payload += "Directive: Premium-selling environment is favorable — screen for CSP entries on these names."
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "IV RANK ALERT | Tier 2 Wheel Screener", ivr_payload, 0xe67e22)
+                            logger.info(f"Tier 2 IV Rank alert dispatched: {len(flagged)} symbol(s) > 35% IVR.")
+            except Exception as e:
+                logger.error(f"Tier 2 IV Rank screener failed: {e}")
+
+            # ── MODULE 2: WHEEL POSITION DTE COUNTDOWN ─────────────────────────
+            try:
+                open_positions = engine.db.get_open_wheel_positions()
+                today = datetime.now().date()
+                for pos in open_positions:
+                    exp_date = datetime.strptime(pos["expiration"], "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte < 0:
+                        continue
+                    alert_dte = None
+                    if dte <= 14 and pos.get("last_alert_dte") != 14 and (pos.get("last_alert_dte") is None or pos["last_alert_dte"] > 14):
+                        alert_dte = 14
+                        urgency = "🔴 CLOSE/ROLL DEADLINE"
+                    elif dte <= 21 and pos.get("last_alert_dte") is None:
+                        alert_dte = 21
+                        urgency = "🟡 ROLL DECISION WINDOW"
+                    if alert_dte is not None:
+                        dte_payload = (
+                            f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
+                            f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
+                            f"┣ Premium Collected: `${pos['premium_collected']:.2f}` x {pos['contracts']}\n"
+                            f"┗ {urgency}"
+                        )
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "WHEEL POSITION | DTE Countdown", dte_payload, 0xf1c40f if alert_dte == 21 else 0xe74c3c)
+                            engine.db.mark_wheel_position_alerted(pos["id"], alert_dte)
+                            logger.info(f"Wheel DTE alert dispatched: {pos['symbol']} at {alert_dte} DTE.")
+            except Exception as e:
+                logger.error(f"Wheel position DTE countdown failed: {e}")
+
+        elif args.mode == "wheel_position":
+            if args.action == "open":
+                if not all([args.symbol, args.position_type, args.strike, args.expiration, args.premium]):
+                    logger.error("wheel_position open requires --symbol --type --strike --expiration --premium")
+                else:
+                    pos_id = engine.db.open_wheel_position(
+                        args.symbol.upper(), args.position_type, args.strike,
+                        args.expiration, args.premium, args.contracts
+                    )
+                    logger.info(f"Opened wheel position #{pos_id}: {args.symbol.upper()} {args.position_type} ${args.strike} exp {args.expiration}")
+            elif args.action == "close":
+                if not args.position_id:
+                    logger.error("wheel_position close requires --position-id")
+                else:
+                    ok = engine.db.close_wheel_position(args.position_id, status=args.status)
+                    if ok:
+                        logger.info(f"Closed wheel position #{args.position_id} as {args.status}. "
+                                    f"Total premium ledger now: ${engine.db.get_total_premium_collected():,.2f}")
+                    else:
+                        logger.error(f"Could not close position #{args.position_id} — not found or not OPEN.")
+            else:
+                logger.error("wheel_position mode requires --action open|close")
+
         elif args.mode == "iv_crush":
             iv_dispatched = False
             flow_dispatched = False

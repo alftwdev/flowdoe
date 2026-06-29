@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from market_structure import analyze_market_structure
 from dotenv import load_dotenv
 from database import EcosystemDatabase
+from analytics import HighFidelityAnalyticsEngine
 
 try:
     from essentials_tools import send_essentials_embed, send_essentials_embed_with_chart
@@ -31,6 +32,7 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 db = EcosystemDatabase()
+engine = HighFidelityAnalyticsEngine()
 
 ET = pytz.timezone("America/New_York")
 
@@ -245,15 +247,46 @@ def build_board_payload(board, session_label):
         f"┗ Status: No structural regime shift — boundaries holding. Next deep-dive fires on a confirmed value-area break."
     )
 
+BOARD_MIN_CHANGE_PCT = 0.05   # composite % move across the board required to re-dispatch
+BOARD_HEARTBEAT_HOURS = 4     # dispatch anyway after this long even if nothing moved, so the
+                              # channel doesn't go fully dark — confirms the feed is still alive
+
 def run_futures_board():
+    """
+    Was always-fire regardless of whether the underlying quotes had moved at all — confirmed live,
+    three consecutive RTH dispatches showed byte-identical SPY/QQQ/Dow/IWM prices for hours while
+    only Gold ticked a cent. That's a frozen/cached read on those proxies, and re-posting it
+    verbatim every cron tick is pure noise with zero "so what." Now gated: only re-dispatch on a
+    real composite move, or after BOARD_HEARTBEAT_HOURS with no move (confirms the board is alive,
+    not stuck) — same 3-strike philosophy used everywhere else in the ecosystem.
+    """
     if not WEBHOOK_FUTURES:
         return
     board = fetch_board_quotes()
     if not board:
         return
+
+    last_board = db.get_state("futures_board_last_quotes", {})
+    last_dispatch_iso = db.get_state("futures_board_last_dispatch", "")
+    composite_change = sum(abs(q["percent_change"] - last_board.get(label, {}).get("percent_change", 0.0)) for label, q in board.items())
+
+    heartbeat_due = True
+    if last_dispatch_iso:
+        try:
+            hours_since = (datetime.now() - datetime.fromisoformat(last_dispatch_iso)).total_seconds() / 3600.0
+            heartbeat_due = hours_since >= BOARD_HEARTBEAT_HOURS
+        except Exception:
+            heartbeat_due = True
+
+    if last_board and composite_change < BOARD_MIN_CHANGE_PCT and not heartbeat_due:
+        logger.info(f"Futures board unchanged (composite Δ {composite_change:.3f}%) — suppressing repeat dispatch.")
+        return
+
     session_label = get_session_label()
     send_essentials_embed(WEBHOOK_FUTURES, "ESSENTIALS FUTURES BOARD", build_board_payload(board, session_label), 0x00FFFF)
-    logger.info(f"Dispatched Futures Board ({session_label})")
+    db.update_state("futures_board_last_quotes", board)
+    db.update_state("futures_board_last_dispatch", datetime.now().isoformat())
+    logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due})")
 
 # =====================================================================
 # DEEP-DIVE MARKET PROFILE + CHART (ES/NQ) — fires only on gatekeeper approval
@@ -312,6 +345,12 @@ def run_intraday_futures_update():
         # computed on the same active_df already fetched above, so this costs zero extra API calls.
         structure = analyze_market_structure(active_df)
 
+        # VIX-tiered regime shield + Unified Conviction Score (vault/philo.txt formulas) — reuses
+        # the same active_df, no extra API calls beyond the one VIXY fetch and one GEX/options fetch.
+        regime = engine.classify_vix_regime()
+        gex_state = engine.calculate_gex_profile(sym)
+        conviction = engine.calculate_unified_conviction_score(sym, active_df, gex_state=gex_state)
+
         should_send, status_tag = evaluate_gatekeeper(f"futures_{sym}", spot, major_threshold=5.0)
 
         if should_send:
@@ -325,6 +364,8 @@ def run_intraday_futures_update():
                 f"┣ Cumulative Delta:   {cvd_now:+,.0f} | {cvd_bias}\n"
                 f"┣ Current Posture:    {posture}\n"
                 f"┣ Market Structure:   {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
+                f"┣ VIX Regime: {regime['tier']} (z {regime['vixy_z']:+.2f}σ) — {regime['posture']}\n"
+                f"┣ Unified Conviction Score: {conviction['score']}/100 — {conviction['verdict']}\n"
                 f"┗ Tactical Directive: Core setups are highly optimal when fading value boundaries (${profile['val']:,.2f} - ${profile['vah']:,.2f})."
             )
             try:
@@ -362,14 +403,127 @@ def run_intraday_futures_update():
             except Exception as e:
                 logger.error(f"Correlation dispatch failed: {e}")
 
+# =====================================================================
+# INITIAL BALANCE BREAKOUT SCANNER (/ES, /NQ via SPY/QQQ proxy)
+#
+# From vault/philo.txt's documented "/ES Breakout Strategy Implementation Rules", with the IB
+# window corrected to the professional-standard 60 minutes (9:30-10:30 ET) rather than philo.txt's
+# 30 — confirmed against Axia Futures' published methodology for ES/NQ specifically, where the
+# first 60 minutes is when the largest institutional flow hits the tape.
+#
+# ENTRY: a closed 5-min bar breaks outside the IB range AND volume delta in that bar shows >55%
+#         buy (or sell) imbalance — momentum confirmation, not just a wick poke.
+# VIX FILTER: in ELEVATED/CRITICAL regimes, only fire if price is still within ~0.1% of the IB
+#             line (philo.txt's "within 2 ticks") — a breakout that's already run away in a choppy
+#             high-vol tape is a worse entry, not a better one.
+# RISK: stop at the IB midpoint, target sized for a minimum 2:1 reward:risk — both philo.txt's
+#       documented risk matrix. No live position management (no brokerage link) — this is a
+#       signal with explicit levels, not an auto-managed trade.
+# =====================================================================
+IB_START, IB_END = dtime(9, 30), dtime(10, 30)
+
+def compute_initial_balance(df, today):
+    ib_mask = (df['date'] == today) & (df['time'] >= IB_START) & (df['time'] <= IB_END)
+    ib_df = df[ib_mask]
+    if ib_df.empty:
+        return None
+    return {"high": float(ib_df["high"].max()), "low": float(ib_df["low"].min())}
+
+def run_ib_breakout_scan():
+    if not WEBHOOK_FUTURES:
+        return
+    now_et = datetime.now(ET)
+    if now_et.time() < IB_END or get_session_label(now_et) != "RTH":
+        logger.info("Initial Balance not yet sealed (before 10:30 ET) or outside RTH — skipping breakout scan.")
+        return
+
+    regime = engine.classify_vix_regime()
+
+    for sym, label in PROFILE_ASSETS.items():
+        try:
+            df = fetch_profile_time_series(sym, outputsize=120)
+            if df is None or df.empty:
+                continue
+            df['date'] = df['datetime_est'].dt.date
+            df['time'] = df['datetime_est'].dt.time
+            today = df['date'].max()
+
+            ib = compute_initial_balance(df, today)
+            if not ib or ib["high"] == ib["low"]:
+                continue
+
+            rth_today = df[df['date'] == today].reset_index(drop=True)
+            post_ib = rth_today[rth_today['time'] > IB_END]
+            if post_ib.empty:
+                continue
+
+            last_bar = post_ib.iloc[-1]
+            spot = float(last_bar["close"])
+
+            direction = None
+            if last_bar["close"] > ib["high"]:
+                direction = "BULLISH"
+                breakout_line = ib["high"]
+            elif last_bar["close"] < ib["low"]:
+                direction = "BEARISH"
+                breakout_line = ib["low"]
+            if direction is None:
+                continue
+
+            # Volume delta confirmation on the breakout bar itself, not the whole session.
+            recent = post_ib.tail(3)
+            up_vol = recent.loc[recent["close"] >= recent["open"], "volume"].sum()
+            total_vol = recent["volume"].sum()
+            buy_pct = (up_vol / total_vol * 100) if total_vol > 0 else 0.0
+            confirmed = buy_pct >= 55.0 if direction == "BULLISH" else buy_pct <= 45.0
+
+            if not confirmed:
+                continue
+
+            # VIX filter — in elevated/critical vol, don't chase a breakout that's already extended.
+            if regime["tier"] != "NORMAL":
+                distance_pct = abs(spot - breakout_line) / breakout_line * 100
+                if distance_pct > 0.10:
+                    logger.info(f"{label}: IB breakout confirmed but {regime['tier']} regime + {distance_pct:.2f}% extended — skipping chase entry.")
+                    continue
+
+            ib_mid = (ib["high"] + ib["low"]) / 2
+            risk = abs(spot - ib_mid)
+            if risk == 0:
+                continue
+            target = spot + (2 * risk) if direction == "BULLISH" else spot - (2 * risk)
+
+            state_key = f"ib_breakout_{sym}_{today}"
+            if db.get_state(state_key):
+                continue  # one breakout signal per symbol per day
+            db.update_state(state_key, direction)
+
+            payload = (
+                f"**{label} Initial Balance Breakout — {direction}**\n"
+                f"┣ IB Range (9:30-10:30 ET): `${ib['low']:,.2f}` – `${ib['high']:,.2f}`\n"
+                f"┣ Breakout Confirmed: Close `${spot:,.2f}` {'above' if direction == 'BULLISH' else 'below'} IB {'high' if direction == 'BULLISH' else 'low'}\n"
+                f"┣ Volume Delta Confirmation: `{buy_pct:.0f}%` buy volume on breakout bars\n"
+                f"┣ VIX Regime: {regime['tier']} (z {regime['vixy_z']:+.2f}σ)\n"
+                f"┣ Entry: `${spot:,.2f}` | Stop: `${ib_mid:,.2f}` (IB midpoint) | Target: `${target:,.2f}`\n"
+                f"┣ Risk/Reward: `1:{(abs(target - spot) / risk):.1f}`\n"
+                f"┗ Management: Shift stop to breakeven once price advances 2x initial risk — protect capital, let the rest run."
+            )
+            send_essentials_embed(WEBHOOK_FUTURES, f"📐 INITIAL BALANCE BREAKOUT | {label}", payload, 0x2ecc71 if direction == "BULLISH" else 0xe74c3c)
+            logger.info(f"IB breakout signal dispatched: {label} {direction} (buy_pct={buy_pct:.0f}%)")
+        except Exception as e:
+            logger.error(f"IB breakout scan failed for {sym}: {e}")
+
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     if mode == "board":
         run_futures_board()
     elif mode == "profile":
         run_intraday_futures_update()
+    elif mode == "ib_breakout":
+        run_ib_breakout_scan()
     else:
-        # Default cron invocation: always send the steady-cadence board, then attempt the
-        # gatekeeper-gated deep dive (which only actually posts on a real regime shift).
+        # Default cron invocation: steady-cadence board (now change-gated), the gatekeeper-gated
+        # deep dive, and the IB breakout scan (self-gated to after 10:30 ET, once per symbol/day).
         run_futures_board()
         run_intraday_futures_update()
+        run_ib_breakout_scan()

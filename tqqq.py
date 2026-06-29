@@ -40,6 +40,7 @@ BREADTH_COLLAPSE = 0.35    # % of top-10 QQQ holdings above their own 200D SMA
 BREADTH_STRONG = 0.70
 VIX_CRISIS_Z = 1.5         # VIXY z-score vs its own 20D mean — see fetch_vix() note on why
 RISK_FREE_RATE = 0.045
+LIVE_SIGNAL_COOLDOWN_DAYS = 5  # operator wants sniper entries weekly at most, not daily spam
 
 
 def is_market_hours():
@@ -153,6 +154,7 @@ class TQQQTacticalSniper:
                 "spot": df["close"].iloc[-1],
                 "sma200": df["close"].rolling(window=200).mean().iloc[-1],
                 "sma50": df["close"].rolling(window=50).mean().iloc[-1],
+                "ema21": df["close"].ewm(span=21, adjust=False).mean().iloc[-1],
             }
         except Exception as e:
             logger.error(f"Daily baseline fetch failed: {e}")
@@ -297,6 +299,7 @@ class TQQQTacticalSniper:
             df["open_interest"] = pd.to_numeric(
                 df.get("open_interest", 0), errors="coerce"
             ).fillna(0)
+            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
 
             if "delta" in df.columns:
                 df["delta"] = pd.to_numeric(df["delta"], errors="coerce").fillna(0).abs()
@@ -347,6 +350,10 @@ class TQQQTacticalSniper:
             setup["real_iv"] = round(iv_pct, 1)
             setup["real_premium"] = round(float(best.get("mid", 0.0)), 2)
             setup["real_expiry"] = best["expiration_date"].strftime("%m/%d/%Y")
+            setup["real_volume"] = int(best.get("volume", 0))
+            setup["real_oi"] = int(best.get("open_interest", 0))
+            setup["real_oi_low"] = int(candidates["open_interest"].min())
+            setup["real_oi_high"] = int(candidates["open_interest"].max())
 
         except Exception as e:
             logger.warning(f"Options chain enrichment failed: {e}")
@@ -431,11 +438,17 @@ class TQQQTacticalSniper:
         # Golden-Setup downgrade: a contradicting macro signature drops a would-be LIVE execution
         # back to MONITORING — this is what keeps trade frequency low and conviction high, per the
         # explicit "I don't want to trade often, I want highly successful setups" requirement.
+        # Explicit 21 EMA gate for calls — claude.md's "QQQ above 21 EMA + VIX < 20" entry rule.
+        ema21 = daily.get("ema21", 0.0)
+        below_21ema = ema21 > 0 and spot < ema21
+
         downgrade_reason = None
         if action == "Buy to Open (BTO)":
-            if contract == "CALL" and (atr_extreme or breadth_collapsing or vix_crisis):
+            if contract == "CALL" and (atr_extreme or breadth_collapsing or vix_crisis or below_21ema):
                 downgrade_reason = (
-                    "ATR_EXTREME" if atr_extreme else ("BREADTH_COLLAPSE" if breadth_collapsing else "VIX_CRISIS")
+                    "ATR_EXTREME" if atr_extreme else
+                    ("BREADTH_COLLAPSE" if breadth_collapsing else
+                     ("VIX_CRISIS" if vix_crisis else "BELOW_21EMA"))
                 )
             elif contract == "PUT" and atr_extreme:
                 downgrade_reason = "ATR_EXTREME"
@@ -506,11 +519,13 @@ class TQQQTacticalSniper:
             )
             greeks_line = f"Δ {setup['real_delta']:.2f} (chain) | IV {setup['real_iv']:.1f}% (chain)"
             prem_line = f"~${setup['real_premium'] * 100:.0f} per contract (mid-market)"
+            liquidity_line = f"┣ Liquidity: Volume `{setup.get('real_volume', 0):,}` | OI `{setup.get('real_oi', 0):,}` (range `{setup.get('real_oi_low', 0):,}`–`{setup.get('real_oi_high', 0):,}`)\n"
         else:
             est_strike = setup['tqqq_spot'] * (1.05 if setup['contract'] == "CALL" else 0.95)
             contract_line = f"~${est_strike:.2f} {setup['contract']} — 10-21 DTE"
             greeks_line = "Δ 0.35-0.45 (target range)"
             prem_line = "Fetch live chain for precise pricing"
+            liquidity_line = ""
 
         bs_block = ""
         if "bs_delta" in setup:
@@ -546,6 +561,7 @@ class TQQQTacticalSniper:
             f"┣ Contract: {contract_line}\n"
             f"┣ Greeks: {greeks_line}\n"
             f"┣ Est. Cost: {prem_line}\n"
+            f"{liquidity_line}"
             f"{bs_block}"
             f"{rr_line}"
             f"{structure_line}"
@@ -558,6 +574,7 @@ class TQQQTacticalSniper:
             send_essentials_embed(WEBHOOK_TRADE_SIGNALS, title, payload, color)
 
         if is_live:
+            db.update_state("tqqq_last_live_signal_date", datetime.now().strftime("%Y-%m-%d"))
             prediction_id = f"{setup['contract']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             db.update_state("tqqq_open_position", {
                 "contract": setup["contract"],
@@ -714,6 +731,45 @@ class TQQQTacticalSniper:
             send_essentials_embed(WEBHOOK_MARKET_ANALYSIS, "NASDAQ-100 REGIME SYNC", payload, 0x16a085)
             logger.info(f"Regime vital sign cross-posted to Market Analysis: {state_key}")
 
+    def check_insurance_put_renewal(self):
+        """
+        Module 4 (insurance leg) — the "homeowners insurance" put is a separate, always-on
+        position from the directional sniper above: claude.md's rule is 1 active 30 DTE put,
+        rinse-and-repeat, regardless of what the sniper's z-score/breadth signals are doing.
+        This only tracks the renewal clock for whatever put was logged via
+        `python tqqq.py --log-put --strike X --expiration YYYY-MM-DD --premium X`; it does not
+        invent a position that wasn't actually entered.
+        """
+        put = db.get_state("tqqq_insurance_put")
+        if not put:
+            if db.track_and_limit_alerts("tqqq_insurance_put_missing", "NO_PUT", 0.0, max_broadcasts=1, threshold_pct=1.0):
+                payload = (
+                    "┣ No active insurance put on record.\n"
+                    "┗ Log one with: `python tqqq.py --log-put --strike X --expiration YYYY-MM-DD --premium X`"
+                )
+                if WEBHOOK_TRADE_SIGNALS:
+                    send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "🛡️ TQQQ INSURANCE PUT | NONE ACTIVE", payload, 0xe74c3c)
+            return
+
+        exp_date = datetime.strptime(put["expiration"], "%Y-%m-%d").date()
+        dte = (exp_date - datetime.now().date()).days
+
+        if dte < 0:
+            db.update_state("tqqq_insurance_put", None)
+            return
+
+        if dte <= 14:
+            state_key = f"PUT_RENEWAL_DTE_{dte}"
+            if db.track_and_limit_alerts("tqqq_insurance_put_renewal", state_key, float(dte), max_broadcasts=2, threshold_pct=1.0):
+                payload = (
+                    f"┣ Strike: `${put['strike']:.2f}` | Expiration: `{put['expiration']}` ({dte} DTE)\n"
+                    f"┣ Premium Paid: `${put['premium']:.2f}`\n"
+                    f"┗ Roll/renew now — never skip a month (homeowners insurance model)."
+                )
+                if WEBHOOK_TRADE_SIGNALS:
+                    send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "🛡️ TQQQ INSURANCE PUT | RENEWAL DUE", payload, 0xf39c12)
+                    logger.info(f"Insurance put renewal alert dispatched at {dte} DTE.")
+
     def execute_sniper_sweep(self):
         if not is_market_hours():
             logger.info("Market closed — TQQQ sniper standing down.")
@@ -744,7 +800,26 @@ class TQQQTacticalSniper:
         # Market-wide regime vital sign, independent of whether a trade setup exists.
         self.dispatch_regime_vital_sign(daily, breadth, vix_price, vix_z)
 
+        # Insurance put renewal clock — runs every sweep, fully independent of the sniper signal.
+        self.check_insurance_put_renewal()
+
         setup = self.evaluate_snipe(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq)
+
+        # Sniper discipline: never stack a second entry while one is already open, and never fire
+        # LIVE execution more often than the operator's weekly cadence — both downgrade to a quiet
+        # MONITORING note rather than a full alert, so the setup is still visible in logs without
+        # spamming the channel.
+        if setup and setup["action"] != "MONITORING SETUP":
+            if db.get_state("tqqq_open_position"):
+                setup["action"] = "MONITORING SETUP"
+                setup["downgrade_reason"] = "POSITION_ALREADY_OPEN"
+            else:
+                last_live = db.get_state("tqqq_last_live_signal_date")
+                if last_live:
+                    days_since = (datetime.now().date() - datetime.strptime(last_live, "%Y-%m-%d").date()).days
+                    if days_since < LIVE_SIGNAL_COOLDOWN_DAYS:
+                        setup["action"] = "MONITORING SETUP"
+                        setup["downgrade_reason"] = f"WEEKLY_COOLDOWN ({LIVE_SIGNAL_COOLDOWN_DAYS - days_since}d remaining)"
 
         if setup:
             alert_id = "tqqq_sniper_flow"
@@ -766,6 +841,20 @@ class TQQQTacticalSniper:
 
 
 if __name__ == "__main__":
+    if "--log-put" in sys.argv:
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--log-put", action="store_true")
+        parser.add_argument("--strike", type=float, required=True)
+        parser.add_argument("--expiration", type=str, required=True, help="YYYY-MM-DD")
+        parser.add_argument("--premium", type=float, required=True)
+        args = parser.parse_args()
+        db.update_state("tqqq_insurance_put", {
+            "strike": args.strike, "expiration": args.expiration, "premium": args.premium
+        })
+        logger.info(f"Insurance put logged: ${args.strike} exp {args.expiration} premium ${args.premium:.2f}")
+        sys.exit(0)
+
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
     sniper = TQQQTacticalSniper()
     while True:

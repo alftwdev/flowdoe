@@ -131,24 +131,13 @@ class StructuralBreakoutAgent:
                    f"┗ **Volatility Index Force (ATR %):** `{atr:.2f}%`\n\n⚠️ *Retail momentum is being absorbed here.*")
         if HAS_ESSENTIALS and WEBHOOK_TRADE_SIGNALS: send_essentials_embed(WEBHOOK_TRADE_SIGNALS, f"🛑 High Probability False Breakout Trap: {symbol}", payload, 0xe74c3c)
 
-    def run_wheel_discovery(self):
-        engine = HighFidelityAnalyticsEngine()
-        candidates = engine.generate_wheel_candidates()
-        if not candidates: return
-        payload = "### **⚙️ Automated Wheel Strategy Discovery**\n*Highly curated 30-45 DTE Cash-Secured Put setups (~0.40 Delta).*\n\n"
-        for c in candidates: payload += f"**{c['symbol']}** | Spot: `${c['spot']:,.2f}`\n┣ **Target Expiration**: `{c['expiration']}` ({c['dte']} DTE)\n┣ **Optimal Strike**: `STO ${c['strike']:.1f} Put`\n┗ **Capital Efficiency**: Est. `{c['annualized_roi']}%` Annualized ROI\n\n"
-        if HAS_ESSENTIALS and WEBHOOK_DIVIDEND_CCETFS: send_essentials_embed(WEBHOOK_DIVIDEND_CCETFS, "🎡 PRIME WHEEL CANDIDATES", payload, 0x9b59b6)
-
     def execution_loop(self):
         logger.info("REST Polling Agent Initialized.")
         loop_counter = 0
         while True:
             for symbol in self.watchlist:
                 self.process_telemetry(symbol)
-                time.sleep(2) 
-            if loop_counter % 5 == 0:
-                try: self.run_wheel_discovery()
-                except Exception as e: logger.error(f"Wheel Discovery Failed: {e}")
+                time.sleep(2)
             loop_counter += 1
             time.sleep(120)
 

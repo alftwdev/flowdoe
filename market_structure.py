@@ -120,6 +120,44 @@ def detect_equal_highs_lows(df, lookback=50, tolerance_pct=0.0015, swing_lookbac
     return cluster(high_vals), cluster(low_vals)
 
 
+def calculate_supertrend(df, period=10, multiplier=3.0):
+    """
+    Standard ATR-banded Supertrend — generic, publicly-documented technical indicator (Olivier
+    Seban, widely implemented across every charting platform), not proprietary to any vendor.
+    Returns the latest trend direction ("BULLISH"/"BEARISH") and the active band level.
+    """
+    if df is None or len(df) < period + 2:
+        return {"trend": "NEUTRAL", "level": 0.0}
+    try:
+        atr = calculate_atr_series(df, period)
+        hl2 = (df["high"] + df["low"]) / 2
+        upper_band = hl2 + multiplier * atr
+        lower_band = hl2 - multiplier * atr
+
+        trend = pd.Series(1, index=df.index)  # 1 = bullish, -1 = bearish
+        final_upper = upper_band.copy()
+        final_lower = lower_band.copy()
+
+        for i in range(period, len(df)):
+            close = df["close"].iloc[i]
+            if close > final_upper.iloc[i - 1]:
+                trend.iloc[i] = 1
+            elif close < final_lower.iloc[i - 1]:
+                trend.iloc[i] = -1
+            else:
+                trend.iloc[i] = trend.iloc[i - 1]
+                if trend.iloc[i] == 1 and lower_band.iloc[i] < final_lower.iloc[i - 1]:
+                    final_lower.iloc[i] = final_lower.iloc[i - 1]
+                if trend.iloc[i] == -1 and upper_band.iloc[i] > final_upper.iloc[i - 1]:
+                    final_upper.iloc[i] = final_upper.iloc[i - 1]
+
+        last_trend = int(trend.iloc[-1])
+        level = float(final_lower.iloc[-1]) if last_trend == 1 else float(final_upper.iloc[-1])
+        return {"trend": "BULLISH" if last_trend == 1 else "BEARISH", "level": round(level, 2)}
+    except Exception:
+        return {"trend": "NEUTRAL", "level": 0.0}
+
+
 def analyze_market_structure(df, atr_series=None):
     """
     Composite classifier — synthesizes the primitives above into a single, actionable setup label

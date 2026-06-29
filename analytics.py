@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from database import EcosystemDatabase
+from market_structure import calculate_supertrend
 
 logger = logging.getLogger("Rockefeller_Analytics")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -678,6 +679,7 @@ class HighFidelityAnalyticsEngine:
             "O":     {"name": "Realty Income Corp",           "type": "REIT",     "freq": "Monthly", "moat": True},
             "MAIN":  {"name": "Main Street Capital",          "type": "BDC",      "freq": "Monthly", "moat": True},
             "ARCC":  {"name": "Ares Capital Corp",            "type": "BDC",      "freq": "Quarterly","moat": True},
+            "GPIQ":  {"name": "Goldman Sachs Nasdaq-100 Core Premium Income", "type": "CC ETF", "freq": "Monthly", "moat": True},
         }
         tickers = list(ETF_META.keys())
         results = []
@@ -743,6 +745,223 @@ class HighFidelityAnalyticsEngine:
 
         # Sort by soonest ex-date, then yield descending
         return sorted(results, key=lambda x: (x["days_away"], -x["ann_yield"]))
+
+    def generate_tier2_iv_rank_alerts(self, universe=None, ivr_threshold=35.0):
+        """
+        Module 1 — IV Rank Screener for Tier 2 wheel underlyings (MAIN/MLPI/GPIQ/KQQQ — TDAQ
+        also covered by default since it's still official Tier 2 per claude.md, even though it's
+        not currently a personal priority holding).
+        IVR proxy = ATM put IV vs HV30, same formula as generate_dividend_wheel_candidates.
+        Includes a bid/ask spread liquidity check and an earnings-date filter (skipped, not
+        fabricated, if Twelve Data's earnings endpoint has nothing for the symbol — these are
+        ETFs/BDCs and most have no earnings date at all).
+        Also surfaces a concrete CSP setup (strike/DTE/delta/volume/OI) and real dividend data
+        (yield/frequency/amount) for each flagged symbol — this is dispatched as income content,
+        so it needs to carry the same depth as the dividend wheel v2 screener.
+        Returns only symbols where ivr_proxy > ivr_threshold AND liquidity/earnings checks pass.
+        """
+        universe = universe or ["MAIN", "MLPI", "GPIQ", "KQQQ", "TDAQ"]
+        flagged = []
+        today = datetime.now()
+        DELTA_MIN, DELTA_MAX = 0.20, 0.35
+
+        for symbol in universe:
+            try:
+                hv30 = self.calculate_historical_volatility(symbol, lookback=30)
+                spot_data = self._execute_query("price", {"symbol": symbol})
+                spot = float(spot_data.get("price", 0.0)) if spot_data else 0.0
+                chain = self._execute_query("options/chain", {"symbol": symbol})
+                if not chain or "data" not in chain or not chain["data"] or spot == 0.0:
+                    continue
+
+                df = pd.DataFrame(chain["data"])
+                df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
+                df["strike"] = df["strike"].astype(float)
+                df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
+                df["expiration_date"] = pd.to_datetime(df["expiration_date"])
+                df["dte"] = (df["expiration_date"] - pd.Timestamp.today()).dt.days
+
+                near_term = df[(df["dte"] >= 20) & (df["dte"] <= 45)]
+                if near_term.empty:
+                    continue
+
+                atm_iv_raw = near_term["implied_volatility"].median()
+                atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
+                ivr_proxy = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
+                if ivr_proxy <= ivr_threshold:
+                    continue
+
+                # Bid/ask spread liquidity check on the ATM-ish strike used for IVR
+                spread_ok, spread_pct = True, 0.0
+                if "bid" in near_term.columns and "ask" in near_term.columns:
+                    bid = pd.to_numeric(near_term["bid"], errors="coerce").fillna(0)
+                    ask = pd.to_numeric(near_term["ask"], errors="coerce").fillna(0)
+                    mid = (bid + ask) / 2
+                    spreads = (ask - bid).where(mid > 0, 0)
+                    widest = spreads.median()
+                    avg_mid = mid.median()
+                    spread_pct = float((widest / avg_mid) * 100) if avg_mid > 0 else 0.0
+                    spread_ok = widest <= 0.10 or spread_pct <= 8.0
+                if not spread_ok:
+                    continue
+
+                # Earnings filter — most Tier 2 ETFs/BDCs won't have one; skip the filter
+                # (don't block the alert) rather than fabricate an earnings date.
+                earnings_clear = True
+                try:
+                    earn = self._execute_query("earnings", {"symbol": symbol})
+                    if earn and earn.get("earnings"):
+                        next_earn = earn["earnings"][0].get("date")
+                        if next_earn:
+                            days_to_earn = (datetime.strptime(next_earn, "%Y-%m-%d") - today).days
+                            earnings_clear = not (0 <= days_to_earn <= 45)
+                except Exception:
+                    pass
+                if not earnings_clear:
+                    continue
+
+                # Concrete CSP setup — 0.20-0.35 delta put, same band as the wheel v2 screener
+                csp_setup = None
+                near_term = near_term.copy()
+                if "delta" in near_term.columns:
+                    near_term["delta"] = pd.to_numeric(near_term["delta"], errors="coerce").fillna(0).abs()
+                    near_term.loc[near_term["delta"] == 0, "delta"] = ((spot - near_term["strike"]) / spot).clip(0.01, 0.99)
+                else:
+                    near_term["delta"] = ((spot - near_term["strike"]) / spot).clip(0.01, 0.99)
+                puts = near_term[(near_term.get("type", "put") == "put") & (near_term["delta"] >= DELTA_MIN) & (near_term["delta"] <= DELTA_MAX)]
+                if not puts.empty:
+                    bid = pd.to_numeric(puts.get("bid", 0), errors="coerce").fillna(0)
+                    ask = pd.to_numeric(puts.get("ask", 0), errors="coerce").fillna(0)
+                    mid = (bid + ask) / 2
+                    pick = puts.loc[mid.idxmax()] if mid.max() > 0 else puts.iloc[0]
+                    csp_setup = {
+                        "strike": float(pick["strike"]),
+                        "dte": int(pick["dte"]),
+                        "expiration": pick["expiration_date"].strftime("%Y-%m-%d"),
+                        "delta": round(float(pick["delta"]), 2),
+                        "premium": round(float(mid.loc[pick.name]) if mid.max() > 0 else 0.0, 2),
+                        "volume": int(pick.get("volume", 0)),
+                        "oi_high": int(puts["open_interest"].max()),
+                        "oi_low": int(puts["open_interest"].min()),
+                    }
+
+                # Real dividend data
+                div_yield, div_freq, div_amount = None, None, None
+                try:
+                    div_history = self._fetch_dividend_history(symbol, span="2Y")
+                    next_ex_date, latest_amount, interval_days = self._project_next_ex_date(div_history, today)
+                    if latest_amount > 0 and interval_days:
+                        div_amount = latest_amount
+                        div_freq = "Monthly" if interval_days <= 35 else ("Quarterly" if interval_days <= 100 else "Annual")
+                        div_yield = round((latest_amount * (365.0 / interval_days)) / spot * 100, 1) if spot > 0 else None
+                except Exception:
+                    pass
+
+                flagged.append({
+                    "symbol": symbol,
+                    "spot": spot,
+                    "iv": round(float(atm_iv), 1),
+                    "hv30": round(float(hv30), 1),
+                    "ivr_proxy": round(float(ivr_proxy), 1),
+                    "spread_pct": round(spread_pct, 1),
+                    "strategy": "CSP (Cash-Secured Put)",
+                    "csp_setup": csp_setup,
+                    "div_yield": div_yield,
+                    "div_freq": div_freq,
+                    "div_amount": div_amount,
+                })
+            except Exception as e:
+                logger.error(f"Tier 2 IV Rank screen failed for {symbol}: {e}")
+
+        return flagged
+
+    NEW_INCOME_ETF_UNIVERSE = {
+        # symbol: (family, pay_freq) — confirmed-real tickers only, verified against issuer/ETF
+        # database listings rather than guessed, since fabricated tickers broke this channel before.
+        "MSTY": ("YieldMax", "Monthly"), "NVDY": ("YieldMax", "Monthly"),
+        "TSLY": ("YieldMax", "Monthly"), "CONY": ("YieldMax", "Monthly"),
+        "GOOY": ("YieldMax", "Monthly"), "AMDY": ("YieldMax", "Monthly"),
+        "YMAX": ("YieldMax", "Monthly"),
+        "XDTE": ("Roundhill", "Weekly"), "QDTE": ("Roundhill", "Weekly"), "RDTE": ("Roundhill", "Weekly"),
+        "QQQI": ("NEOS", "Monthly"), "SPYI": ("NEOS", "Monthly"), "BTCI": ("NEOS", "Monthly"),
+        "MAGY": ("TappAlpha", "Monthly"),
+    }
+
+    def generate_new_income_etf_screener(self, min_yield_pct=10.0, min_trading_days=126):
+        """
+        Module 3 — New/trending CC ETF screener across YieldMax, Roundhill, NEOS, TappAlpha
+        families (Kurv's only listed product, KQQQ, is already a Tier 2 holding — excluded here
+        to avoid duplicate coverage).
+
+        Filters (Twelve Data only, no external screener):
+        - Yield > min_yield_pct, computed from the same real dividend-history projection used
+          elsewhere in this engine (not a static/guessed number).
+        - Pay frequency: monthly or weekly only.
+        - "Launched > 6 months ago" proxy: trading-day count from time_series >= min_trading_days
+          (~6 months of sessions). Twelve Data has no inception-date field at this plan tier, so
+          this is an honest proxy, not a guess.
+        - AUM > $50M: Twelve Data's statistics endpoint doesn't reliably carry ETF AUM at this
+          plan tier. Rather than fabricate a number, AUM is surfaced as "N/A — verify" when
+          unavailable and the filter is skipped (not silently passed) for that candidate.
+        """
+        results = []
+        today = datetime.now()
+        quotes = self._fetch_twelve_data_quotes(list(self.NEW_INCOME_ETF_UNIVERSE.keys()))
+
+        for sym, (family, freq) in self.NEW_INCOME_ETF_UNIVERSE.items():
+            try:
+                q = quotes.get(sym, {})
+                spot = float(q.get("close", 0.0))
+                if spot == 0.0:
+                    continue
+
+                # Age proxy via trading history length
+                ts = self._execute_query("time_series", {"symbol": sym, "interval": "1day", "outputsize": "300"})
+                trading_days = len(ts["values"]) if ts and "values" in ts else 0
+                if trading_days < min_trading_days:
+                    continue  # too new — under ~6 months of trading history
+
+                div_history = self._fetch_dividend_history(sym, span="1Y")
+                next_ex_date, div_amount, interval_days = self._project_next_ex_date(div_history, today)
+                if div_amount <= 0 or not interval_days:
+                    continue
+
+                freq_mult = 365.0 / interval_days
+                ann_yield = (div_amount * freq_mult) / spot * 100
+
+                if ann_yield <= min_yield_pct:
+                    continue
+
+                # AUM proxy — surfaced honestly, filter skipped (not passed) if unavailable
+                aum_display = "N/A — verify before sizing"
+                stats = self._execute_query("statistics", {"symbol": sym})
+                if stats and "statistics" in stats:
+                    mcap = stats["statistics"].get("valuations_metrics", {}).get("market_capitalization")
+                    if mcap:
+                        try:
+                            aum_val = float(mcap)
+                            if aum_val < 50_000_000:
+                                continue
+                            aum_display = f"${aum_val / 1e6:,.0f}M"
+                        except (TypeError, ValueError):
+                            pass
+
+                results.append({
+                    "symbol": sym,
+                    "family": family,
+                    "freq": freq,
+                    "spot": spot,
+                    "div_amount": div_amount,
+                    "ann_yield": round(ann_yield, 1),
+                    "aum": aum_display,
+                    "trading_days": trading_days,
+                    "next_ex_date": next_ex_date.strftime("%Y-%m-%d") + " (est.)" if next_ex_date else "TBD",
+                })
+            except Exception as e:
+                logger.error(f"New income ETF screen failed for {sym}: {e}")
+
+        return sorted(results, key=lambda x: x["ann_yield"], reverse=True)
 
     def generate_dividend_wheel_candidates(self):
         """
@@ -850,6 +1069,7 @@ class HighFidelityAnalyticsEngine:
                 df["dte"]             = (df["expiration_date"] - today_ts).dt.days
 
                 df["open_interest"]    = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                df["volume"]            = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
                 df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
 
                 if "delta" in df.columns:
@@ -900,6 +1120,9 @@ class HighFidelityAnalyticsEngine:
                 premium  = float(best["mid"])
                 strike   = float(best["strike"])
                 dte      = int(best["dte"])
+                volume   = int(best.get("volume", 0))
+                oi_high  = int(df_f["open_interest"].max())
+                oi_low   = int(df_f["open_interest"].min())
 
                 annualized_roi = (premium / strike) * (365 / dte) * 100
                 break_even     = round(strike - premium, 2)
@@ -925,6 +1148,20 @@ class HighFidelityAnalyticsEngine:
                         else:
                             safety_grade = "🚨 DANGER"
 
+                # ── 5. Real dividend data — this IS a dividend stock being wheeled, so the
+                # actual yield/frequency/amount (not just payout ratio) belongs in the dispatch.
+                div_yield, div_freq, div_amount = None, None, None
+                try:
+                    div_history = self._fetch_dividend_history(symbol, span="2Y")
+                    next_ex_date, latest_amount, interval_days = self._project_next_ex_date(div_history, datetime.now())
+                    if latest_amount > 0 and interval_days:
+                        div_amount = latest_amount
+                        div_freq = "Monthly" if interval_days <= 35 else ("Quarterly" if interval_days <= 100 else "Annual")
+                        freq_mult = 365.0 / interval_days
+                        div_yield = round((latest_amount * freq_mult) / spot * 100, 1) if spot > 0 else None
+                except Exception:
+                    pass
+
                 candidates.append({
                     "symbol":         symbol,
                     "spot":           spot,
@@ -934,15 +1171,22 @@ class HighFidelityAnalyticsEngine:
                     "rsi_tag":        rsi_tag,
                     "bb_pct_b":       round(float(bb_pct_b), 2),
                     "bb_zone":        bb_zone,
+                    "strategy":       "CSP (Cash-Secured Put)",
                     "strike":         strike,
                     "dte":            dte,
                     "expiration":     best["expiration_date"].strftime("%Y-%m-%d"),
                     "premium":        round(premium, 2),
                     "delta":          round(float(best["delta"]), 2),
+                    "volume":         volume,
+                    "oi_high":        oi_high,
+                    "oi_low":         oi_low,
                     "theta_daily":    round(float(best["theta_proxy"]), 4),
                     "iv":             round(atm_iv, 1),
                     "ivr_proxy":      round(ivr_proxy, 1),
                     "ivr_tag":        ivr_tag,
+                    "div_yield":      div_yield,
+                    "div_freq":       div_freq,
+                    "div_amount":     div_amount,
                     "pop":            round((1 - float(best["delta"])) * 100, 1),
                     "annualized_roi": round(annualized_roi, 1),
                     "break_even":     break_even,
@@ -1142,6 +1386,182 @@ class HighFidelityAnalyticsEngine:
             return float(np.std(log_returns) * np.sqrt(252) * 100)
         except Exception: return 20.0
 
+    def calculate_vrp(self, symbol="SPY"):
+        """
+        Volatility Risk Premium = ATM IV - HV30. Implied vol systematically overstates realized vol
+        most of the time; VRP > 0 is the mathematical edge premium-sellers (the wheel, credit
+        spreads) harvest. VRP < 0 means options are actually cheap relative to realized movement —
+        the "defensive shield" regime where buying protection is favored over selling it. From
+        vault/philo.txt's documented formula, wired to live Twelve Data instead of left as a
+        formula-only doc.
+        """
+        try:
+            hv30 = self.calculate_historical_volatility(symbol, lookback=30)
+            chain = self._execute_query("options/chain", {"symbol": symbol})
+            if not chain or "data" not in chain or not chain["data"]:
+                return {"iv": 0.0, "hv30": round(hv30, 1), "vrp": 0.0, "regime": "UNKNOWN"}
+
+            df = pd.DataFrame(chain["data"])
+            df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
+            df["expiration_date"] = pd.to_datetime(df["expiration_date"])
+            df["dte"] = (df["expiration_date"] - pd.Timestamp.today()).dt.days
+            near = df[(df["dte"] >= 20) & (df["dte"] <= 45)]
+            if near.empty:
+                near = df
+
+            atm_iv_raw = near["implied_volatility"].median()
+            atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
+            vrp = atm_iv - hv30
+            regime = "🟢 PREMIUM HARVESTING (IV > RV)" if vrp > 0 else "🔴 DEFENSIVE SHIELD (RV > IV)"
+            return {"iv": round(float(atm_iv), 1), "hv30": round(float(hv30), 1), "vrp": round(float(vrp), 1), "regime": regime}
+        except Exception as e:
+            logger.error(f"VRP calc failed for {symbol}: {e}")
+            return {"iv": 0.0, "hv30": 20.0, "vrp": 0.0, "regime": "UNKNOWN"}
+
+    # FRED series, units verified live against raw API output (not assumed): WALCL = Fed total
+    # assets (millions, Wed level), WTREGEN = Treasury General Account balance (millions, not
+    # billions — confirmed via raw fetch: ~918,696 unit-value only makes sense as ~$918.7B in
+    # millions), RRPONTSYD = overnight reverse repo (billions).
+    NET_LIQUIDITY_SERIES = {"fed_assets": "WALCL", "tga": "WTREGEN", "rrp": "RRPONTSYD"}
+
+    def calculate_net_liquidity(self):
+        """
+        Net Liquidity = Fed Total Assets - TGA - RRP, from vault/philo.txt's documented macro
+        baseline formula. This is the top-down "tide" — draining liquidity has historically
+        pressured risk assets independent of any single stock's technicals. Trend (vs the last
+        reading on record) matters more than the absolute level, since the absolute number isn't
+        directly comparable across time without normalizing for balance-sheet size changes.
+        """
+        try:
+            fed_assets = self._fetch_fred_metric(self.NET_LIQUIDITY_SERIES["fed_assets"]) * 1_000_000
+            tga = self._fetch_fred_metric(self.NET_LIQUIDITY_SERIES["tga"]) * 1_000_000
+            rrp = self._fetch_fred_metric(self.NET_LIQUIDITY_SERIES["rrp"]) * 1_000_000_000
+            if fed_assets == 0.0:
+                return {"net_liquidity": 0.0, "delta": 0.0, "trend": "UNKNOWN"}
+
+            net_liq = fed_assets - tga - rrp
+            prev = float(self.db.get_state("net_liquidity_prev", net_liq))
+            delta = net_liq - prev
+            self.db.update_state("net_liquidity_prev", net_liq)
+
+            threshold = abs(net_liq) * 0.002  # ~0.2% move — avoids flagging noise as a regime shift
+            trend = "🟢 EXPANDING" if delta > threshold else ("🔴 DRAINING" if delta < -threshold else "🟡 FLAT")
+            return {"net_liquidity": net_liq, "delta": delta, "trend": trend}
+        except Exception as e:
+            logger.error(f"Net liquidity calc failed: {e}")
+            return {"net_liquidity": 0.0, "delta": 0.0, "trend": "UNKNOWN"}
+
+    # =====================================================================
+    # VIX-TIERED 3-REGIME SHIELD — from vault/philo.txt's documented regime table.
+    # VIXY's own z-score is used instead of an absolute VIX level (VIX 404s at this Twelve Data
+    # plan tier — see fetch_vixy_proxy()'s docstring), mapped onto the same z-score bands already
+    # used elsewhere in the ecosystem (0.75 = "elevated", 1.5 = "crisis") so the tiers are
+    # consistent with every other VIX-aware gate already in production rather than introducing a
+    # second, conflicting threshold convention.
+    # =====================================================================
+    def classify_vix_regime(self, vixy_z=None):
+        """
+        Returns the active volatility regime and the concrete posture rules philo.txt prescribes
+        for it: how aggressive momentum entries can be (rsi_shield_limit), and what kind of setup
+        the regime allows.
+        """
+        if vixy_z is None:
+            _, vixy_z = self.fetch_vixy_proxy()
+
+        if vixy_z < 0.75:
+            return {
+                "tier": "NORMAL", "vixy_z": vixy_z,
+                "rsi_shield_limit": 68,
+                "posture": "Full-size momentum/breakout entries favored — low realized vol, false breakouts less common.",
+            }
+        elif vixy_z < 1.5:
+            return {
+                "tier": "ELEVATED", "vixy_z": vixy_z,
+                "rsi_shield_limit": 52,
+                "posture": "Compress targets — momentum reaches objectives fast but trailing risk must tighten; favor quick scalps over wide breakout targets.",
+            }
+        else:
+            return {
+                "tier": "CRITICAL", "vixy_z": vixy_z,
+                "rsi_shield_limit": 40,
+                "posture": "Lockdown — restrict entries to multi-hour structural breaks confirmed by a volume spike only; spreads widen and slippage risk is real.",
+            }
+
+    # =====================================================================
+    # UNIFIED CONVICTION SCORE — from vault/philo.txt's documented weighted matrix.
+    # Base 50, +/- Supertrend alignment, RSI momentum, institutional volume flow, GEX positioning.
+    # Score > 75 (or < 25 on the bearish side) = "INSTITUTIONAL LOCK-IN" — high enough agreement
+    # across independent signal families that it's worth calling out as a stronger read than the
+    # simpler +/-6 cross-asset conviction score Market Analysis uses for its broader macro snapshot.
+    # =====================================================================
+    def calculate_unified_conviction_score(self, symbol, df, gex_state=None):
+        """
+        df must have high/low/close/volume columns (e.g. the same active_df already fetched for
+        market profile / CVD in cross_asset.py — no extra API call needed for the technicals).
+        gex_state: pass an already-computed calculate_gex_profile() result to avoid a duplicate
+        options/chain fetch; if omitted, fetches fresh for `symbol`.
+        """
+        score = 50
+        components = {}
+
+        try:
+            st = calculate_supertrend(df)
+            if st["trend"] == "BULLISH":
+                score += 15
+            elif st["trend"] == "BEARISH":
+                score -= 15
+            components["supertrend"] = st["trend"]
+        except Exception:
+            components["supertrend"] = "UNKNOWN"
+
+        try:
+            delta_prices = df["close"].diff()
+            gain = delta_prices.clip(lower=0).rolling(14).mean()
+            loss = (-delta_prices.clip(upper=0)).rolling(14).mean()
+            rs = gain / (loss + 1e-9)
+            rsi = float((100 - 100 / (1 + rs)).iloc[-1])
+            rsi_contribution = max(-10, min(10, (rsi - 50) / 5))
+            score += rsi_contribution
+            components["rsi"] = round(rsi, 1)
+        except Exception:
+            components["rsi"] = None
+
+        try:
+            today_vol = float(df["volume"].iloc[-1])
+            baseline_vol = float(df["volume"].iloc[-21:-1].mean()) if len(df) >= 21 else float(df["volume"].mean())
+            rvol = today_vol / baseline_vol if baseline_vol > 0 else 1.0
+            price_chg = (float(df["close"].iloc[-1]) - float(df["close"].iloc[-2])) / float(df["close"].iloc[-2]) * 100 if len(df) >= 2 else 0.0
+            if rvol >= 1.5:
+                flow_contribution = 15 if price_chg > 0 else -15
+            elif rvol >= 1.15:
+                flow_contribution = 7 if price_chg > 0 else -7
+            else:
+                flow_contribution = 0
+            score += flow_contribution
+            components["volume_flow"] = f"{rvol:.2f}x avg, {'bullish' if flow_contribution > 0 else ('bearish' if flow_contribution < 0 else 'neutral')}"
+        except Exception:
+            components["volume_flow"] = None
+
+        try:
+            gex = gex_state or self.calculate_gex_profile(symbol)
+            if "POSITIVE" in gex.get("market_state", ""):
+                score += 10
+            elif "NEGATIVE" in gex.get("market_state", ""):
+                score -= 10
+            components["gex"] = gex.get("market_state", "UNKNOWN")
+        except Exception:
+            components["gex"] = "UNKNOWN"
+
+        score = max(0, min(100, score))
+        if score >= 75:
+            verdict = "🔒 INSTITUTIONAL LOCK-IN (BULLISH)"
+        elif score <= 25:
+            verdict = "🔒 INSTITUTIONAL LOCK-IN (BEARISH)"
+        else:
+            verdict = "🟡 NO CONSENSUS"
+
+        return {"score": round(score, 1), "verdict": verdict, "components": components}
+
     def run_iv_crush_scan(self):
         universe = [
             "AAPL", "NVDA", "MSFT", "TSLA", "META",
@@ -1208,9 +1628,7 @@ class HighFidelityAnalyticsEngine:
                 df["implied_volatility"] = pd.to_numeric(
                     df.get("implied_volatility", 0), errors="coerce"
                 ).fillna(0)
-                df["volume"] = pd.to_numeric(
-                    df.get("volume", 0), errors="coerce"
-                ).fillna(0)
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
 
                 # ── SWEEP DETECTOR ──────────────────────────────────────
                 # Fresh positioning: volume far exceeds existing open interest
@@ -1281,24 +1699,40 @@ class HighFidelityAnalyticsEngine:
         return sweeps[:5] + skews[:3]  # Max 8 signals
 
     def calculate_gex_profile(self, symbol="SPY"):
+        """
+        Also returns a Put/Call Open-Interest ratio — the one Unusual-Whales-style "options flow
+        sentiment" signal that's honestly replicable on Twelve Data's plan tier. Real dark-pool
+        prints and large block/sweep tape (UW's actual flagship features) require Level 2/order-flow
+        data this plan doesn't have; rather than fake that, this sticks to OI skew, which is real.
+        Reuses the same chain fetch as the GEX calc — no extra API call.
+        """
         chain = self._execute_query("options/chain", {"symbol": symbol})
         spot_data = self._execute_query("price", {"symbol": symbol})
-        if not chain or "data" not in chain or not spot_data: 
-            return {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN"}
+        if not chain or "data" not in chain or not spot_data:
+            return {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN", "pc_oi_ratio": 1.0, "pc_tag": "N/A"}
         try:
             spot = float(spot_data.get("price", 0.0))
             df = pd.DataFrame(chain["data"])
             df["strike"], df["open_interest"] = df["strike"].astype(float), df["open_interest"].astype(float)
-            df = df[(df["strike"] >= spot * 0.95) & (df["strike"] <= spot * 1.05)]
-            calls = df[df["type"] == "call"].set_index("strike")["open_interest"]
-            puts = df[df["type"] == "put"].set_index("strike")["open_interest"]
+            near = df[(df["strike"] >= spot * 0.95) & (df["strike"] <= spot * 1.05)]
+            calls = near[near["type"] == "call"].set_index("strike")["open_interest"]
+            puts = near[near["type"] == "put"].set_index("strike")["open_interest"]
             alignment = pd.DataFrame({"calls": calls, "puts": puts}).fillna(0)
             alignment["net_oi"] = alignment["calls"] - alignment["puts"]
             flip_strike = float(alignment["net_oi"].abs().idxmin())
             market_state = "🟢 POSITIVE GAMMA" if spot > flip_strike else "🔴 NEGATIVE GAMMA"
-            return {"flip_strike": flip_strike, "current_spot": spot, "market_state": market_state}
+
+            total_call_oi = float(df[df["type"] == "call"]["open_interest"].sum())
+            total_put_oi = float(df[df["type"] == "put"]["open_interest"].sum())
+            pc_oi_ratio = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 1.0
+            pc_tag = "🔴 PUT-HEAVY (hedging/bearish skew)" if pc_oi_ratio > 1.15 else ("🟢 CALL-HEAVY (bullish skew)" if pc_oi_ratio < 0.85 else "🟡 BALANCED")
+
+            return {
+                "flip_strike": flip_strike, "current_spot": spot, "market_state": market_state,
+                "pc_oi_ratio": pc_oi_ratio, "pc_tag": pc_tag,
+            }
         except Exception:
-            return {"flip_strike": spot, "current_spot": spot, "market_state": "ERROR BOUNDS"}
+            return {"flip_strike": spot, "current_spot": spot, "market_state": "ERROR BOUNDS", "pc_oi_ratio": 1.0, "pc_tag": "N/A"}
 
     # =====================================================================
     # UNIFIED MACRO BRIEFING — Market Analysis as the ecosystem's hub.
@@ -1323,6 +1757,8 @@ class HighFidelityAnalyticsEngine:
 
         snap["vixy_price"], snap["vixy_z"] = self.fetch_vixy_proxy()
         snap["credit_spread"] = float(self.db.get_state("credit_spread", 3.5))
+        snap["vrp"] = self.calculate_vrp("SPY")
+        snap["net_liquidity"] = self.calculate_net_liquidity()
         # Reuses TQQQ desk's daily-cached Nasdaq-100 breadth rather than re-fetching 10 symbols here.
         snap["breadth"] = float(self.db.get_state("tqqq_breadth_cache", 0.60))
 
@@ -1348,7 +1784,8 @@ class HighFidelityAnalyticsEngine:
             snap["crypto_mover"] = None
 
         # Composite directional score — simple, transparent, and auditable (not a black box):
-        # GEX regime + risk-on/off + breadth + vol-spike each contribute, capped at +/-4.
+        # GEX regime + risk-on/off + breadth + vol-spike + options OI skew + liquidity tide each
+        # contribute, capped at +/-6.
         score = 0
         if "POSITIVE" in snap["gex"]["market_state"]: score += 1
         elif "NEGATIVE" in snap["gex"]["market_state"]: score -= 1
@@ -1357,15 +1794,68 @@ class HighFidelityAnalyticsEngine:
         if snap["breadth"] >= 0.70: score += 1
         elif snap["breadth"] < 0.35: score -= 2
         if snap["vixy_z"] >= 1.5: score -= 1
+        if "CALL-HEAVY" in snap["gex"].get("pc_tag", ""): score += 1
+        elif "PUT-HEAVY" in snap["gex"].get("pc_tag", ""): score -= 1
+        if snap["net_liquidity"]["trend"] == "🟢 EXPANDING": score += 1
+        elif snap["net_liquidity"]["trend"] == "🔴 DRAINING": score -= 1
         snap["conviction_score"] = score
         snap["conviction_bias"] = "🟢 BULLISH" if score >= 2 else ("🔴 BEARISH" if score <= -2 else "🟡 NEUTRAL/CHOP")
+
+        # Cross-channel flags — a one-line callout pulled from cheap already-written DB state when
+        # another channel's gatekeeper has fired something significant today. Market Analysis reads
+        # these, it never re-runs the other channels' logic (per the "don't back into other
+        # channels" design — it calls out, the dedicated channel carries the depth).
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        flags = []
+        cornerstone_rank = int(self.db.get_state("cornerstone_alert_tier_rank", 0))
+        if cornerstone_rank >= 1:
+            flags.append(f"🏛️ Cornerstone: {'CRITICAL' if cornerstone_rank == 2 else 'ELEVATED'} RO risk active — see #cornerstone")
+        if self.db.get_state(f"market_analysis_morning_call_{today_str}") and snap.get("breadth", 1.0) < 0.35:
+            flags.append("🎯 TQQQ: Breadth collapse — sniper desk standing down on calls, see #trade-signals")
+        put = self.db.get_state("tqqq_insurance_put")
+        if put:
+            try:
+                dte = (datetime.strptime(put["expiration"], "%Y-%m-%d").date() - datetime.now().date()).days
+                if dte <= 3:
+                    flags.append(f"🛡️ TQQQ insurance put expires in {dte}d — renew, see #trade-signals")
+            except Exception:
+                pass
+        snap["cross_channel_flags"] = flags
         return snap
 
     def generate_market_analysis_morning_report(self):
-        """Pre-open synthesis for scalpers/options traders — what happened overnight, what it means
-        for today. Stores today's directional call for the EOD accuracy reconciliation."""
+        """
+        Single pre-open report — the "so what" for the day, in one message. Folds in what used to
+        be three separate embeds (SPY primer, QQQ primer, morning brief) since they were all
+        describing the same overnight session from different angles. Stores today's directional
+        call + SPY/QQQ expected-move bounds for the EOD accuracy reconciliation.
+        """
         snap = self._gather_cross_asset_snapshot()
         today_str = datetime.now().strftime("%Y-%m-%d")
+
+        expected_moves = {}
+        for ticker in ("SPY", "QQQ"):
+            try:
+                quote = self._fetch_twelve_data_quotes([ticker]).get(ticker, {})
+                spot = float(quote.get("close", 0.0))
+                prev_close = float(quote.get("previous_close", spot))
+                daily_data = self._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "21"})
+                move_pct = 1.0
+                if daily_data and "values" in daily_data and len(daily_data["values"]) >= 11:
+                    closes = np.array([float(v["close"]) for v in daily_data["values"]], dtype=float)[::-1]
+                    returns = np.diff(closes) / closes[:-1]
+                    move_pct = float(np.std(returns[-20:]) * 100)
+                move_dollars = spot * (move_pct / 100)
+                upper, lower = spot + move_dollars, spot - move_dollars
+                self.db.update_state(f"{ticker}_expected_upper", upper)
+                self.db.update_state(f"{ticker}_expected_lower", lower)
+                gap_pct = ((spot - prev_close) / prev_close) * 100 if prev_close else 0.0
+                expected_moves[ticker] = {"spot": spot, "gap_pct": gap_pct, "upper": upper, "lower": lower}
+                if ticker == "SPY":
+                    self.db.update_state(f"market_prediction_SPY_{today_str}", upper if gap_pct > 0 else lower)
+            except Exception as e:
+                logger.error(f"Expected-move calc failed for {ticker}: {e}")
+
         self.db.update_state(f"market_analysis_morning_call_{today_str}", {
             "bias": snap["conviction_bias"], "score": snap["conviction_score"], "spot": snap["gex"]["current_spot"],
         })
@@ -1375,17 +1865,34 @@ class HighFidelityAnalyticsEngine:
             sym, price, _, pct = snap["crypto_mover"]
             crypto_line = f"┣ Crypto Overnight Mover: {sym} `{pct:+.2f}%` | Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap["fng"] else f"┣ Crypto Overnight Mover: {sym} `{pct:+.2f}%`\n"
 
+        moves_line = ""
+        for ticker, m in expected_moves.items():
+            moves_line += f"┣ {ticker} Expected Range: `${m['lower']:,.2f}` – `${m['upper']:,.2f}` (gap {m['gap_pct']:+.2f}%)\n"
+
+        flags_line = ""
+        if snap["cross_channel_flags"]:
+            flags_line = "┣ Cross-Channel: " + " | ".join(snap["cross_channel_flags"]) + "\n"
+
+        directive = (
+            'Favor long delta into strength; positive gamma should dampen downside.' if snap['conviction_score'] >= 2 else
+            ('Favor defined-risk/short delta; negative gamma + weak breadth raises whipsaw odds.' if snap['conviction_score'] <= -2 else
+             'No clean edge — size down, trade the range, wait for a confirming break of overnight VAH/VAL.')
+        )
+
         payload = (
             f"🌅 **MARKET ANALYSIS | MORNING BRIEF — Pre-Open Conviction**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"┣ Overnight Futures ({snap['futures_session']}): SPY POC `${snap['futures_poc']:,.2f}` | VAH `${snap['futures_vah']:,.2f}` | VAL `${snap['futures_val']:,.2f}`\n"
-            f"┣ Gamma Regime: {snap['gex']['market_state']} | Flip `${snap['gex']['flip_strike']:,.2f}` | SPY `${snap['gex']['current_spot']:,.2f}`\n"
+            f"{moves_line}"
+            f"┣ Gamma Regime: {snap['gex']['market_state']} | Flip `${snap['gex']['flip_strike']:,.2f}` | P/C OI: `{snap['gex']['pc_oi_ratio']:.2f}` ({snap['gex']['pc_tag']})\n"
             f"┣ Volatility: VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ) | Nasdaq-100 Breadth: `{snap['breadth']:.0%}`\n"
             f"┣ Macro: Synthetic Dollar Index `{snap['synthetic_dxy']:+.2f}%` | {snap['risk_regime']} ({snap['risk_explanation']})\n"
-            f"┣ Credit Stress (HY Spread): `{snap['credit_spread']:.2f}%`\n"
+            f"┣ Credit Stress (HY Spread): `{snap['credit_spread']:.2f}%` | Net Liquidity: `${snap['net_liquidity']['net_liquidity']/1e9:,.0f}B` ({snap['net_liquidity']['trend']})\n"
+            f"┣ VRP (SPY): IV `{snap['vrp']['iv']:.1f}%` vs RV `{snap['vrp']['hv30']:.1f}%` = `{snap['vrp']['vrp']:+.1f}` — {snap['vrp']['regime']}\n"
             f"{crypto_line}"
-            f"┗ **TODAY'S CONVICTION: {snap['conviction_bias']}** (score {snap['conviction_score']:+d}/4)\n\n"
-            f"Scalper/Options Directive: {'Favor long delta into strength; positive gamma should dampen downside.' if snap['conviction_score'] >= 2 else ('Favor defined-risk/short delta; negative gamma + weak breadth raises whipsaw odds.' if snap['conviction_score'] <= -2 else 'No clean edge — size down, trade the range, wait for a confirming break of overnight VAH/VAL.')}"
+            f"{flags_line}"
+            f"┗ **TODAY'S CONVICTION: {snap['conviction_bias']}** (score {snap['conviction_score']:+d}/6)\n\n"
+            f"Directive: {directive}"
         )
         return payload, snap
 
@@ -1418,29 +1925,66 @@ class HighFidelityAnalyticsEngine:
         return payload
 
     def generate_market_analysis_eod_report(self):
-        """End-of-day recap: what happened, what the indicators said, and how the morning call did."""
+        """
+        Single EOD message — folds in what used to be three separate embeds (standalone SPY tape
+        audit, standalone QQQ tape audit, and a third "recap" that re-embedded the SPY audit again)
+        plus the VIX CVR reversal signal, so the channel gets one recap instead of four messages.
+        """
         snap = self._gather_cross_asset_snapshot()
         today_str = datetime.now().strftime("%Y-%m-%d")
         morning_call = self.db.get_state(f"market_analysis_morning_call_{today_str}")
-        eod_core = self.generate_eod_reconciliation("SPY")
+
+        boundary_lines = ""
+        for ticker in ("SPY", "QQQ"):
+            try:
+                data = self._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "1"})
+                candle = data["values"][0]
+                high, low, close = float(candle["high"]), float(candle["low"]), float(candle["close"])
+                exp_upper = float(self.db.get_state(f"{ticker}_expected_upper", close * 1.01))
+                exp_lower = float(self.db.get_state(f"{ticker}_expected_lower", close * 0.99))
+                breached_upper, breached_lower = high > exp_upper, low < exp_lower
+                if breached_upper and breached_lower:
+                    verdict = "🌪️ WHIPSAW"
+                elif breached_upper:
+                    verdict = "🔥 BULLISH BREAKOUT"
+                elif breached_lower:
+                    verdict = "🩸 BEARISH BREAKDOWN"
+                else:
+                    verdict = "🔒 CONTAINED"
+                boundary_lines += f"┣ {ticker}: Close `${close:,.2f}` | Range `${low:,.2f}`–`${high:,.2f}` vs Expected `${exp_lower:,.2f}`–`${exp_upper:,.2f}` — {verdict}\n"
+            except Exception as e:
+                logger.error(f"EOD boundary audit failed for {ticker}: {e}")
+
+        vix_signal = self.evaluate_vix_cvr_reversal()
+        vix_line = f"┣ VIX CVR Reversal: `{vix_signal['signal']}` ({vix_signal['condition']})\n" if vix_signal else ""
+
+        flags_line = ""
+        if snap["cross_channel_flags"]:
+            flags_line = "┣ Cross-Channel: " + " | ".join(snap["cross_channel_flags"]) + "\n"
 
         call_review = ""
         if morning_call:
             correct = morning_call["bias"] == snap["conviction_bias"] or (morning_call["score"] * snap["conviction_score"]) > 0
-            call_review = (
-                f"\n\n📋 **Morning Call Review**\n"
-                f"┣ Called: {morning_call['bias']} (score {morning_call['score']:+d}) | Closed: {snap['conviction_bias']} (score {snap['conviction_score']:+d})\n"
-                f"┗ {'✅ Directionally correct' if correct else '❌ Missed — regime shifted intraday'}"
-            )
+            call_review = f"┗ Morning Call: Called {morning_call['bias']} → Closed {snap['conviction_bias']} — {'✅ Directionally correct' if correct else '❌ Missed, regime shifted intraday'}"
+        else:
+            call_review = "┗ No morning call on record today."
+
+        lesson = (
+            'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.'
+            if abs(snap['conviction_score']) >= 2 else
+            'Mixed signals across breadth/gamma/macro — a chop day. Capital preservation over forcing trades is the correct lesson.'
+        )
 
         payload = (
             f"🌆 **MARKET ANALYSIS | END-OF-DAY RECAP**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{eod_core or 'EOD reconciliation data unavailable.'}\n\n"
-            f"📊 **Closing Technicals & Lessons**\n"
-            f"┣ Final Gamma Regime: {snap['gex']['market_state']} | Breadth: `{snap['breadth']:.0%}` | VIXY z: `{snap['vixy_z']:+.2f}σ`\n"
-            f"┣ Macro Close: {snap['risk_regime']} | Credit Spread: `{snap['credit_spread']:.2f}%`\n"
-            f"┗ Lesson: {'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.' if abs(snap['conviction_score']) >= 2 else 'Mixed signals across breadth/gamma/macro — a chop day. Capital preservation over forcing trades is the correct lesson.'}"
+            f"{boundary_lines}"
+            f"┣ Final Gamma Regime: {snap['gex']['market_state']} | P/C OI: `{snap['gex']['pc_oi_ratio']:.2f}` ({snap['gex']['pc_tag']})\n"
+            f"┣ Breadth: `{snap['breadth']:.0%}` | VIXY z: `{snap['vixy_z']:+.2f}σ` | Macro: {snap['risk_regime']} | Credit Spread: `{snap['credit_spread']:.2f}%`\n"
+            f"┣ VRP (SPY): `{snap['vrp']['vrp']:+.1f}` ({snap['vrp']['regime']}) | Net Liquidity: `${snap['net_liquidity']['net_liquidity']/1e9:,.0f}B` ({snap['net_liquidity']['trend']})\n"
+            f"{vix_line}"
+            f"{flags_line}"
+            f"┣ Lesson: {lesson}\n"
             f"{call_review}"
         )
         return payload, snap
