@@ -495,7 +495,8 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          dark_pool_desc, premium_compression_desc,
                          macro_interp, ex_div_near, ro_season, crisis_day,
                          vixy_z, status, recommendation, verdict,
-                         income_note, s_net, alpha_drip, seasonal_caution) -> str:
+                         income_note, s_net, alpha_drip, seasonal_caution,
+                         y_dist=0.0) -> str:
     """
     Formats a single-ticker Cornerstone Pulse Report, mobile-first layout.
 
@@ -510,12 +511,17 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
     if status == "✅ STABLE":
+        # Separate N-2/RO from 13D/G holder change — they're different risk types and
+        # the 13D/G detection was added specifically as an early warning signal.
+        sec_n2_line   = "No N-2/RO filing"  if "N-2" not in sec_shield else sec_shield
+        holder_line   = "Clean"             if "13D" not in sec_shield and "13G" not in sec_shield else "⚠️ HOLDER CHANGE DETECTED"
         return (
             f"**{ticker} — {status}**\n"
-            f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
-            f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
-            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
-            f"┗ {income_note} — {recommendation}\n"
+            f"┣ SEC: {sec_n2_line} | Holder (13D/G): {holder_line}\n"
+            f"┣ Premium to NAV: {premium:.2f}% {prem_tag} | Z-Score: {z_premium:+.1f}σ {z_tag}\n"
+            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier}) | Whale Flow: {whale_status}\n"
+            f"┣ RSI (1D): {rsi:.1f} {rsi_tag} | Dist. Yield: {y_dist:.1f}%\n"
+            f"┗ DRIP Alpha: +{alpha_drip:.2f}% — {income_note} ✓\n"
         )
 
     seasonal_line      = "┣ ⚠️ Seasonal Caution: Active (March/Sept historically weak)\n" if seasonal_caution else ""
@@ -676,7 +682,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         crisis_day=crisis_day, vixy_z=vixy_z, status=status,
         recommendation=recommendation, verdict=verdict,
         income_note=income_note, s_net=s_net, alpha_drip=alpha_drip,
-        seasonal_caution=seasonal_caution
+        seasonal_caution=seasonal_caution, y_dist=y_dist
     )
     return report_text, ro_tier, ro_score
 
