@@ -209,30 +209,43 @@ def check_sec_edgar(session, ticker):
 # TWELVE DATA — LIVE METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_live_metrics(session, symbol):
-    try:
-        p_res  = session.get(
-            f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}",
-            timeout=10).json()
-        price  = float(p_res.get('price', 0.0))
+def fetch_live_metrics(session, symbol, retries=2):
+    """
+    One retry with a short backoff before giving up — a single transient blip or
+    rate-limit on the first ticker in the loop (CLM runs before CRF, back-to-back,
+    no delay) was previously enough to report "Data feed offline" even though the
+    very next ticker succeeded seconds later. A real outage still surfaces after
+    both attempts fail.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            p_res  = session.get(
+                f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}",
+                timeout=10).json()
+            price  = float(p_res.get('price', 0.0))
+            if price == 0.0:
+                raise ValueError(f"price came back 0.0: {p_res}")
 
-        rsi    = 50.0
-        if price > 0:
+            rsi    = 50.0
             r_res = session.get(
                 f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day"
                 f"&time_period=14&apikey={TD_API_KEY}", timeout=10).json()
             rsi   = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
 
-        nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
-        nav_res    = session.get(
-            f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
-            timeout=10).json()
-        nav        = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
+            nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
+            nav_res    = session.get(
+                f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
+                timeout=10).json()
+            nav        = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
 
-        return price, rsi, nav
-    except Exception as e:
-        logger.error(f"[Data Fetch Error] {e}")
-        return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
+            return price, rsi, nav
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(2)
+    logger.error(f"[Data Fetch Error] {symbol} failed after {retries} attempts: {last_err}")
+    return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
 
 def fetch_time_series(session, symbol, outputsize=21):
     """Returns list of daily close dicts from Twelve Data, newest first."""
@@ -484,17 +497,31 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          vixy_z, status, recommendation, verdict,
                          income_note, s_net, alpha_drip, seasonal_caution) -> str:
     """
-    Formats a single-ticker Cornerstone Pulse Report in the standardized
-    mobile-first layout. All data points visible; final verdict at bottom.
+    Formats a single-ticker Cornerstone Pulse Report, mobile-first layout.
+
+    STABLE gets a condensed report — the core numbers (price/NAV/premium/RO score)
+    plus the status line, since the recommendation and verdict text are static
+    boilerplate when nothing's wrong and don't change the reader's action.
+    ELEVATED/CRITICAL/dark-pool/compression statuses get the full diagnostic
+    breakdown, since at that point every signal matters for the decision.
     """
+    prem_tag  = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else "(DISCOUNT)")
+    rsi_tag   = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else "(OVERSOLD)")
+    z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
+
+    if status == "✅ STABLE":
+        return (
+            f"**{ticker} — {status}**\n"
+            f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
+            f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
+            f"┗ {income_note} — {recommendation}\n"
+        )
+
     seasonal_line      = "┣ ⚠️ Seasonal Caution: Active (March/Sept historically weak)\n" if seasonal_caution else ""
     ex_div_line        = "┣ Ex-Div Window: Active (scheduled dip — not RO-related)\n"     if ex_div_near      else ""
     ro_season_line     = "┣ RO Filing Season: Active (mid-Feb to mid-Apr)\n"               if ro_season        else ""
     crisis_line        = f"┣ Market Stress: 🔴 CRISIS (VIXY z {vixy_z:+.2f}σ)\n"         if crisis_day       else ""
-
-    prem_tag  = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else "(DISCOUNT)")
-    rsi_tag   = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else "(OVERSOLD)")
-    z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
     return (
         f"**{ticker} — {status}**\n"
