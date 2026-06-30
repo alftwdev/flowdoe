@@ -40,7 +40,7 @@ BREADTH_COLLAPSE = 0.35    # % of top-10 QQQ holdings above their own 200D SMA
 BREADTH_STRONG = 0.70
 VIX_CRISIS_Z = 1.5         # VIXY z-score vs its own 20D mean — see fetch_vix() note on why
 RISK_FREE_RATE = 0.045
-LIVE_SIGNAL_COOLDOWN_DAYS = 5  # operator wants sniper entries weekly at most, not daily spam
+LIVE_SIGNAL_COOLDOWN_DAYS = 5  # retained for reference, no longer used as a gate — see execute_sniper_sweep
 
 
 def is_market_hours():
@@ -658,6 +658,7 @@ class TQQQTacticalSniper:
                 logger.error(f"TQQQ ledger grading failed: {e}")
 
         db.update_state("tqqq_open_position", None)
+        db.update_state("tqqq_last_dispatched_state", None)  # cleared so next entry signal fires fresh
 
     def dispatch_market_outlook(self, daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily=None):
         """
@@ -810,56 +811,31 @@ class TQQQTacticalSniper:
 
         setup = self.evaluate_snipe(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq)
 
-        # Sniper discipline: never stack a second entry while one is already open, and never fire
-        # LIVE execution more often than the operator's weekly cadence — both downgrade to a quiet
-        # MONITORING note rather than a full alert, so the setup is still visible in logs without
-        # spamming the channel.
-        if setup and setup["action"] != "MONITORING SETUP":
-            if db.get_state("tqqq_open_position"):
-                setup["action"] = "MONITORING SETUP"
-                setup["downgrade_reason"] = "POSITION_ALREADY_OPEN"
-            else:
-                last_live = db.get_state("tqqq_last_live_signal_date")
-                if last_live:
-                    days_since = (datetime.now().date() - datetime.strptime(last_live, "%Y-%m-%d").date()).days
-                    if days_since < LIVE_SIGNAL_COOLDOWN_DAYS:
-                        setup["action"] = "MONITORING SETUP"
-                        setup["downgrade_reason"] = f"WEEKLY_COOLDOWN ({LIVE_SIGNAL_COOLDOWN_DAYS - days_since}d remaining)"
+        # Position guard: never stack a second entry while already in a trade — we're riding
+        # the wave, not layering risk. Silently stand down (no channel noise while in position).
+        if setup and setup["action"] != "MONITORING SETUP" and db.get_state("tqqq_open_position"):
+            logger.info(f"Position already open — standing down, riding existing trade")
+            return
 
         if setup:
-            # Monitoring-only 4-hour directional cooldown — prevents the same mean-reversion PUT/CALL
-            # setup re-firing every sweep while z-score stays elevated (confirmed live: 3 near-identical
-            # monitoring signals in 30 min). Live signals bypass this gate since they are already
-            # controlled by the 5-day LIVE_SIGNAL_COOLDOWN_DAYS.
-            is_monitoring = setup["action"] == "MONITORING SETUP"
-            monitor_key = f"tqqq_last_monitor_{setup['contract'].lower()}"
-            if is_monitoring:
-                last_monitor = db.get_state(monitor_key)
-                if last_monitor:
-                    try:
-                        hours_since = (datetime.now() - datetime.fromisoformat(last_monitor)).total_seconds() / 3600
-                        if hours_since < 4.0:
-                            logger.info(f"Monitoring cooldown active ({hours_since:.1f}h < 4h) — suppressing {setup['contract']} monitoring signal")
-                            return
-                    except Exception:
-                        pass
+            # Fire once per distinct setup — dispatch only when direction or action level changes.
+            # Identical setup persisting across sweeps means we're already in or watching it;
+            # re-broadcasting the same contract every 5 minutes is noise, not signal.
+            # State encodes direction + whether it's a live entry or monitoring-only:
+            #   "BTO_CALL", "BTO_PUT", "MON_CALL", "MON_PUT"
+            # A MONITORING → BTO upgrade on the same contract IS a new state and fires.
+            # Position close clears this key so the next entry fires cleanly.
+            action_tag = "BTO" if setup["action"] != "MONITORING SETUP" else "MON"
+            setup_state = f"{action_tag}_{setup['contract']}"
+            last_state = db.get_state("tqqq_last_dispatched_state")
+            if setup_state == last_state:
+                logger.info(f"Setup unchanged ({setup_state}) — already dispatched, standing by for regime change")
+                return
 
-            alert_id = "tqqq_sniper_flow"
-            # Bucketed to the nearest 0.5σ, not 0.1σ — a Z-score slowly drifting -2.35 -> -2.64 ->
-            # -2.58 -> -2.55 -> -2.69 over an hour rounded to four DIFFERENT 0.1-precision state
-            # keys, which reset the 3-strike gatekeeper's "this is a new event" branch almost every
-            # sweep instead of recognizing it as the same ongoing setup — confirmed live, this fired
-            # 5 nearly-identical alerts in under an hour. Coarser bucketing collapses genuine noise
-            # in an unchanged regime into the same state so the strike-limit actually applies.
-            z_bucket = round(setup['z_score'] * 2) / 2
-            state_string = f"ACT_{setup['action'][:3]}_Z_{z_bucket}_CON_{setup['contract']}"
-            if db.track_and_limit_alerts(
-                alert_id, state_string, setup['tqqq_spot'],
-                max_broadcasts=3, threshold_pct=0.01
-            ):
-                if is_monitoring:
-                    db.update_state(monitor_key, datetime.now().isoformat())
-                self.dispatch_intelligence(setup, tqqq_daily)
+            db.update_state("tqqq_last_dispatched_state", setup_state)
+            if action_tag == "BTO":
+                db.update_state("tqqq_last_live_signal_date", datetime.now().strftime("%Y-%m-%d"))
+            self.dispatch_intelligence(setup, tqqq_daily)
         else:
             self.dispatch_market_outlook(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily)
 
