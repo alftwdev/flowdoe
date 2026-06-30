@@ -387,9 +387,9 @@ class HighFidelityAnalyticsEngine:
             return None
 
     def generate_macro_liquidity_payload(self, is_test=False):
-        fed_assets = self._fetch_fred_metric("WALCL") / 1000 
-        tga = self._fetch_fred_metric("WTREGEN")
-        rev_repo = self._fetch_fred_metric("RRPONTSYD")
+        fed_assets = self._fetch_fred_metric("WALCL") / 1000   # millions → billions
+        tga = self._fetch_fred_metric("WTREGEN") / 1000        # millions → billions
+        rev_repo = self._fetch_fred_metric("RRPONTSYD")        # already in billions
         credit_spread = self._fetch_fred_metric("BAMLH0A0HYM2")
 
         if fed_assets == 0.0 or tga == 0.0: return None
@@ -1935,6 +1935,7 @@ class HighFidelityAnalyticsEngine:
         morning_call = self.db.get_state(f"market_analysis_morning_call_{today_str}")
 
         boundary_lines = ""
+        boundary_verdicts = []
         for ticker in ("SPY", "QQQ"):
             try:
                 data = self._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "1"})
@@ -1951,6 +1952,7 @@ class HighFidelityAnalyticsEngine:
                     verdict = "🩸 BEARISH BREAKDOWN"
                 else:
                     verdict = "🔒 CONTAINED"
+                boundary_verdicts.append(verdict)
                 boundary_lines += f"┣ {ticker}: Close `${close:,.2f}` | Range `${low:,.2f}`–`${high:,.2f}` vs Expected `${exp_lower:,.2f}`–`${exp_upper:,.2f}` — {verdict}\n"
             except Exception as e:
                 logger.error(f"EOD boundary audit failed for {ticker}: {e}")
@@ -1969,11 +1971,20 @@ class HighFidelityAnalyticsEngine:
         else:
             call_review = "┗ No morning call on record today."
 
-        lesson = (
-            'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.'
-            if abs(snap['conviction_score']) >= 2 else
-            'Mixed signals across breadth/gamma/macro — a chop day. Capital preservation over forcing trades is the correct lesson.'
-        )
+        bullish_breakouts = boundary_verdicts.count("🔥 BULLISH BREAKOUT")
+        bearish_breakdowns = boundary_verdicts.count("🩸 BEARISH BREAKDOWN")
+        if bullish_breakouts == 2:
+            lesson = 'Both SPY and QQQ broke above expected ranges — textbook bullish expansion. Bias long on pullbacks to VWAP tomorrow.'
+        elif bearish_breakdowns == 2:
+            lesson = 'Both SPY and QQQ broke below expected ranges — distribution confirmed. Defensive posture; avoid new longs until breadth recovers.'
+        elif bullish_breakouts == 1:
+            lesson = 'Index divergence today — one broke out, one held range. Watch the laggard; divergence typically resolves in the breakout direction.'
+        elif bearish_breakdowns == 1:
+            lesson = 'One index cracked its floor while the other held — mixed tape. Risk management over new entries until both indexes align.'
+        elif abs(snap['conviction_score']) >= 2:
+            lesson = 'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.'
+        else:
+            lesson = 'Both indexes held within expected ranges — a contained, low-volatility session. No directional edge; capital preservation is correct.'
 
         payload = (
             f"🌆 **MARKET ANALYSIS | END-OF-DAY RECAP**\n"

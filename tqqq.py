@@ -432,6 +432,11 @@ class TQQQTacticalSniper:
         elif abs(z_score) >= 1.8:
             action = "MONITORING SETUP"
             contract = "CALL" if z_score < 0 else "PUT"
+            # In a bull regime, a positive z-score means QQQ is extended above VWAP —
+            # normal on strong up-days. Only flag mean-reversion PUT if truly extreme (≥3.0σ),
+            # otherwise the signal fires every time the market rallies with conviction.
+            if contract == "PUT" and macro_bull and z_score < 3.0:
+                return None
         else:
             return None
 
@@ -822,6 +827,23 @@ class TQQQTacticalSniper:
                         setup["downgrade_reason"] = f"WEEKLY_COOLDOWN ({LIVE_SIGNAL_COOLDOWN_DAYS - days_since}d remaining)"
 
         if setup:
+            # Monitoring-only 4-hour directional cooldown — prevents the same mean-reversion PUT/CALL
+            # setup re-firing every sweep while z-score stays elevated (confirmed live: 3 near-identical
+            # monitoring signals in 30 min). Live signals bypass this gate since they are already
+            # controlled by the 5-day LIVE_SIGNAL_COOLDOWN_DAYS.
+            is_monitoring = setup["action"] == "MONITORING SETUP"
+            monitor_key = f"tqqq_last_monitor_{setup['contract'].lower()}"
+            if is_monitoring:
+                last_monitor = db.get_state(monitor_key)
+                if last_monitor:
+                    try:
+                        hours_since = (datetime.now() - datetime.fromisoformat(last_monitor)).total_seconds() / 3600
+                        if hours_since < 4.0:
+                            logger.info(f"Monitoring cooldown active ({hours_since:.1f}h < 4h) — suppressing {setup['contract']} monitoring signal")
+                            return
+                    except Exception:
+                        pass
+
             alert_id = "tqqq_sniper_flow"
             # Bucketed to the nearest 0.5σ, not 0.1σ — a Z-score slowly drifting -2.35 -> -2.64 ->
             # -2.58 -> -2.55 -> -2.69 over an hour rounded to four DIFFERENT 0.1-precision state
@@ -835,6 +857,8 @@ class TQQQTacticalSniper:
                 alert_id, state_string, setup['tqqq_spot'],
                 max_broadcasts=3, threshold_pct=0.01
             ):
+                if is_monitoring:
+                    db.update_state(monitor_key, datetime.now().isoformat())
                 self.dispatch_intelligence(setup, tqqq_daily)
         else:
             self.dispatch_market_outlook(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily)
