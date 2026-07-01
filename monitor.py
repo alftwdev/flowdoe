@@ -365,8 +365,8 @@ def detect_dark_pool_activity(session, symbol):
             vol_ratio  <= DARK_POOL_VOLUME_RATIO_MAX
         )
         desc = (
-            f"Price {price_chg:+.2f}% on {vol_ratio:.2f}x public vol — "
-            f"{'🕵️ POSSIBLE DARK POOL / OFF-EXCHANGE EXIT' if is_dark_pool else 'normal flow'}"
+            f"{'🕵️ ' if is_dark_pool else ''}{price_chg:+.1f}% / {vol_ratio:.2f}x vol — "
+            f"{'OFF-EXCHANGE EXIT SIGNAL' if is_dark_pool else 'normal'}"
         )
         return is_dark_pool, price_chg, vol_ratio, desc
     except Exception as e:
@@ -396,8 +396,8 @@ def detect_premium_compression(current_premium: float, ticker: str) -> tuple:
 
         is_compressed = delta <= PREMIUM_COMPRESSION_THRESHOLD
         desc = (
-            f"Premium Δ {delta:+.2f}% session-over-session — "
-            f"{'🔴 FAST COMPRESSION DETECTED (possible institutional exit)' if is_compressed else 'normal drift'}"
+            f"{'🔴 ' if is_compressed else ''}Δ {delta:+.2f}% — "
+            f"{'FAST COMPRESSION' if is_compressed else 'stable'}"
         )
         return is_compressed, delta, desc
     except Exception as e:
@@ -552,8 +552,6 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         f"{ro_season_line}"
         f"{seasonal_line}"
         f"{crisis_line}"
-        f"┣ Income Phase: {income_note}\n"
-        f"┣ Action: {recommendation}\n"
         f"┗ Verdict: {verdict}\n"
     )
 
@@ -620,9 +618,9 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     avg_cef_chg     = price_chg  # single ticker; caller averages across both if needed
     macro_underperf = (spy_chg < -0.5) and (avg_cef_chg < spy_chg - 1.0)
     macro_interp    = (
-        f"CLM/CRF {avg_cef_chg:+.2f}% vs SPY {spy_chg:+.2f}% — "
-        f"{'⚠️ CEF underperforming — CEF-specific risk present' if macro_underperf else 'tracking market, macro drag only'}"
-    ) if spy_chg != 0.0 else "SPY data unavailable"
+        f"{'⚠️ ' if macro_underperf else ''}{avg_cef_chg:+.1f}% vs SPY {spy_chg:+.1f}% — "
+        f"{'CEF underperforming' if macro_underperf else 'tracking market'}"
+    ) if spy_chg != 0.0 else "SPY unavailable"
 
     # ── NEW: 13F / large holder exit signal from SEC scrape
     holder_exit = "13D" in sec_shield or "13G" in sec_shield

@@ -257,7 +257,9 @@ def generate_line_comparison_chart(series_dict, title, lookback=90):
         if s.empty or s.iloc[0] == 0:
             continue
         rebased = (s / s.iloc[0]) * 100
-        ax.plot(rebased.index, rebased.values, label=label, color=palette[i % len(palette)], linewidth=1.5)
+        # Explicit numpy conversion — newer numpy dropped obj[:, None] indexing that
+        # matplotlib's internal reshaping used to rely on when given a pandas Series.
+        ax.plot(rebased.index.to_numpy(), rebased.to_numpy(), label=label, color=palette[i % len(palette)], linewidth=1.5)
 
     ax.axhline(100, color="#30363d", linewidth=0.8, linestyle="--")
     ax.set_title(title, color="white", fontsize=11)
