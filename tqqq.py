@@ -776,6 +776,101 @@ class TQQQTacticalSniper:
                     send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "🛡️ TQQQ INSURANCE PUT | RENEWAL DUE", payload, 0xf39c12)
                     logger.info(f"Insurance put renewal alert dispatched at {dte} DTE.")
 
+    def check_wave_position_status(self, tqqq_spot: float):
+        """
+        3-day wave check-in while a BTO position is open — not a new signal, just a status
+        update so the user knows the wave is still intact without having to re-read the entry.
+        Fires only if: (a) position is open, (b) ≥3 days since last update,
+        (c) TQQQ has moved ≥3% from last update price (avoids noise on flat days).
+        """
+        position = db.get_state("tqqq_open_position")
+        if not position or tqqq_spot == 0.0:
+            return
+
+        last_update_str  = db.get_state("tqqq_wave_last_update_date", "")
+        last_update_price = float(db.get_state("tqqq_wave_last_update_price", tqqq_spot))
+        today_str        = datetime.now().strftime("%Y-%m-%d")
+
+        if last_update_str:
+            days_since = (datetime.strptime(today_str, "%Y-%m-%d") - datetime.strptime(last_update_str, "%Y-%m-%d")).days
+            if days_since < 3:
+                return
+        move_pct = abs((tqqq_spot - last_update_price) / last_update_price * 100) if last_update_price else 0.0
+        if move_pct < 3.0 and last_update_str:
+            return  # flat days — skip the check-in
+
+        # Compute wave stats
+        entry_price = position.get("entry_tqqq_spot", tqqq_spot)
+        entry_time  = position.get("entry_time", today_str)
+        contract    = position.get("contract", "?")
+        strike      = position.get("strike") or 0.0
+        expiry      = position.get("expiry") or "?"
+        dte_entry   = position.get("dte_at_entry", 0)
+
+        try:
+            entry_dt  = datetime.fromisoformat(entry_time)
+            day_n     = (datetime.now() - entry_dt).days + 1
+        except Exception:
+            day_n = "?"
+
+        pnl_proxy     = (tqqq_spot - entry_price) / entry_price * 100 if entry_price else 0.0
+        if contract == "PUT":
+            pnl_proxy *= -1
+
+        # Estimate DTE remaining from entry DTE and days held
+        dte_remaining = max(0, dte_entry - (day_n if isinstance(day_n, int) else 0))
+
+        if dte_remaining <= 14:
+            status_tag = "⚠️ 14DTE ALERT — Consider rolling or closing"
+        elif pnl_proxy >= 90.0:
+            status_tag = "🎯 APPROACHING TARGET — Watch for exit signal"
+        elif pnl_proxy <= -30.0:
+            status_tag = "🔴 STOP ZONE — Review position"
+        else:
+            status_tag = "🌊 RIDING"
+
+        payload = (
+            f"**TQQQ WAVE — Day {day_n}**\n"
+            f"┣ Position: BTO {contract} | Strike `${strike:.2f}` | Exp `{expiry}`\n"
+            f"┣ Entry: `${entry_price:.2f}` → Now: `${tqqq_spot:.2f}` ({pnl_proxy:+.1f}% underlying move)\n"
+            f"┣ Est. DTE Remaining: ~{dte_remaining} days\n"
+            f"┗ Status: {status_tag}"
+        )
+        if WEBHOOK_TRADE_SIGNALS:
+            color = 0x2ecc71 if pnl_proxy >= 0 else 0xe74c3c
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ WAVE UPDATE", payload, color)
+        db.update_state("tqqq_wave_last_update_date", today_str)
+        db.update_state("tqqq_wave_last_update_price", tqqq_spot)
+        logger.info(f"Wave status update dispatched — Day {day_n}, {pnl_proxy:+.1f}%.")
+
+    def check_regime_flip(self, qqq_spot: float, sma200: float):
+        """
+        When the macro regime flips BULL↔BEAR (QQQ crosses its 200 SMA), dispatch a brief
+        regime-change note — not a trade signal, just a heads-up that a new wave direction
+        may be forming. Rate-limited to 1 per calendar day (regimes don't flip hourly).
+        """
+        current_regime = "BULL" if qqq_spot > sma200 else "BEAR"
+        prev_regime    = db.get_state("tqqq_macro_regime", "")
+
+        if prev_regime and prev_regime != current_regime:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            flip_key  = f"tqqq_regime_flip_{today_str}"
+            if not db.get_state(flip_key, ""):
+                db.update_state(flip_key, "fired")
+                dist_pct = (qqq_spot / sma200 - 1) * 100
+                payload = (
+                    f"**Macro Regime: {prev_regime} → {current_regime}**\n"
+                    f"┣ QQQ: `${qqq_spot:.2f}` vs 200 SMA: `${sma200:.2f}` ({dist_pct:+.2f}%)\n"
+                    f"┣ Wave Direction: {'BULLISH — watch for CALL setup' if current_regime == 'BULL' else 'BEARISH — watch for PUT setup'}\n"
+                    f"┗ Not a signal yet — monitoring for wave setup conditions..."
+                )
+                if WEBHOOK_TRADE_SIGNALS:
+                    color = 0x2ecc71 if current_regime == "BULL" else 0xe74c3c
+                    send_essentials_embed(WEBHOOK_TRADE_SIGNALS, f"⚡ REGIME FLIP: {prev_regime} → {current_regime}", payload, color)
+                logger.info(f"Regime flip alert dispatched: {prev_regime} → {current_regime}.")
+
+        db.update_state("tqqq_macro_regime", current_regime)
+
     def execute_sniper_sweep(self):
         if not is_market_hours():
             logger.info("Market closed — TQQQ sniper standing down.")
@@ -793,6 +888,13 @@ class TQQQTacticalSniper:
 
         # Exits take priority over new entries every sweep.
         self.check_open_position_for_exit(intraday, atr_pct_tqqq)
+
+        # Wave status check-in (3-day cadence, only when position is open).
+        tqqq_spot_now = float(tqqq_daily["close"].iloc[-1]) if tqqq_daily is not None and not tqqq_daily.empty else 0.0
+        self.check_wave_position_status(tqqq_spot_now)
+
+        # Regime flip detection (silent except on actual BULL/BEAR crossing).
+        self.check_regime_flip(daily.get("spot", 0.0), daily.get("sma200", 0.0))
 
         # Defensive sweep: a position that's gone 25+ days without a natural exit trigger (e.g. a
         # script restart lost the open-position state's exit watch) shouldn't sit ungraded forever —

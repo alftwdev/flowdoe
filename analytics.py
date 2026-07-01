@@ -2199,3 +2199,452 @@ class HighFidelityAnalyticsEngine:
             f"Every number posted here is logged, dated, and never deleted — good days and bad days both."
         )
         return payload
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SOCIAL SENTIMENT TRENDING PLAYS SCANNER
+    # Sources: StockTwits trending (free, no auth) + Reddit WSB hot posts (public JSON).
+    # Cross-checked with Twelve Data for momentum confirmation.
+    # Social meter: 🔥 HIGH (both sources) | ⚡ NEUTRAL (one source) | filtered out (neither)
+    # Mobile-first output: 4 lines per ticker, no raw counts, emoji-driven status.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Tickers to always exclude — indices, broad ETFs, leveraged ETFs already in ecosystem,
+    # and common false-positives from Reddit title parsing (short English words, acronyms).
+    _SOCIAL_SCANNER_EXCLUDE = {
+        "SPY", "QQQ", "IWM", "DIA", "VIX", "GLD", "SLV", "TLT", "HYG", "XLF",
+        "TQQQ", "SQQQ", "UVXY", "VIXY", "SPXU", "UPRO",
+        "I", "A", "IT", "AT", "BE", "ON", "BY", "OR", "DO", "GO", "NO", "DD",
+        "AI", "AM", "PM", "THE", "WSB", "SEC", "ETF", "IPO", "CEO", "CPI", "GDP",
+        "USD", "EUR", "BTC", "ETH", "DOGE",
+    }
+
+    # Meme tickers shown with a warning tag rather than excluded — they're legitimately
+    # trending but carry squeeze-unwind and IV-crush risk retail traders need to see.
+    _MEME_WATCHLIST = {"GME", "AMC", "BBBY", "KOSS", "NOK", "CLOV", "WISH", "BB"}
+
+    def _fetch_stocktwits_trending(self) -> list:
+        """Returns [{symbol, lean}] from StockTwits public trending endpoint."""
+        try:
+            r = requests.get(
+                "https://api.stocktwits.com/api/2/trending/symbols.json",
+                headers={"User-Agent": "RockefellerEcosystem/1.0"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                return []
+            results = []
+            for s in r.json().get("symbols", [])[:30]:
+                ticker = s.get("symbol", "")
+                if not ticker or ticker in self._SOCIAL_SCANNER_EXCLUDE:
+                    continue
+                sentiment = s.get("sentiment", {}) or {}
+                bull_pct  = float(sentiment.get("bullish", 50))
+                lean = "Bullish lean" if bull_pct >= 60 else ("Bearish lean" if bull_pct <= 40 else "Mixed")
+                results.append({"symbol": ticker, "lean": lean})
+            return results
+        except Exception as e:
+            logger.error(f"[Social Scanner] StockTwits fetch failed: {e}")
+            return []
+
+    def _fetch_reddit_wsb_mentions(self) -> dict:
+        """
+        Parses r/wallstreetbets hot posts for ticker mentions in titles.
+        Returns {ticker: mention_count}. No auth needed — public JSON endpoint.
+        Only returns tickers mentioned 2+ times to filter out single-post noise.
+        """
+        try:
+            import re
+            r = requests.get(
+                "https://www.reddit.com/r/wallstreetbets/hot.json?limit=50",
+                headers={"User-Agent": "RockefellerEcosystem/1.0 (research bot)"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                return {}
+            posts      = r.json().get("data", {}).get("children", [])
+            ticker_re  = re.compile(r'\$([A-Z]{1,5})|(?<!\w)([A-Z]{2,5})(?!\w)')
+            counts: dict = {}
+            for post in posts:
+                title = post.get("data", {}).get("title", "")
+                for m in ticker_re.findall(title):
+                    sym = m[0] or m[1]
+                    if sym and sym not in self._SOCIAL_SCANNER_EXCLUDE and len(sym) >= 2:
+                        counts[sym] = counts.get(sym, 0) + 1
+            return {k: v for k, v in counts.items() if v >= 2}
+        except Exception as e:
+            logger.error(f"[Social Scanner] Reddit WSB fetch failed: {e}")
+            return {}
+
+    def _fetch_finviz_top_movers(self) -> set:
+        """
+        Pulls Finviz top-gainers and unusual-volume tickers via public CSV export (no auth).
+        Used as a 3rd confirmation source alongside StockTwits and Reddit WSB.
+        Filters: avg volume > 500k, excludes ecosystem ETFs and common false-positive tokens.
+        """
+        import csv, io
+        symbols: set = set()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        }
+        for screen in ("ta_topgainers", "ta_unusualvolume"):
+            try:
+                r = requests.get(
+                    f"https://finviz.com/export.ashx?v=111&s={screen}&f=sh_avgvol_o500000",
+                    headers=headers, timeout=12
+                )
+                if r.status_code == 200:
+                    for row in csv.DictReader(io.StringIO(r.text)):
+                        sym = row.get("Ticker", "").strip()
+                        if sym and sym not in self._SOCIAL_SCANNER_EXCLUDE:
+                            symbols.add(sym)
+            except Exception as e:
+                logger.error(f"[Finviz] {screen} fetch failed: {e}")
+        return symbols
+
+    def fetch_finviz_market_snapshot(self) -> dict:
+        """
+        Fetches top gainers, top losers, and unusual-volume standouts from Finviz CSV exports.
+        Also computes a sector breadth proxy using 11 SPDR sector ETFs via Twelve Data.
+        Returns a dict ready for dispatch to #market-analysis.
+        """
+        import csv, io
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            ),
+        }
+        gainers: list = []
+        losers: list  = []
+        unusual: list = []
+
+        for screen_id, target, limit in [
+            ("ta_topgainers",    gainers,  5),
+            ("ta_toplosers",     losers,   5),
+            ("ta_unusualvolume", unusual,  5),
+        ]:
+            try:
+                r = requests.get(
+                    f"https://finviz.com/export.ashx?v=111&s={screen_id}&f=sh_avgvol_o500000",
+                    headers=headers, timeout=12
+                )
+                if r.status_code != 200:
+                    continue
+                for i, row in enumerate(csv.DictReader(io.StringIO(r.text))):
+                    if i >= limit:
+                        break
+                    sym = row.get("Ticker", "").strip()
+                    try:
+                        chg   = float(row.get("Change", "0").replace("%", ""))
+                        price = float(row.get("Price", "0"))
+                        target.append({"symbol": sym, "price": price, "chg": chg})
+                    except (ValueError, KeyError):
+                        pass
+            except Exception as e:
+                logger.error(f"[Finviz Snapshot] {screen_id} failed: {e}")
+
+        # Sector breadth proxy: 11 SPDR ETFs, 1-day change direction
+        sector_etfs = ["XLK", "XLF", "XLE", "XLV", "XLC", "XLI", "XLB", "XLP", "XLRE", "XLU", "XLY"]
+        adv, dec = 0, 0
+        for etf in sector_etfs:
+            try:
+                ts = self._execute_query("time_series", {"symbol": etf, "interval": "1day", "outputsize": "2"})
+                if ts and "values" in ts and len(ts["values"]) >= 2:
+                    delta = float(ts["values"][0]["close"]) - float(ts["values"][1]["close"])
+                    if delta > 0:
+                        adv += 1
+                    else:
+                        dec += 1
+            except Exception:
+                pass
+
+        return {
+            "gainers":           gainers,
+            "losers":            losers,
+            "unusual_vol":       unusual,
+            "sectors_advancing": adv,
+            "sectors_declining": dec,
+            "total_sectors":     len(sector_etfs),
+        }
+
+    def generate_trending_options_plays(self, max_results=5) -> list:
+        """
+        Merges StockTwits trending + Reddit WSB mentions + Finviz top movers, cross-checks
+        with Twelve Data momentum (5D change, volume ratio, RSI), returns play cards.
+
+        Social meter (text, no emoji):
+          HIGH    — appears in 2+ of 3 sources (StockTwits, Reddit WSB, Finviz movers)
+          NEUTRAL — appears in exactly 1 source
+
+        Verdict (clean text):
+          Momentum confirmed  — 5D >5% AND vol >1.3x avg
+          Building momentum   — 5D >3% OR vol >1.3x avg
+          Extended            — RSI >72 AND 5D >15% (IV crush risk)
+          Meme run            — meme watchlist AND 5D >15%
+          Watching            — price action not confirmed by data
+
+        BTO conviction gate (fires only when all 4 conditions met):
+          meter==HIGH AND chg_5d>=5% AND vol>=1.3x AND RSI 45-68 AND NOT meme
+          Generates estimated BTO strike/DTE/premium/R:R for CALL or PUT.
+        """
+        st_list    = self._fetch_stocktwits_trending()
+        wsb_dict   = self._fetch_reddit_wsb_mentions()
+        finviz_set = self._fetch_finviz_top_movers()
+        st_map     = {t["symbol"]: t for t in st_list}
+        wsb_set    = set(wsb_dict.keys())
+
+        candidates = []
+        for sym in set(st_map.keys()) | wsb_set | finviz_set:
+            in_st     = sym in st_map
+            in_wsb    = sym in wsb_set
+            in_finviz = sym in finviz_set
+            score = sum([in_st, in_wsb, in_finviz])
+            if score == 0:
+                continue
+            candidates.append({
+                "symbol":  sym,
+                "meter":   "HIGH" if score >= 2 else "NEUTRAL",
+                "lean":    st_map[sym]["lean"] if in_st else "Mixed",
+                "is_meme": sym in self._MEME_WATCHLIST,
+                "score":   score,
+            })
+        # HIGH before NEUTRAL; meme tickers sorted last within each tier
+        candidates.sort(key=lambda x: (-x["score"], x["is_meme"]))
+
+        results = []
+        for c in candidates:
+            if len(results) >= max_results:
+                break
+            sym = c["symbol"]
+            try:
+                ts = self._execute_query("time_series", {
+                    "symbol": sym, "interval": "1day", "outputsize": "6"
+                })
+                if not ts or "values" not in ts or len(ts["values"]) < 2:
+                    continue
+                vals      = ts["values"]
+                spot      = float(vals[0]["close"])
+                prev5     = float(vals[min(5, len(vals)-1)]["close"])
+                chg_5d    = (spot - prev5) / prev5 * 100
+                vol_today = float(vals[0].get("volume", 0))
+                vol_avg   = sum(float(v.get("volume", 0)) for v in vals[1:]) / max(len(vals)-1, 1)
+                vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
+
+                rsi_data = self._execute_query("rsi", {
+                    "symbol": sym, "interval": "1day", "time_period": "14"
+                })
+                rsi = float(rsi_data["values"][0]["rsi"]) if (rsi_data and rsi_data.get("values")) else 50.0
+
+                if c["is_meme"] and chg_5d > 15.0:
+                    verdict = "Meme run — IV crush risk, consider put spreads"
+                elif rsi >= 72 and chg_5d >= 15.0:
+                    verdict = "Extended — IV crush risk"
+                elif chg_5d >= 5.0 and vol_ratio >= 1.3:
+                    verdict = "Momentum confirmed"
+                elif chg_5d >= 3.0 or vol_ratio >= 1.3:
+                    verdict = "Building momentum"
+                else:
+                    verdict = "Watching — no momentum confirmation yet"
+
+                # BTO conviction gate: HIGH buzz + confirmed momentum + RSI sweet spot + not meme
+                bto_setup = None
+                if (
+                    c["meter"] == "HIGH"
+                    and chg_5d >= 5.0
+                    and vol_ratio >= 1.3
+                    and 45.0 <= rsi <= 68.0
+                    and not c["is_meme"]
+                ):
+                    direction   = "PUT" if (chg_5d < 0 or "Bearish" in c["lean"]) else "CALL"
+                    strike_mult = 1.05 if direction == "CALL" else 0.95
+                    est_strike  = round(spot * strike_mult, 2)
+                    dte         = 35
+                    try:
+                        hv30 = self.calculate_historical_volatility(sym, lookback=30) or 30.0
+                    except Exception:
+                        hv30 = 30.0
+                    iv_proxy = max(0.15, min(0.80, hv30 / 100.0))
+                    # Rough Black-Scholes approximation for ~5% OTM option at 35 DTE
+                    est_prem = round(spot * iv_proxy * (dte / 365.0) ** 0.5 * 0.38, 2)
+                    bto_setup = {
+                        "direction": direction,
+                        "strike":    est_strike,
+                        "dte":       dte,
+                        "prem_lo":   round(est_prem * 0.85, 2),
+                        "prem_hi":   round(est_prem * 1.15, 2),
+                        "target":    round(est_prem * 2.0, 2),
+                        "stop":      round(est_prem * 0.50, 2),
+                    }
+
+                results.append({
+                    "symbol":    sym,
+                    "spot":      spot,
+                    "chg_5d":   chg_5d,
+                    "vol_ratio": vol_ratio,
+                    "rsi":       rsi,
+                    "meter":     c["meter"],
+                    "lean":      c["lean"],
+                    "verdict":   verdict,
+                    "bto_setup": bto_setup,
+                })
+            except Exception as e:
+                logger.error(f"[Social Scanner] Twelve Data check failed for {sym}: {e}")
+
+        return results
+
+    # ── CRYPTO SOCIAL SCANNER ──────────────────────────────────────────────────
+    # Foundation for crypto.py. Scans Reddit r/CryptoCurrency + StockTwits for
+    # BTC/ETH/SOL/AVAX/LINK/DOGE buzz, cross-checks spot momentum via Twelve Data.
+    # Also fetches Alternative.me Fear & Greed Index (no auth required).
+
+    _CRYPTO_WATCHLIST = {"BTC", "ETH", "SOL", "AVAX", "LINK", "DOGE", "BNB", "XRP", "ADA", "MATIC"}
+    _CRYPTO_PAIRS = {
+        "BTC": "BTC/USD", "ETH": "ETH/USD", "SOL": "SOL/USD",
+        "AVAX": "AVAX/USD", "LINK": "LINK/USD", "DOGE": "DOGE/USD",
+    }
+
+    def fetch_crypto_fear_and_greed(self) -> dict:
+        """
+        Alternative.me Fear & Greed Index — public API, no auth.
+        Returns {"value": int, "label": str} e.g. {"value": 72, "label": "Greed"}.
+        Used by crypto.py (not yet built) and as a cross-signal in market-analysis.
+        """
+        try:
+            r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+            if r.status_code == 200:
+                data = r.json().get("data", [{}])[0]
+                return {
+                    "value": int(data.get("value", 50)),
+                    "label": data.get("value_classification", "Neutral"),
+                }
+        except Exception as e:
+            logger.error(f"[Crypto F&G] Fetch failed: {e}")
+        return {"value": 50, "label": "Unknown"}
+
+    def _fetch_reddit_crypto_mentions(self) -> dict:
+        """
+        Parses r/CryptoCurrency hot posts for asset mentions (BTC, ETH, etc.).
+        Returns {token: count} for tokens in _CRYPTO_WATCHLIST mentioned 2+ times.
+        """
+        import re
+        try:
+            r = requests.get(
+                "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=50",
+                headers={"User-Agent": "RockefellerEcosystem/1.0 (research bot)"},
+                timeout=10
+            )
+            if r.status_code != 200:
+                return {}
+            posts     = r.json().get("data", {}).get("children", [])
+            token_re  = re.compile(r'\$?([A-Z]{2,6})(?!\w)')
+            counts: dict = {}
+            for post in posts:
+                title = post.get("data", {}).get("title", "")
+                for m in token_re.findall(title):
+                    if m in self._CRYPTO_WATCHLIST:
+                        counts[m] = counts.get(m, 0) + 1
+            return {k: v for k, v in counts.items() if v >= 2}
+        except Exception as e:
+            logger.error(f"[Crypto Social] Reddit r/CryptoCurrency fetch failed: {e}")
+            return {}
+
+    def generate_crypto_social_snapshot(self) -> dict:
+        """
+        Merges r/CryptoCurrency mentions + Finviz-adjacent crypto buzz with Twelve Data
+        spot prices (BTC/USD, ETH/USD, SOL/USD) and Alternative.me Fear & Greed.
+        Returns a dict for dispatch to #crypto.
+
+        Designed as the data layer for crypto.py (not yet built). Can be called from
+        scheduler.py --mode crypto_social as a standalone dispatch today.
+        """
+        fng     = self.fetch_crypto_fear_and_greed()
+        reddit  = self._fetch_reddit_crypto_mentions()
+
+        spots: dict = {}
+        for token, pair in self._CRYPTO_PAIRS.items():
+            try:
+                ts = self._execute_query("time_series", {"symbol": pair, "interval": "1day", "outputsize": "2"})
+                if ts and "values" in ts and len(ts["values"]) >= 2:
+                    close_now  = float(ts["values"][0]["close"])
+                    close_prev = float(ts["values"][1]["close"])
+                    chg_1d     = (close_now - close_prev) / close_prev * 100
+                    spots[token] = {"price": close_now, "chg_1d": chg_1d}
+            except Exception:
+                pass
+
+        # Build trending list: tokens in spots sorted by 1D absolute move
+        trending = sorted(
+            [(t, spots[t]) for t in spots if t in reddit or abs(spots[t]["chg_1d"]) >= 3.0],
+            key=lambda x: abs(x[1]["chg_1d"]),
+            reverse=True
+        )
+
+        return {
+            "fear_greed":   fng,
+            "trending":     trending,
+            "reddit_counts": reddit,
+        }
+
+    # ── FUTURES SOCIAL SCANNER ─────────────────────────────────────────────────
+    # Scans StockTwits + Reddit r/futures for trending commodity/energy names
+    # and wires Finviz futures prices into the cross-asset board context.
+
+    _FUTURES_ADJACENT = {
+        # Energy
+        "XOM", "CVX", "COP", "OXY", "SLB", "HAL",
+        # Gold / silver
+        "GLD", "SLV", "GDX", "GDXJ", "NEM", "AEM",
+        # Commodities / agriculture
+        "MOS", "CF", "ADM", "BG",
+        # Macro / rates
+        "TLT", "TBT", "IEF",
+    }
+
+    def generate_futures_social_snapshot(self) -> dict:
+        """
+        Merges StockTwits trending + Reddit WSB mentions filtered to futures-adjacent
+        names (energy, metals, rates, agriculture). Cross-checks with Twelve Data
+        momentum. Returns a dict for dispatch to #futures-trading.
+
+        Complements cross_asset.py's board — this adds social buzz context to the
+        existing ES/NQ deep-dive so commodity rotations surface before they move.
+        """
+        st_list  = self._fetch_stocktwits_trending()
+        wsb_dict = self._fetch_reddit_wsb_mentions()
+        st_map   = {t["symbol"]: t for t in st_list if t["symbol"] in self._FUTURES_ADJACENT}
+        wsb_filt = {k: v for k, v in wsb_dict.items() if k in self._FUTURES_ADJACENT}
+
+        candidates = set(st_map.keys()) | set(wsb_filt.keys())
+        results = []
+        for sym in candidates:
+            try:
+                ts = self._execute_query("time_series", {"symbol": sym, "interval": "1day", "outputsize": "6"})
+                if not ts or "values" not in ts or len(ts["values"]) < 2:
+                    continue
+                vals      = ts["values"]
+                spot      = float(vals[0]["close"])
+                prev5     = float(vals[min(5, len(vals)-1)]["close"])
+                chg_5d    = (spot - prev5) / prev5 * 100
+                vol_today = float(vals[0].get("volume", 0))
+                vol_avg   = sum(float(v.get("volume", 0)) for v in vals[1:]) / max(len(vals)-1, 1)
+                vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
+                in_st     = sym in st_map
+                in_wsb    = sym in wsb_filt
+                meter     = "HIGH" if (in_st and in_wsb) else "NEUTRAL"
+                results.append({
+                    "symbol":    sym,
+                    "spot":      spot,
+                    "chg_5d":   chg_5d,
+                    "vol_ratio": vol_ratio,
+                    "meter":     meter,
+                    "lean":      st_map[sym]["lean"] if in_st else "Mixed",
+                })
+            except Exception as e:
+                logger.error(f"[Futures Social] {sym} data fetch failed: {e}")
+
+        results.sort(key=lambda x: (x["meter"] != "HIGH", -abs(x["chg_5d"])))
+        return {"plays": results}

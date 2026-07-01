@@ -77,7 +77,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "finviz_snapshot", "crypto_social", "futures_social"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -283,6 +283,43 @@ def main():
                     send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS DESK | Pre-Market Conditions Brief", options_brief, 0x00ffff)
             except Exception as e:
                 logger.error(f"Morning options brief failed: {e}")
+
+            # ── FINVIZ MARKET SNAPSHOT (bundled into morning — no separate cron slot needed) ──
+            try:
+                snap = engine.fetch_finviz_market_snapshot()
+                today_label = datetime.now().strftime("%b %-d")
+
+                def _mover_line(m):
+                    arrow = "▲" if m["chg"] >= 0 else "▼"
+                    return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
+
+                gainers_str = "  ".join(_mover_line(m) for m in snap["gainers"]) or "—"
+                losers_str  = "  ".join(_mover_line(m) for m in snap["losers"])  or "—"
+                unusual_str = "  ".join(_mover_line(m) for m in snap["unusual_vol"]) or "—"
+                adv = snap["sectors_advancing"]
+                dec = snap["sectors_declining"]
+                tot = snap["total_sectors"]
+                breadth_bar = "▲" * adv + "▼" * dec
+
+                snap_payload = (
+                    f"**MARKET SNAPSHOT — {today_label}**\n\n"
+                    f"**Sector Breadth**\n"
+                    f"┣ {breadth_bar}\n"
+                    f"┗ {adv}/{tot} sectors advancing\n\n"
+                    f"**Top Gainers**\n"
+                    f"┗ {gainers_str}\n\n"
+                    f"**Top Losers**\n"
+                    f"┗ {losers_str}\n\n"
+                    f"**Unusual Volume**\n"
+                    f"┗ {unusual_str}\n\n"
+                    f"─────────────────────────\n"
+                    f"Source: Finviz · SPDR sector ETFs\n"
+                    f"Not financial advice — for informational/educational use only."
+                )
+                if WEBHOOK_MARKET:
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | Finviz Snapshot", snap_payload, 0x2ecc71)
+            except Exception as e:
+                logger.error(f"Morning Finviz snapshot failed: {e}")
 
             logger.info("Morning primers successfully compiled and dispatched.")
 
@@ -589,13 +626,24 @@ def main():
                                     f"┣ Premium: `${csp['premium']*100:.0f}/contract` | Volume: `{csp['volume']:,}` | OI Range `{csp['oi_low']:,}`–`{csp['oi_high']:,}`\n"
                                 )
                             div_line = ""
+                            assigned_line = ""
                             if f.get("div_yield") is not None:
                                 div_line = f"┣ Dividend: Yield `{f['div_yield']:.1f}%` | {f['div_freq']} | Amount `${f['div_amount']:.4f}`/share\n"
+                                # If assigned, show combined premium + dividend return for the monthly wheel
+                                if f.get("div_freq") == "Monthly" and csp and csp.get("premium") and csp.get("strike"):
+                                    premium_yield = (csp["premium"] / csp["strike"]) * 100
+                                    monthly_div_yield = f["div_yield"] / 12
+                                    combined_monthly = premium_yield + monthly_div_yield
+                                    assigned_line = (
+                                        f"┣ 💰 If Assigned: `${f['div_amount']:.4f}`/share/mo ({f['div_yield']:.1f}% annual) — keep earning while selling CCs\n"
+                                        f"┣ Combined Return: Premium `{premium_yield:.2f}%` + Div `{monthly_div_yield:.2f}%` = `{combined_monthly:.2f}%`/mo\n"
+                                    )
                             ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | IVR Proxy: `{f['ivr_proxy']:.0f}%`\n"
                                 f"{setup_line}"
                                 f"{div_line}"
+                                f"{assigned_line}"
                                 f"┗ Spread Check: `{f['spread_pct']:.1f}%` of mid | Earnings Window: Clear\n\n"
                             )
                         ivr_payload += "Directive: Premium-selling environment is favorable — screen for CSP entries on these names."
@@ -826,6 +874,182 @@ def main():
                     # Assign dynamic color depending on execution bias direction
                     dp_color = 0x2ecc71 if "BULLISH" in block_data['direction'].upper() else 0xe74c3c
                     send_essentials_embed(WEBHOOK_OPTIONS, f"DARK POOL RADAR: {sym}", payload, dp_color)
+
+        elif args.mode == "trending_plays":
+            # ── SOCIAL SENTIMENT TRENDING OPTIONS PLAYS ─────────────────────
+            # Sources: StockTwits + Reddit WSB + Finviz top movers/unusual volume (3-source scoring).
+            # Meter: HIGH = 2+ sources | NEUTRAL = 1 source.
+            # BTO conviction block fires when HIGH + momentum confirmed + RSI 45-68 + not meme.
+            # Run once per trading session — e.g. 09:30 ET after open.
+            try:
+                plays = engine.generate_trending_options_plays(max_results=5)
+                if not plays:
+                    logger.info("Trending plays: no qualifying plays found this session.")
+                else:
+                    today_label = datetime.now().strftime("%b %-d")
+                    payload = f"**TRENDING OPTIONS PLAYS — {today_label}**\n\n"
+                    for p in plays:
+                        chg_arrow = "▲" if p["chg_5d"] >= 0 else "▼"
+                        bto = p.get("bto_setup")
+                        bto_block = ""
+                        if bto:
+                            bto_block = (
+                                f"┣ BTO {bto['direction']} | Strike ~${bto['strike']:.2f} | {bto['dte']} DTE\n"
+                                f"┣ Est. ${bto['prem_lo']:.2f}–${bto['prem_hi']:.2f}/contract (verify live chain)\n"
+                                f"┣ Target +100% (~${bto['target']:.2f}) | Stop -50% (~${bto['stop']:.2f})\n"
+                                f"┣ R/R 2:1\n"
+                            )
+                        payload += (
+                            f"**{p['symbol']}** `${p['spot']:.2f}`  "
+                            f"{chg_arrow} {abs(p['chg_5d']):.1f}% (5D)\n"
+                            f"┣ Buzz: {p['meter']} · {p['lean']}\n"
+                            f"┣ Vol: {p['vol_ratio']:.1f}x avg · RSI {p['rsi']:.0f}\n"
+                            f"{bto_block}"
+                            f"┗ {p['verdict']}\n\n"
+                        )
+                    payload += (
+                        "─────────────────────────\n"
+                        "Not financial advice — for informational/educational use only."
+                    )
+                    if WEBHOOK_OPTIONS:
+                        send_essentials_embed(
+                            WEBHOOK_OPTIONS,
+                            "OPTIONS DESK | Trending Plays",
+                            payload, 0x9b59b6
+                        )
+                        logger.info(f"Trending plays dispatched: {len(plays)} plays.")
+            except Exception as e:
+                logger.error(f"Trending plays scanner failed: {e}")
+
+        elif args.mode == "finviz_snapshot":
+            # ── FINVIZ MARKET SNAPSHOT → #market-analysis ────────────────────
+            # Top 5 gainers, top 5 losers, top 5 unusual volume (Finviz CSV export).
+            # Sector breadth proxy: 11 SPDR ETFs advancing vs declining.
+            # Run alongside the morning report or as a standalone mid-session refresh.
+            try:
+                snap = engine.fetch_finviz_market_snapshot()
+                today_label = datetime.now().strftime("%b %-d")
+
+                def _mover_line(m):
+                    arrow = "▲" if m["chg"] >= 0 else "▼"
+                    return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
+
+                gainers_str = "  ".join(_mover_line(m) for m in snap["gainers"]) or "—"
+                losers_str  = "  ".join(_mover_line(m) for m in snap["losers"])  or "—"
+                unusual_str = "  ".join(_mover_line(m) for m in snap["unusual_vol"]) or "—"
+                adv, dec, tot = snap["sectors_advancing"], snap["sectors_declining"], snap["total_sectors"]
+                breadth_bar = "▲" * adv + "▼" * dec
+                breadth_pct = f"{adv}/{tot} sectors advancing"
+
+                payload = (
+                    f"**MARKET SNAPSHOT — {today_label}**\n\n"
+                    f"**Sector Breadth**\n"
+                    f"┣ {breadth_bar}\n"
+                    f"┗ {breadth_pct}\n\n"
+                    f"**Top Gainers**\n"
+                    f"┗ {gainers_str}\n\n"
+                    f"**Top Losers**\n"
+                    f"┗ {losers_str}\n\n"
+                    f"**Unusual Volume**\n"
+                    f"┗ {unusual_str}\n\n"
+                    f"─────────────────────────\n"
+                    f"Source: Finviz · SPDR sector ETFs\n"
+                    f"Not financial advice — for informational/educational use only."
+                )
+
+                if WEBHOOK_MARKET:
+                    send_essentials_embed(
+                        WEBHOOK_MARKET,
+                        "MARKET ANALYSIS | Finviz Snapshot",
+                        payload, 0x2ecc71
+                    )
+                    logger.info("Finviz market snapshot dispatched to #market-analysis.")
+            except Exception as e:
+                logger.error(f"Finviz snapshot failed: {e}")
+
+        elif args.mode == "crypto_social":
+            # ── CRYPTO SOCIAL SNAPSHOT → #crypto ─────────────────────────────
+            # Alternative.me Fear & Greed + r/CryptoCurrency hot mentions +
+            # Twelve Data spot (BTC/ETH/SOL/AVAX/LINK/DOGE). Foundation layer for
+            # crypto.py. Dispatches standalone until crypto.py is built.
+            try:
+                snap    = engine.generate_crypto_social_snapshot()
+                fng     = snap["fear_greed"]
+                today_l = datetime.now().strftime("%b %-d")
+
+                fng_bar = ""
+                v = fng["value"]
+                if v <= 25:
+                    fng_bar = "Extreme Fear"
+                elif v <= 45:
+                    fng_bar = "Fear"
+                elif v <= 55:
+                    fng_bar = "Neutral"
+                elif v <= 75:
+                    fng_bar = "Greed"
+                else:
+                    fng_bar = "Extreme Greed"
+
+                payload = f"**CRYPTO SOCIAL SCAN — {today_l}**\n\n"
+                payload += f"**Fear & Greed:** {fng['value']}/100 — {fng_bar}\n\n"
+
+                if snap["trending"]:
+                    payload += "**Trending Assets**\n"
+                    for token, data in snap["trending"][:6]:
+                        arrow = "▲" if data["chg_1d"] >= 0 else "▼"
+                        buzz  = " · Reddit buzz" if token in snap["reddit_counts"] else ""
+                        payload += f"┣ `{token}` ${data['price']:,.2f} {arrow}{abs(data['chg_1d']):.1f}% (1D){buzz}\n"
+                    payload = payload.rstrip("┣ \n") + "\n"
+                else:
+                    payload += "No trending crypto assets with momentum this session.\n"
+
+                payload += (
+                    "\n─────────────────────────\n"
+                    "Sources: Alternative.me · Reddit r/CryptoCurrency · Twelve Data\n"
+                    "Not financial advice — for informational/educational use only."
+                )
+
+                if WEBHOOK_CRYPTO:
+                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social Scan", payload, 0xf39c12)
+                    logger.info("Crypto social snapshot dispatched.")
+            except Exception as e:
+                logger.error(f"Crypto social scan failed: {e}")
+
+        elif args.mode == "futures_social":
+            # ── FUTURES-ADJACENT SOCIAL SCAN → #futures-trading ──────────────
+            # StockTwits + Reddit WSB filtered to energy, metals, rates, ag names.
+            # Surfaces commodity rotations trending on social before they show up in
+            # price, as context for the ES/NQ deep-dive in cross_asset.py.
+            try:
+                snap    = engine.generate_futures_social_snapshot()
+                plays   = snap.get("plays", [])
+                today_l = datetime.now().strftime("%b %-d")
+
+                if not plays:
+                    logger.info("Futures social: no futures-adjacent names trending this session.")
+                else:
+                    payload = f"**COMMODITY / MACRO BUZZ — {today_l}**\n\n"
+                    for p in plays[:8]:
+                        arrow = "▲" if p["chg_5d"] >= 0 else "▼"
+                        payload += (
+                            f"**{p['symbol']}** `${p['spot']:.2f}` {arrow}{abs(p['chg_5d']):.1f}% (5D)\n"
+                            f"┣ Buzz: {p['meter']} · {p['lean']}\n"
+                            f"┗ Vol: {p['vol_ratio']:.1f}x avg\n\n"
+                        )
+                    payload += (
+                        "─────────────────────────\n"
+                        "Social overlay for #futures context — not a directional call.\n"
+                        "Not financial advice — for informational/educational use only."
+                    )
+                    if WEBHOOK_FUTURES:
+                        send_essentials_embed(
+                            WEBHOOK_FUTURES,
+                            "FUTURES DESK | Commodity & Macro Buzz",
+                            payload, 0xe67e22
+                        )
+                        logger.info(f"Futures social dispatched: {len(plays)} names.")
+            except Exception as e:
+                logger.error(f"Futures social scan failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

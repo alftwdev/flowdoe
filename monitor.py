@@ -99,6 +99,10 @@ DARK_POOL_VOLUME_RATIO_MAX = 0.75   # public vol must be < 75% of 20D avg to fla
 # that is NOT explained by NAV movement alone → institutional exit off-exchange.
 PREMIUM_COMPRESSION_THRESHOLD = -3.0  # % change in premium within one session
 
+# Todd Akin 30%+ premium = RO Watch threshold — historically this is when Cornerstone
+# announces the Rights Offering. N-2 filing on EDGAR follows the premium expansion.
+PREMIUM_RO_WATCH_THRESHOLD = 30.0
+
 # 3-notification rule: max 3 alerts per sector per rolling 24h window.
 # Minor changes are noted in DB but not broadcast. Next MAJOR update re-opens.
 ALERT_MAX_PER_SECTOR    = 3
@@ -120,6 +124,7 @@ RO_SCORE_WEIGHTS = {
     "premium_compression": 15,   # NEW: fast intra-session premium collapse
     "macro_underperform":  10,   # NEW: CLM/CRF drops harder than SPY same session
     "13f_holder_exit":     12,   # NEW: large holder SC 13D/G change detected
+    "premium_30pct_watch": 20,   # NEW: 30%+ premium crossed — Todd Akin RO Watch gate
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -184,7 +189,7 @@ def check_sec_edgar(session, ticker):
     headers = {'User-Agent': 'RockefellerSystem/1.0 (admin@rockefeller.local)'}
     try:
         url  = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        res  = session.get(url, headers=headers, timeout=10)
+        res  = session.get(url, headers=headers, timeout=20)
         if res.status_code != 200:
             return "No N2/RO detected"
 
@@ -209,20 +214,22 @@ def check_sec_edgar(session, ticker):
 # TWELVE DATA — LIVE METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_live_metrics(session, symbol, retries=2):
+def fetch_live_metrics(session, symbol, retries=3):
     """
-    One retry with a short backoff before giving up — a single transient blip or
-    rate-limit on the first ticker in the loop (CLM runs before CRF, back-to-back,
-    no delay) was previously enough to report "Data feed offline" even though the
-    very next ticker succeeded seconds later. A real outage still surfaces after
-    both attempts fail.
+    Three attempts with escalating backoff (2s, 5s) before giving up.
+    Twelve Data intermittently times out during peak market hours — a single
+    failure with no retry was causing false "Data feed offline" reports.
+    Timeout raised to 20s to handle slower responses during high-load windows.
     """
     last_err = None
+    backoff  = [0, 2, 5]
     for attempt in range(retries):
         try:
+            if backoff[attempt]:
+                time.sleep(backoff[attempt])
             p_res  = session.get(
                 f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}",
-                timeout=10).json()
+                timeout=20).json()
             price  = float(p_res.get('price', 0.0))
             if price == 0.0:
                 raise ValueError(f"price came back 0.0: {p_res}")
@@ -230,20 +237,18 @@ def fetch_live_metrics(session, symbol, retries=2):
             rsi    = 50.0
             r_res = session.get(
                 f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day"
-                f"&time_period=14&apikey={TD_API_KEY}", timeout=10).json()
+                f"&time_period=14&apikey={TD_API_KEY}", timeout=20).json()
             rsi   = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
 
             nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
             nav_res    = session.get(
                 f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
-                timeout=10).json()
+                timeout=20).json()
             nav        = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
 
             return price, rsi, nav
         except Exception as e:
             last_err = e
-            if attempt < retries - 1:
-                time.sleep(2)
     logger.error(f"[Data Fetch Error] {symbol} failed after {retries} attempts: {last_err}")
     return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
 
@@ -254,7 +259,7 @@ def fetch_time_series(session, symbol, outputsize=21):
             "https://api.twelvedata.com/time_series",
             params={"symbol": symbol, "interval": "1day",
                     "outputsize": outputsize, "apikey": TD_API_KEY},
-            timeout=10).json()
+            timeout=20).json()
         return res.get("values", [])
     except Exception as e:
         logger.error(f"[Time Series Fetch Error] {symbol}: {e}")
@@ -405,6 +410,70 @@ def detect_premium_compression(current_premium: float, ticker: str) -> tuple:
         return False, 0.0, "Error"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# NEW: RO COMPLETION DIP DETECTOR
+# After a confirmed N-2 event, watch for the post-RO price collapse back toward NAV.
+# That dip is the re-entry signal Todd Akin describes: "buy back when the company
+# says it's done." We can't scrape their press releases, but the signature is
+# recognizable: premium collapses from 20%+ back below 10% AND price is ≥10% off
+# its 60D high — that pattern reliably marks the post-RO bottom.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_ro_completion_dip(session, ticker, current_price, current_premium) -> bool:
+    """
+    Returns True (and dispatches a rebuy alert) when all three conditions are met:
+      1. N-2 was previously detected for this ticker (DB key set)
+      2. Premium has collapsed from >20% to <10% (post-RO dilution repricing)
+      3. Price is ≥10% below the 60D high (dip confirmed, not just sideways)
+    Fires once per RO cycle — cleared when conditions reset.
+    """
+    try:
+        n2_key        = f"cornerstone_n2_detected_{ticker}"
+        fired_key     = f"cornerstone_ro_dip_fired_{ticker}"
+        prev_n2       = db.get_state(n2_key, "")
+        already_fired = db.get_state(fired_key, "")
+
+        if not prev_n2 or already_fired:
+            return False
+
+        # Condition 2: premium collapsed back below 10%
+        if current_premium >= 10.0:
+            return False
+
+        # Condition 3: price ≥10% below 60D high
+        values = fetch_time_series(session, ticker, outputsize=60)
+        if len(values) < 10:
+            return False
+        high_60d = max(float(v["close"]) for v in values)
+        pct_below_high = ((high_60d - current_price) / high_60d) * 100
+        if pct_below_high < 10.0:
+            return False
+
+        # All conditions met — dispatch rebuy alert and mark as fired
+        db.update_state(fired_key, datetime.now().strftime("%Y-%m-%d"))
+        dip_msg = (
+            f"**{ticker} — 🟢 POST-RO DIP: REBUY ZONE**\n"
+            f"┣ Price: ${current_price:.2f} ({pct_below_high:.1f}% below 60D high)\n"
+            f"┣ Premium to NAV: {current_premium:.2f}% (was >20% during RO)\n"
+            f"┣ RO Cycle: N-2 was previously detected — price has repriced toward NAV\n"
+            f"┣ Signal: Premium collapse + price off high = classic post-RO dip pattern\n"
+            f"┣ ⚠️ Verify: Confirm Cornerstone announced 'RO complete' before acting\n"
+            f"┣ Action: Rebuy position + resume CS DRIP (call broker to confirm DRIP status)\n"
+            f"┗ Note: Keep ≥3 shares at all times to preserve NAV DRIP eligibility"
+        )
+        if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+            send_essentials_embed(
+                WEBHOOK_CORNERSTONE,
+                f"🟢 {ticker} — Post-RO Rebuy Zone Detected",
+                dip_msg, 0x2ecc71
+            )
+        logger.info(f"[RO Completion Dip] {ticker} — rebuy alert dispatched.")
+        return True
+
+    except Exception as e:
+        logger.error(f"[RO Completion Dip Error] {ticker}: {e}")
+        return False
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NEW: MACRO CROSS-CORRELATION ENGINE
 # CLM/CRF dropping harder than SPY on the same session = CEF-specific risk.
 # CLM/CRF dropping less than SPY = macro drag only, no action needed.
@@ -446,7 +515,8 @@ def calculate_ro_risk_score(
     sec_shield, z_premium, premium, whale_tag, credit_spread,
     ex_div_near, ro_season=False, crisis_day=False,
     dark_pool=False, premium_compressed=False,
-    macro_underperform=False, holder_exit=False
+    macro_underperform=False, holder_exit=False,
+    premium_30pct_watch=False
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -478,6 +548,8 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["macro_underperform"]
     if holder_exit:
         score += RO_SCORE_WEIGHTS["13f_holder_exit"]
+    if premium_30pct_watch:
+        score += RO_SCORE_WEIGHTS["premium_30pct_watch"]
     if ex_div_near and score > 0:
         score += RO_SCORE_WEIGHTS["ex_div_relief"]   # negative weight — schedules dip, not dilution
 
@@ -516,10 +588,12 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         # Clean = no entry/exit by a major holder detected in recent SEC filings.
         # A change here is an early warning — institutions move before price does.
         holder_line  = "Clean" if "13D" not in sec_shield and "13G" not in sec_shield else "⚠️ HOLDER CHANGE DETECTED"
+        ro_watch_line = f"┣ ⚠️ RO Watch: Premium at {premium:.1f}% — approaching 30% trigger\n" if premium >= PREMIUM_RO_WATCH_THRESHOLD else ""
         return (
             f"**{ticker} — {status}**\n"
             f"┣ SEC: {sec_n2_line}\n"
             f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+            f"{ro_watch_line}"
             f"┣ Whale Flow: {whale_status}\n"
             f"┣ Holder (13D/G): {holder_line}\n"
             f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
@@ -625,12 +699,56 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # ── NEW: 13F / large holder exit signal from SEC scrape
     holder_exit = "13D" in sec_shield or "13G" in sec_shield
 
+    # ── NEW: Track N-2 detection across cycles (used by RO completion dip detector)
+    n2_key = f"cornerstone_n2_detected_{ticker}"
+    if "N-2" in sec_shield:
+        if not db.get_state(n2_key, ""):
+            db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
+            # Reset the dip-fired flag when a new RO cycle starts
+            db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
+    else:
+        # N-2 no longer in recent filings — clear the cycle tracker
+        db.update_state(n2_key, "")
+
+    # ── NEW: RO completion dip detector (fires rebuy alert automatically)
+    detect_ro_completion_dip(session, ticker, price, premium)
+
+    # ── NEW: 30% premium RO Watch gate (Todd Akin threshold — RO "usually" announced here)
+    # Debounced: fires once when premium crosses 30%, resets when it drops back below 25%.
+    watch_key    = f"cornerstone_30pct_watch_active_{ticker}"
+    was_watching = db.get_state(watch_key, "")
+    premium_30pct_watch = False
+    if premium >= PREMIUM_RO_WATCH_THRESHOLD:
+        premium_30pct_watch = True
+        if not was_watching:
+            db.update_state(watch_key, "active")
+            watch_alert = (
+                f"**{ticker} — ⚠️ RO WATCH: 30%+ Premium Threshold Reached**\n"
+                f"┣ Premium to NAV: {premium:.2f}% (threshold: {PREMIUM_RO_WATCH_THRESHOLD:.0f}%)\n"
+                f"┣ Historical pattern: Cornerstone typically announces RO when premium hits 30%+\n"
+                f"┣ N-2 Filing: Not yet detected on EDGAR — but this is the early signal\n"
+                f"┣ Action: Monitor Cornerstone press releases + Seeking Alpha CLM/CRF comments\n"
+                f"┣ Prepare: If N-2 drops, sell to minimum 3 shares (to preserve CS DRIP status)\n"
+                f"┗ Do NOT sell yet — wait for N-2 confirmation before acting"
+            )
+            if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+                send_essentials_embed(
+                    WEBHOOK_CORNERSTONE,
+                    f"⚠️ {ticker} — 30% Premium RO Watch Active",
+                    watch_alert, 0xf39c12
+                )
+            logger.info(f"[30% RO Watch] {ticker} — premium {premium:.2f}% crossed threshold, watch alert dispatched.")
+    elif premium < 25.0 and was_watching:
+        # Premium retreated below 25% — reset the watch so it can fire again next cycle
+        db.update_state(watch_key, "")
+
     # ── RO composite risk score (upgraded with new signals)
     ro_score, ro_tier = calculate_ro_risk_score(
         sec_shield, z_premium, premium, whale_status, credit_spread,
         ex_div_near, ro_season=ro_season, crisis_day=crisis_day,
         dark_pool=is_dark_pool, premium_compressed=is_compressed,
-        macro_underperform=macro_underperf, holder_exit=holder_exit
+        macro_underperform=macro_underperf, holder_exit=holder_exit,
+        premium_30pct_watch=premium_30pct_watch
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
@@ -649,8 +767,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if "N-2" in sec_shield:
         status       = "🚨 CRITICAL: N-2 DETECTED"
         income_note  = "Distribution/Caution phase"
-        verdict      = "Active SEC N-2/RO filing detected. NAV dilution imminent."
-        recommendation = "Halt DRIP immediately; prepare protective hedge."
+        verdict      = "Active SEC N-2/RO filing detected. NAV dilution imminent. SELL to minimum 3 shares — keeping ≥3 shares preserves CS DRIP status permanently; going to zero forces you to re-apply."
+        recommendation = "Halt DRIP immediately; sell to 3-share floor; monitor Cornerstone press releases for 'RO complete' announcement."
     elif ro_tier == "CRITICAL":
         status       = "🚨 CRITICAL: RO RISK ELEVATED"
         income_note  = "Distribution/Caution phase"
@@ -704,9 +822,13 @@ def build_cornerstone_chart():
             price_df = engine.fetch_crypto_ohlc(ticker, outputsize=60)
             nav_df   = engine.fetch_crypto_ohlc(cfg["nav_ticker"], outputsize=60)
             if price_df is not None and not price_df.empty:
-                series[f"{ticker} Price"] = price_df["close"]
+                # Reset index + explicit float conversion before handing to matplotlib —
+                # newer numpy (2.0+) no longer supports obj[:, None] on pandas Series,
+                # which matplotlib uses internally. reset_index + astype ensures a clean
+                # RangeIndex float Series that matplotlib can handle without casting.
+                series[f"{ticker} Price"] = price_df["close"].reset_index(drop=True).astype(float)
             if nav_df is not None and not nav_df.empty:
-                series[f"{ticker} NAV"]   = nav_df["close"]
+                series[f"{ticker} NAV"]   = nav_df["close"].reset_index(drop=True).astype(float)
         if not series:
             return None
         return generate_line_comparison_chart(
@@ -785,7 +907,7 @@ def dispatch_cornerstone_alert(title, full_report, color, attach_chart=True):
                      "title": title, "message": clean_report, "priority": 0}
             files = {"attachment": ("cornerstone_chart.png", chart_bytes, "image/png")} if chart_bytes else None
             requests.post("https://api.pushover.net/1/messages.json",
-                          data=data, files=files, timeout=10)
+                          data=data, files=files, timeout=20)
             logger.info("Pushover notification dispatched.")
         except Exception as e:
             logger.error(f"Pushover dispatch failed: {e}")
