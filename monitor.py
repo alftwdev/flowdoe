@@ -511,17 +511,23 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
     if status == "✅ STABLE":
-        # Separate N-2/RO from 13D/G holder change — they're different risk types and
-        # the 13D/G detection was added specifically as an early warning signal.
-        sec_n2_line   = "No N-2/RO filing"  if "N-2" not in sec_shield else sec_shield
-        holder_line   = "Clean"             if "13D" not in sec_shield and "13G" not in sec_shield else "⚠️ HOLDER CHANGE DETECTED"
+        sec_n2_line  = "No N-2 filing/ RO detected" if "N-2" not in sec_shield else sec_shield
+        # 13D/G = large institutional holder (>5% ownership) filing a position change.
+        # Clean = no entry/exit by a major holder detected in recent SEC filings.
+        # A change here is an early warning — institutions move before price does.
+        holder_line  = "Clean" if "13D" not in sec_shield and "13G" not in sec_shield else "⚠️ HOLDER CHANGE DETECTED"
         return (
             f"**{ticker} — {status}**\n"
-            f"┣ SEC: {sec_n2_line} | Holder (13D/G): {holder_line}\n"
-            f"┣ Premium to NAV: {premium:.2f}% {prem_tag} | Z-Score: {z_premium:+.1f}σ {z_tag}\n"
-            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier}) | Whale Flow: {whale_status}\n"
-            f"┣ RSI (1D): {rsi:.1f} {rsi_tag} | Dist. Yield: {y_dist:.1f}%\n"
-            f"┗ DRIP Alpha: +{alpha_drip:.2f}% — {income_note} ✓\n"
+            f"┣ SEC: {sec_n2_line}\n"
+            f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+            f"┣ Whale Flow: {whale_status}\n"
+            f"┣ Holder (13D/G): {holder_line}\n"
+            f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
+            f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
+            f"┣ Dist. Yield: {y_dist:.1f}%\n"
+            f"┣ DRIP Alpha: +{alpha_drip:.2f}%\n"
+            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
+            f"┗ Verdict: {income_note} ✓\n"
         )
 
     seasonal_line      = "┣ ⚠️ Seasonal Caution: Active (March/Sept historically weak)\n" if seasonal_caution else ""
