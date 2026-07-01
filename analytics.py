@@ -2333,15 +2333,28 @@ class HighFidelityAnalyticsEngine:
                     headers=headers, timeout=12
                 )
                 if r.status_code != 200:
+                    logger.warning(f"[Finviz Snapshot] {screen_id} → HTTP {r.status_code}")
+                    continue
+                # Finviz returns an HTML page (login wall or "no data") outside market hours
+                # or when their export endpoint blocks the request. Detect by checking the
+                # first 60 chars of the response — a real CSV starts with "No.,Ticker,..."
+                preview = r.text.strip()[:60]
+                if preview.startswith("<") or "Ticker" not in r.text[:200]:
+                    logger.warning(f"[Finviz Snapshot] {screen_id} → non-CSV response (pre-market or blocked): {preview!r}")
                     continue
                 for i, row in enumerate(csv.DictReader(io.StringIO(r.text))):
                     if i >= limit:
                         break
                     sym = row.get("Ticker", "").strip()
+                    if not sym:
+                        continue
                     try:
-                        chg   = float(row.get("Change", "0").replace("%", ""))
-                        price = float(row.get("Price", "0"))
-                        target.append({"symbol": sym, "price": price, "chg": chg})
+                        raw_chg = row.get("Change", "0%").replace("%", "").strip()
+                        raw_prc = row.get("Price", "0").strip()
+                        chg   = float(raw_chg) if raw_chg else 0.0
+                        price = float(raw_prc) if raw_prc else 0.0
+                        if price > 0:
+                            target.append({"symbol": sym, "price": price, "chg": chg})
                     except (ValueError, KeyError):
                         pass
             except Exception as e:

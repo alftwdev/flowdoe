@@ -508,6 +508,119 @@ def check_macro_correlation(session, clm_chg: float, crf_chg: float) -> tuple:
         return False, 0.0, "Error"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ACCUMULATION READINESS — "DON'T CATCH A FALLING KNIFE" GUARD
+# Built to prevent the Feb/March 2026 pattern: broad market selloff drove
+# CLM/CRF prices down; adding margin too early amplified losses. The RO score
+# would have been LOW (no N-2, no dark pool trigger) so the STABLE report had
+# no "wait" signal. This function adds the missing macro regime layer.
+#
+# Three independent checks:
+#   1. Consecutive down days for this ticker (momentum direction)
+#   2. SPY vs 200 SMA (bull/bear macro regime) — passed in via shared cache
+#   3. VIXY z-score (fear level — already computed by check_crisis_amplification_risk)
+#
+# This does NOT affect the RO risk score — it's a separate capital-safety signal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_accumulation_readiness(session, ticker: str, vixy_z: float,
+                                  spy_vals_200: list = None) -> dict:
+    """
+    Returns a dict: {ready, status, detail, down_streak}.
+    Uses pre-fetched spy_vals_200 list (from shared cache) to avoid re-querying SPY.
+    Falls back to fetching SPY internally if cache is empty.
+    """
+    try:
+        # 1. Consecutive down days for this ticker (last 10 closes)
+        values = fetch_time_series(session, ticker, outputsize=10)
+        down_streak = 0
+        for i in range(len(values) - 1):
+            if float(values[i]["close"]) < float(values[i+1]["close"]):
+                down_streak += 1
+            else:
+                break
+
+        # 2. SPY vs 200 SMA (use shared cache when available)
+        spy_above_200 = None
+        if spy_vals_200 is None:
+            spy_vals_200 = fetch_time_series(session, "SPY", outputsize=200)
+        if len(spy_vals_200) >= 50:
+            spy_now    = float(spy_vals_200[0]["close"])
+            sma200     = sum(float(v["close"]) for v in spy_vals_200) / len(spy_vals_200)
+            spy_above_200 = spy_now > sma200
+
+        in_bear      = spy_above_200 == False
+        high_fear    = vixy_z >= 1.5
+        extreme_fear = vixy_z >= 2.0
+        regime_str   = (
+            "SPY above 200 SMA (bull)"  if spy_above_200 == True  else
+            "SPY below 200 SMA (bear)"  if spy_above_200 == False else
+            "SPY regime unavailable"
+        )
+
+        # Tiers — worst to best
+        if extreme_fear and down_streak >= 3 and in_bear:
+            return {
+                "ready":       False,
+                "status":      "WAIT — Falling Knife (All 3 bearish signals)",
+                "detail":      (
+                    f"{down_streak}-day down streak | {regime_str} | "
+                    f"VIXY z {vixy_z:+.1f}σ — "
+                    f"wait for 3 consecutive green closes before adding margin"
+                ),
+                "down_streak": down_streak,
+            }
+        elif down_streak >= 5:
+            return {
+                "ready":       False,
+                "status":      f"WAIT — {down_streak}-Day Downtrend",
+                "detail":      (
+                    f"{down_streak} consecutive closes lower | {regime_str} — "
+                    f"momentum still bearish. Wait for 2+ consecutive green closes."
+                ),
+                "down_streak": down_streak,
+            }
+        elif in_bear and high_fear:
+            return {
+                "ready":       False,
+                "status":      "CAUTION — Bear Regime + Elevated Fear",
+                "detail":      (
+                    f"{regime_str} | VIXY z {vixy_z:+.1f}σ | "
+                    f"{down_streak} down day(s) — "
+                    f"reduce margin exposure, do not add new positions"
+                ),
+                "down_streak": down_streak,
+            }
+        elif down_streak >= 3:
+            return {
+                "ready":       False,
+                "status":      f"CAUTION — {down_streak}-Day Slide",
+                "detail":      (
+                    f"{down_streak} consecutive down days | {regime_str} — "
+                    f"monitor for stabilization. In March/Sept: wait for 3 green days per plan"
+                ),
+                "down_streak": down_streak,
+            }
+        else:
+            return {
+                "ready":       True,
+                "status":      "OPEN — Conditions Support Accumulation",
+                "detail":      (
+                    f"{down_streak} down day(s) | {regime_str} | "
+                    f"VIXY z {vixy_z:+.1f}σ — margin deployment conditions met"
+                ),
+                "down_streak": down_streak,
+            }
+
+    except Exception as e:
+        logger.error(f"[Accumulation Readiness] {ticker}: {e}")
+        return {
+            "ready":       True,
+            "status":      "UNKNOWN — check manually",
+            "detail":      "Readiness check failed — verify macro regime before adding margin",
+            "down_streak": 0,
+        }
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RO COMPOSITE RISK SCORE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -678,12 +791,18 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     is_compressed, prem_delta, prem_compress_desc = detect_premium_compression(premium, ticker)
 
     # ── NEW: Macro cross-correlation (SPY fetched once, shared via cache)
+    # Also fetch 200 days for the accumulation readiness check (amortised — one fetch serves both).
+    if "spy_vals_200" not in spy_chg_cache:
+        spy_vals_200 = fetch_time_series(session, "SPY", outputsize=200)
+        spy_chg_cache["spy_vals_200"] = spy_vals_200
+    else:
+        spy_vals_200 = spy_chg_cache["spy_vals_200"]
+
     if "spy_chg" not in spy_chg_cache:
-        spy_vals = fetch_time_series(session, "SPY", outputsize=2)
-        if len(spy_vals) >= 2:
+        if len(spy_vals_200) >= 2:
             spy_chg_cache["spy_chg"] = (
-                (float(spy_vals[0]["close"]) - float(spy_vals[1]["close"])) /
-                float(spy_vals[1]["close"]) * 100
+                (float(spy_vals_200[0]["close"]) - float(spy_vals_200[1]["close"])) /
+                float(spy_vals_200[1]["close"]) * 100
             )
         else:
             spy_chg_cache["spy_chg"] = 0.0
@@ -806,6 +925,17 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note=income_note, s_net=s_net, alpha_drip=alpha_drip,
         seasonal_caution=seasonal_caution, y_dist=y_dist
     )
+
+    # ── Accumulation gate — appended to every report, STABLE or not.
+    # This is the Feb/March 2026 guard: tells you whether conditions support
+    # adding margin today, independent of the RO risk tier.
+    acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200)
+    gate_icon = "🟢" if acc["ready"] else ("🔴" if "WAIT" in acc["status"] else "⚠️")
+    report_text += (
+        f"┣ {gate_icon} Margin Gate: {acc['status']}\n"
+        f"┗ {acc['detail']}\n"
+    )
+
     return report_text, ro_tier, ro_score
 
 # ─────────────────────────────────────────────────────────────────────────────

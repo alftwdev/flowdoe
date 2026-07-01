@@ -290,12 +290,20 @@ def main():
                 today_label = datetime.now().strftime("%b %-d")
 
                 def _mover_line(m):
+                    """Returns formatted mover string, or None if data is missing/zero."""
+                    if not m.get("symbol") or m.get("price", 0) == 0:
+                        return None
                     arrow = "▲" if m["chg"] >= 0 else "▼"
                     return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
 
-                gainers_str = "  ".join(_mover_line(m) for m in snap["gainers"]) or "—"
-                losers_str  = "  ".join(_mover_line(m) for m in snap["losers"])  or "—"
-                unusual_str = "  ".join(_mover_line(m) for m in snap["unusual_vol"]) or "—"
+                def _mover_str(items):
+                    lines = [_mover_line(m) for m in items]
+                    valid = [l for l in lines if l]
+                    return "  ".join(valid) if valid else "Pre-market — updates after 09:30 ET"
+
+                gainers_str = _mover_str(snap["gainers"])
+                losers_str  = _mover_str(snap["losers"])
+                unusual_str = _mover_str(snap["unusual_vol"])
                 adv = snap["sectors_advancing"]
                 dec = snap["sectors_declining"]
                 tot = snap["total_sectors"]
@@ -303,7 +311,7 @@ def main():
 
                 snap_payload = (
                     f"**MARKET SNAPSHOT — {today_label}**\n\n"
-                    f"**Sector Breadth**\n"
+                    f"**Sector Breadth** (prior close)\n"
                     f"┣ {breadth_bar}\n"
                     f"┗ {adv}/{tot} sectors advancing\n\n"
                     f"**Top Gainers**\n"
@@ -931,19 +939,25 @@ def main():
                 today_label = datetime.now().strftime("%b %-d")
 
                 def _mover_line(m):
+                    if not m.get("symbol") or m.get("price", 0) == 0:
+                        return None
                     arrow = "▲" if m["chg"] >= 0 else "▼"
                     return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
 
-                gainers_str = "  ".join(_mover_line(m) for m in snap["gainers"]) or "—"
-                losers_str  = "  ".join(_mover_line(m) for m in snap["losers"])  or "—"
-                unusual_str = "  ".join(_mover_line(m) for m in snap["unusual_vol"]) or "—"
+                def _mover_str(items):
+                    valid = [_mover_line(m) for m in items if _mover_line(m)]
+                    return "  ".join(valid) if valid else "Pre-market — updates after 09:30 ET"
+
+                gainers_str = _mover_str(snap["gainers"])
+                losers_str  = _mover_str(snap["losers"])
+                unusual_str = _mover_str(snap["unusual_vol"])
                 adv, dec, tot = snap["sectors_advancing"], snap["sectors_declining"], snap["total_sectors"]
                 breadth_bar = "▲" * adv + "▼" * dec
                 breadth_pct = f"{adv}/{tot} sectors advancing"
 
                 payload = (
                     f"**MARKET SNAPSHOT — {today_label}**\n\n"
-                    f"**Sector Breadth**\n"
+                    f"**Sector Breadth** (prior close)\n"
                     f"┣ {breadth_bar}\n"
                     f"┗ {breadth_pct}\n\n"
                     f"**Top Gainers**\n"
