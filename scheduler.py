@@ -65,10 +65,9 @@ def dispatch_conviction_sync(engine, snap, report_label):
             f"{header}┣ Gamma: {snap['gex']['market_state']} | Flip ${snap['gex']['flip_strike']:,.2f}\n"
             f"┣ VIXY z {snap['vixy_z']:+.2f}σ\n{footer}"
         ),
-        WEBHOOK_INCOME: (
-            f"{header}┣ Credit Stress (HY Spread): {snap['credit_spread']:.2f}%\n"
-            f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}"
-        ),
+        # WEBHOOK_INCOME intentionally omitted — income channel is a dedicated
+        # dividend/wheel audience; cross-posting the macro conviction sync there
+        # is noise for that subscriber segment (confirmed by operator review).
     }
     for webhook, payload in targets.items():
         if webhook:
@@ -450,11 +449,15 @@ def main():
                             if c.get("payout_ratio") is not None:
                                 payout_tag = f" | Payout Ratio: `{c['payout_ratio']:.0f}%`"
                             div_line = ""
+                            div_badge = ""
                             if c.get("div_yield") is not None:
-                                div_line = f"┣ Dividend: Yield `{c['div_yield']:.1f}%` | {c['div_freq']} | Amount `${c['div_amount']:.4f}`/share\n"
+                                # Monthly div badge on header — key info when deciding whether to let
+                                # assignment happen (monthly payer = keeps earning income post-assignment)
+                                div_badge = " | 💰 Monthly Div" if c.get("div_freq") == "Monthly" else ""
+                                div_line = f"┣ Dividend: `{c['div_freq']}` | Yield `{c['div_yield']:.1f}%` | Amount `${c['div_amount']:.4f}`/share\n"
 
                             wheel_payload += (
-                                f"**{c['symbol']}** | Spot: `${c['spot']:.2f}` | {c['trend']} {c['sma50_tag']}\n"
+                                f"**{c['symbol']}**{div_badge} | Spot: `${c['spot']:.2f}` | {c['trend']} {c['sma50_tag']}\n"
                                 f"┣ Strategy: {c['strategy']}\n"
                                 f"┣ RSI-14: `{c['rsi14']}` {c['rsi_tag']} | BB Zone: {c['bb_zone']}\n"
                                 f"┣ Setup: `STO ${c['strike']:.1f} Put` | Exp: `{c['expiration']}` ({c['dte']} DTE)\n"
