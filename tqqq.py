@@ -749,16 +749,36 @@ class TQQQTacticalSniper:
         state_key = f"{regime}_{breadth_state}_{'VIXSPIKE' if vix_z >= VIX_CRISIS_Z else 'NORMAL'}"
 
         if db.track_and_limit_alerts("tqqq_regime_vital_sign", state_key, spot, max_broadcasts=1, threshold_pct=0.01):
+            # BLUF verdict
+            if regime == "BULL" and breadth_state != "COLLAPSE" and vix_z < VIX_CRISIS_Z:
+                bluf = "✅"
+                verdict = "TQQQ calls eligible — bull regime, breadth holding"
+                color = 0x2ecc71
+            elif regime == "BEAR" or breadth_state == "COLLAPSE":
+                bluf = "🔴"
+                verdict = "TQQQ calls OFF — bear regime or breadth collapse. Puts/cash only"
+                color = 0xe74c3c
+            else:
+                bluf = "⚠️"
+                verdict = "TQQQ calls with reduced size — mixed breadth or elevated vol"
+                color = 0xf39c12
+
+            # VIXY translated to TQQQ-specific action
+            if vix_z >= VIX_CRISIS_Z:
+                vixy_note = f"z {vix_z:+.1f}σ SPIKE — close puts at profit, rotate into TQQQ calls (fear peak SOP)"
+            elif vix_z >= 0.75:
+                vixy_note = f"z {vix_z:+.1f}σ elevated — reduce call size 50%, renew put if ≤14 DTE"
+            else:
+                vixy_note = f"z {vix_z:+.1f}σ calm — low IV, calls cheap; good window to renew put if ≤14 DTE"
+
+            above_pct = ((spot / sma200) - 1) * 100
             payload = (
-                f"⚡ **CROSS-ASSET CONVICTION | NASDAQ-100 REGIME (via QQQ/TQQQ desk)**\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"┣ Regime: {regime} (QQQ ${spot:,.2f} vs SMA200 ${sma200:,.2f})\n"
-                f"┣ Nasdaq-100 Breadth (top 10 holdings): {breadth:.0%} ({breadth_state})\n"
-                f"┣ VIXY {vix_price:.2f} (z {vix_z:+.2f}σ)\n"
-                f"┗ Final Actionable Posture: {'Leveraged long exposure favored.' if regime == 'BULL' and breadth_state != 'COLLAPSE' else 'Reduce leveraged long exposure — breadth/regime deteriorating beneath the surface.'}"
+                f"{bluf} **{verdict}**\n"
+                f"┣ QQQ `${spot:,.2f}` vs SMA200 `${sma200:,.2f}` ({above_pct:+.1f}%) | Breadth: `{breadth:.0%}` {breadth_state}\n"
+                f"┗ VIXY `{vix_price:.2f}` {vixy_note}"
             )
-            send_essentials_embed(WEBHOOK_MARKET_ANALYSIS, "NASDAQ-100 REGIME SYNC", payload, 0x16a085)
-            logger.info(f"Regime vital sign cross-posted to Market Analysis: {state_key}")
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ Regime Gate", payload, color)
+            logger.info(f"TQQQ regime gate dispatched to trade-signals: {state_key}")
 
     def check_insurance_put_renewal(self):
         """
