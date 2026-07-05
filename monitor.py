@@ -228,29 +228,47 @@ def check_sec_edgar(session, ticker):
         flags        = []
         seen_forms   = set()  # deduplicate — N-CSR filed twice/year, only flag once
 
-        # Expanded scan depth: N-CSR/DEF 14A are filed less frequently than N-2
+        # Recency windows — stale filings from completed RO cycles must not retrigger.
+        # N-2/N-2/A: 90-day window (an active RO registration clears within ~60 days)
+        # SC 13D/G:   180-day window (holder position changes matter longer-term)
+        # N-CSR/DEF 14A: informational only, no recency gate (routine annual filings)
+        N2_RECENCY_DAYS   = 90
+        HOLDER_RECENCY_DAYS = 180
+        today_dt = datetime.utcnow().date()
+
+        def filing_age_days(date_str):
+            try:
+                return (today_dt - datetime.strptime(date_str, "%Y-%m-%d").date()).days
+            except Exception:
+                return 0  # unknown date — treat as recent to avoid suppressing real alerts
+
         scan_depth = min(30, len(recent_forms))
         for i in range(scan_depth):
             form = recent_forms[i]
             date = recent_dates[i] if i < len(recent_dates) else "unknown"
+            age  = filing_age_days(date)
 
             if form == "N-2" and "N-2" not in seen_forms:
-                flags.append(f"⚠️ N-2 RO REGISTRATION ({date})")
-                seen_forms.add("N-2")
+                if age <= N2_RECENCY_DAYS:
+                    flags.append(f"⚠️ N-2 RO REGISTRATION ({date})")
+                    seen_forms.add("N-2")
             elif form == "N-2/A" and "N-2/A" not in seen_forms:
-                flags.append(f"⚠️ N-2/A RO AMENDMENT ({date})")
-                seen_forms.add("N-2/A")
+                if age <= N2_RECENCY_DAYS:
+                    flags.append(f"⚠️ N-2/A RO AMENDMENT ({date})")
+                    seen_forms.add("N-2/A")
             elif "SC 13D" in form and "SC 13D" not in seen_forms:
-                flags.append(f"⚠️ 13D LARGE HOLDER CHANGE ({date})")
-                seen_forms.add("SC 13D")
+                if age <= HOLDER_RECENCY_DAYS:
+                    flags.append(f"⚠️ 13D LARGE HOLDER CHANGE ({date})")
+                    seen_forms.add("SC 13D")
             elif "SC 13G" in form and "SC 13G" not in seen_forms:
-                flags.append(f"⚠️ 13G INSTITUTIONAL HOLDER CHANGE ({date})")
-                seen_forms.add("SC 13G")
+                if age <= HOLDER_RECENCY_DAYS:
+                    flags.append(f"⚠️ 13G INSTITUTIONAL HOLDER CHANGE ({date})")
+                    seen_forms.add("SC 13G")
             elif form == "N-CSR" and "N-CSR" not in seen_forms:
-                flags.append(f"📋 N-CSR SEMI-ANNUAL REPORT ({date})")
+                flags.append(f"📋 N-CSR ({date})")
                 seen_forms.add("N-CSR")
             elif form == "DEF 14A" and "DEF 14A" not in seen_forms:
-                flags.append(f"📋 DEF 14A PROXY STATEMENT ({date})")
+                flags.append(f"📋 DEF 14A ({date})")
                 seen_forms.add("DEF 14A")
 
         if not flags:
@@ -699,11 +717,12 @@ def check_accumulation_readiness(session, ticker: str, vixy_z: float,
                 "down_streak": down_streak,
             }
         else:
-            bull_bear = "Bull" if spy_above_200 else "Bear"
+            bull_bear   = "Bull" if spy_above_200 else "Bear"
+            vixy_calm   = "calm" if vixy_z < 0.75 else ("elevated" if vixy_z < 1.5 else "spike ⚠️")
             return {
                 "ready":       True,
                 "status":      "OPEN",
-                "detail":      f"{bull_bear} regime | VIXY z {vixy_z:+.1f}σ | {down_streak}d streak — deploy",
+                "detail":      f"{bull_bear} regime | VIXY z {vixy_z:+.1f}σ ({vixy_calm}) | {down_streak}d streak — deploy",
                 "down_streak": down_streak,
             }
 
@@ -833,24 +852,22 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     ro_season_line     = "┣ RO Filing Season: Active (mid-Feb to mid-Apr)\n"               if ro_season        else ""
     crisis_line        = f"┣ Market Stress: 🔴 CRISIS (VIXY z {vixy_z:+.2f}σ)\n"         if crisis_day       else ""
 
+    vixy_label = "calm" if vixy_z < 0.75 else ("elevated" if vixy_z < 1.5 else "spike ⚠️")
     return (
         f"**{ticker} — {status}**\n"
+        f"┣ SEC: {sec_shield}\n"
         f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
         f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
         f"┣ Premium Z-Score (1Y): {z_premium:+.1f} {z_tag}\n"
         f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
-        f"┣ Net Arb Spread: +{s_net:.2f}% | DRIP Alpha: +{alpha_drip:.2f}%\n"
-        f"┣ SEC Filing: {sec_shield}\n"
         f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
-        f"┣ Whale Flow: {whale_status}\n"
-        f"┣ Dark Pool Check: {dark_pool_desc}\n"
-        f"┣ Premium Compression: {premium_compression_desc}\n"
-        f"┣ Macro Correlation: {macro_interp}\n"
+        f"┣ Dark Pool: {dark_pool_desc}\n"
+        f"┣ Macro: {macro_interp}\n"
         f"{ex_div_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
         f"{crisis_line}"
-        f"┗ Verdict: {verdict}\n"
+        f"┗ {verdict}\n"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1060,7 +1077,7 @@ def build_cornerstone_chart():
         charts = []
         headers = {"User-Agent": "Mozilla/5.0"}
         for ticker in PRIORITY_ASSETS:
-            url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l"
+            url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l&theme=dark"
             res = requests.get(url, headers=headers, timeout=15)
             res.raise_for_status()
             img = Image.open(io.BytesIO(res.content)).convert("RGB")
@@ -1085,7 +1102,7 @@ def build_cornerstone_chart():
         # Pillow not installed — return individual CLM chart as fallback
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            url = f"https://finviz.com/chart.ashx?t=CLM&ty=c&ta=1&p=d&s=l"
+            url = f"https://finviz.com/chart.ashx?t=CLM&ty=c&ta=1&p=d&s=l&theme=dark"
             res = requests.get(url, headers=headers, timeout=15)
             res.raise_for_status()
             return res.content
