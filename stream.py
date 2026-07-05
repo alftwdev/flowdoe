@@ -139,7 +139,7 @@ class StructuralBreakoutAgent:
                 self.process_telemetry(symbol)
                 time.sleep(2)
             loop_counter += 1
-            time.sleep(120)
+            time.sleep(300)  # aligned with monitor.py 5-min cadence — no signal loss at this interval
 
 # =====================================================================
 # THREAD 2: Real-Time WebSocket Agent 
@@ -228,7 +228,9 @@ class RealTimeTickAgent:
 
     def on_open(self, ws):
         logger.info("Websocket pipeline connected. Initializing unified stream monitor...")
-        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIXY,XAU/USD,EUR/USD,GBP/USD,USD/JPY,BTC/USD"}}))
+        # Forex channel deprecated — EUR/USD, GBP/USD, USD/JPY removed to reduce CPU and WS load.
+        # Gold (XAU/USD) and BTC/USD retained for cross-asset signals.
+        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIXY,XAU/USD,BTC/USD"}}))
 
     def on_error(self, ws, error): pass
     def on_close(self, ws, close_status_code, close_msg): logger.debug("Stream dropped. Re-establishing...")

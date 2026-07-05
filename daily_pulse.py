@@ -2,23 +2,13 @@
 daily_pulse.py — Velocity Banking Daily Snapshot
 Cashflow ZZZ Machine | Personal Finance Layer
 
-Pulls SimpleFIN account balances (NFCU + AMEX) + CLM/CRF market data from Twelve Data,
-formats a concise daily summary, and pushes it to Pushover only — never Discord.
-
-Run once daily via PythonAnywhere Scheduled Tasks, NOT inside run_monitor().
-Deliberately standalone so a crash here never affects the 24/7 cornerstone loop.
+SimpleFIN accounts + Twelve Data Grow market context → Pushover only (never Discord).
+Run once daily via PythonAnywhere Scheduled Tasks — deliberately standalone from run_monitor().
 
 Usage:
   python daily_pulse.py            # normal daily run (deduped by date)
-  python daily_pulse.py --force    # override dedup, re-send today's pulse
-
-Setup (one-time):
-  1. Run: python daily_pulse.py --claim
-     This converts your SIMPLEFIN_TOKEN into a permanent SIMPLEFIN_ACCESS_URL.
-     Copy the printed URL into .env — never re-claim (the token is one-use).
-  2. Add to .env:
-       SIMPLEFIN_ACCESS_URL=https://...
-       SIMPLEFIN_TOKEN=<base64 claim token>   # only needed for --claim step
+  python daily_pulse.py --force    # override dedup, re-send today
+  python daily_pulse.py --claim    # one-time: convert SIMPLEFIN_TOKEN → SIMPLEFIN_ACCESS_URL
 """
 
 import os
@@ -36,135 +26,164 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("DailyPulse")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG — all from .env
-# ─────────────────────────────────────────────────────────────────────────────
-SIMPLEFIN_ACCESS_URL  = os.getenv("SIMPLEFIN_ACCESS_URL", "")
-SIMPLEFIN_TOKEN       = os.getenv("SIMPLEFIN_TOKEN", "")
-TD_API_KEY            = os.getenv("TWELVE_DATA_API_KEY", "")
-PUSHOVER_API_TOKEN    = os.getenv("PUSHOVER_API_TOKEN", "")
-PUSHOVER_USER_KEY     = os.getenv("PUSHOVER_USER_KEY", "")
+SIMPLEFIN_ACCESS_URL = os.getenv("SIMPLEFIN_ACCESS_URL", "")
+SIMPLEFIN_TOKEN      = os.getenv("SIMPLEFIN_TOKEN", "")
+TD_API_KEY           = os.getenv("TWELVE_DATA_API_KEY", "")
+PUSHOVER_API_TOKEN   = os.getenv("PUSHOVER_API_TOKEN", "")
+PUSHOVER_USER_KEY    = os.getenv("PUSHOVER_USER_KEY", "")
 
-# State file — tracks last run date for deduplication (no DB dependency).
 STATE_FILE = os.path.join(BASE_DIR, ".daily_pulse_state.json")
 
-# Low-balance alert threshold — fires an extra Pushover priority-1 if NFCU
-# checking drops below this (your 1-month bill buffer target from CLAUDE.md).
-NFCU_LOW_BALANCE_THRESHOLD = 2000.0
+# Flag words that identify credit card / liability accounts by name
+CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "gold")
 
-# CLM/CRF NAV proxies (Mutual Fund tickers on TD Grow)
-NAV_TICKERS = {"CLM": "XCLMX", "CRF": "XCRFX"}
+# Low-balance threshold — NFCU/M1 liquid checking only (not credit cards)
+LIQUID_LOW_THRESHOLD = 2000.0
+
+# NAV proxy tickers and defaults
+NAV_TICKERS  = {"CLM": "XCLMX", "CRF": "XCRFX"}
 NAV_DEFAULTS = {"CLM": 6.45, "CRF": 6.30}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Claim SimpleFIN Access URL (one-time, --claim flag)
+# ONE-TIME SETUP — Claim SimpleFIN Access URL
 # ─────────────────────────────────────────────────────────────────────────────
 
 def claim_simplefin_access_url():
-    """
-    Converts the base64 setup token into a permanent Access URL.
-    Run once: python daily_pulse.py --claim
-    Save the printed URL as SIMPLEFIN_ACCESS_URL in .env — never call this again.
-    """
     if not SIMPLEFIN_TOKEN:
         print("❌  SIMPLEFIN_TOKEN not set in .env")
         sys.exit(1)
     try:
-        claim_url = base64.b64decode(SIMPLEFIN_TOKEN).decode().strip()
-        res = requests.post(claim_url, timeout=20)
+        claim_url  = base64.b64decode(SIMPLEFIN_TOKEN + "=" * (-len(SIMPLEFIN_TOKEN) % 4)).decode().strip()
+        res        = requests.post(claim_url, timeout=20)
         res.raise_for_status()
         access_url = res.text.strip()
-        print("\n✅  Access URL claimed successfully.")
-        print(f"\nAdd this to your .env as SIMPLEFIN_ACCESS_URL:\n\n  {access_url}\n")
-        print("⚠️  Do not re-run --claim — the setup token is one-use only.\n")
+        print(f"\n✅  Access URL claimed:\n\n  {access_url}\n")
+        print("Add as SIMPLEFIN_ACCESS_URL in .env — do not re-run --claim.\n")
     except Exception as e:
         print(f"❌  Claim failed: {e}")
         sys.exit(1)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2a — Fetch SimpleFIN Accounts
+# SIMPLEFIN — Account Fetch + Categorisation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_simplefin_accounts() -> list[dict]:
+def fetch_simplefin_accounts():
     """
-    GET {access_url}/accounts — Basic Auth embedded in the Access URL.
-    Returns list of account dicts: {name, org, balance, currency, available}.
-
-    SimpleFIN refreshes balances ~once/24h on their backend. Running this
-    once daily is sufficient; polling more frequently returns stale data.
-
-    Institution coverage note:
-      SimpleFIN's supported-institution list is JavaScript-rendered and cannot
-      be verified programmatically. Manually confirm NFCU, AMEX, and E*TRADE
-      are listed at bridge.simplefin.org before connecting each account.
-      If an institution is not connected, it simply won't appear here.
+    Returns three lists of account dicts: (liquid, credit, brokerage).
+    Liquid  = positive-balance checking/savings accounts (cash reserves).
+    Credit  = negative-balance credit/card accounts (liabilities owed).
+    Brokerage = investment accounts (E*TRADE, M1 invest, etc.).
     """
-    if not SIMPLEFIN_ACCESS_URL:
-        logger.warning("SIMPLEFIN_ACCESS_URL not set — skipping account fetch")
-        return []
+    if not SIMPLEFIN_ACCESS_URL or SIMPLEFIN_ACCESS_URL.startswith("#"):
+        logger.warning("SIMPLEFIN_ACCESS_URL not configured")
+        return [], [], []
 
-    # Access URL format: https://user:pass@bridge.simplefin.org/simplefin
-    accounts_url = SIMPLEFIN_ACCESS_URL.rstrip("/") + "/accounts"
     try:
-        res = requests.get(accounts_url, timeout=20)
+        url = SIMPLEFIN_ACCESS_URL.rstrip("/") + "/accounts"
+        res = requests.get(url, timeout=20)
         res.raise_for_status()
-        data = res.json()
-        accounts = []
-        for acct_set in data.get("accounts", []):
-            # SimpleFIN response: each entry is an account object
-            if isinstance(acct_set, dict):
-                org  = acct_set.get("org", {}).get("name", "Unknown")
-                name = acct_set.get("name", "Account")
-                bal  = float(acct_set.get("balance", 0.0))
-                avail = float(acct_set.get("available-balance") or bal)
-                curr  = acct_set.get("currency", "USD")
-                accounts.append({
-                    "org": org, "name": name,
-                    "balance": bal, "available": avail, "currency": curr,
-                })
-        logger.info(f"SimpleFIN: {len(accounts)} account(s) retrieved")
-        return accounts
+        raw = res.json().get("accounts", [])
     except Exception as e:
         logger.error(f"SimpleFIN fetch failed: {e}")
-        return []
+        return [], [], []
+
+    liquid, credit, brokerage = [], [], []
+    brokerage_orgs = ("e*trade", "etrade", "fidelity", "schwab", "td ameritrade",
+                      "vanguard", "robinhood", "webull", "m1 finance")
+
+    for a in raw:
+        org   = a.get("org", {}).get("name", "Unknown")
+        name  = a.get("name", "Account")
+        bal   = float(a.get("balance", 0.0))
+        avail = float(a.get("available-balance") or bal)
+        entry = {"org": org, "name": name, "balance": bal, "available": avail}
+
+        org_lower  = org.lower()
+        name_lower = name.lower()
+        is_credit  = (bal < 0) or any(k in name_lower for k in CREDIT_KEYWORDS)
+        is_broker  = any(k in org_lower for k in brokerage_orgs)
+
+        if is_credit:
+            credit.append(entry)
+        elif is_broker:
+            brokerage.append(entry)
+        else:
+            liquid.append(entry)
+
+    logger.info(f"SimpleFIN: {len(liquid)} liquid | {len(credit)} credit | {len(brokerage)} brokerage")
+    return liquid, credit, brokerage
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2b — Fetch CLM/CRF from Twelve Data
+# TWELVE DATA — CEF Snapshot (price / NAV / RSI / premium)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_cef_snapshot() -> dict:
-    """
-    Pulls price, NAV, and premium for CLM and CRF.
-    Reuses the same Twelve Data endpoints as monitor.py — no extra credits.
-    Returns dict keyed by ticker.
-    """
+def fetch_cef_snapshot():
     results = {}
     session = requests.Session()
     for ticker, nav_ticker in NAV_TICKERS.items():
         try:
-            p_res = session.get(
+            price = float(session.get(
                 f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TD_API_KEY}",
-                timeout=12).json()
-            price = float(p_res.get("price", 0.0))
-
-            n_res = session.get(
+                timeout=12).json().get("price", 0.0))
+            nav = float(session.get(
                 f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
-                timeout=12).json()
-            nav = float(n_res.get("price", NAV_DEFAULTS[ticker]))
-
+                timeout=12).json().get("price", NAV_DEFAULTS[ticker]))
+            rsi_res = session.get(
+                f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day"
+                f"&time_period=14&apikey={TD_API_KEY}", timeout=12).json()
+            rsi = float(rsi_res.get("values", [{"rsi": 50.0}])[0]["rsi"])
             premium = ((price - nav) / nav * 100) if nav > 0 else 0.0
-            results[ticker] = {"price": price, "nav": nav, "premium": premium}
-            logger.info(f"{ticker}: ${price:.4f} | NAV ${nav:.4f} | Premium {premium:.1f}%")
+            results[ticker] = {"price": price, "nav": nav, "rsi": rsi, "premium": premium}
         except Exception as e:
-            logger.error(f"TD fetch failed for {ticker}: {e}")
-            results[ticker] = {"price": 0.0, "nav": NAV_DEFAULTS[ticker], "premium": 0.0}
+            logger.error(f"CEF fetch failed {ticker}: {e}")
+            results[ticker] = {"price": 0.0, "nav": NAV_DEFAULTS[ticker], "rsi": 50.0, "premium": 0.0}
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 2c — Net Worth Delta (day-over-day)
+# TWELVE DATA — Market Regime (SPY SMA200 + VIXY z-score)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_state() -> dict:
+def fetch_market_regime():
+    """
+    Returns (spy_price, bull_regime, vixy_z, vixy_label).
+    Bull regime = SPY above its 200-day SMA.
+    VIXY z = fear spike detection vs own 20D mean (calm / elevated / spike).
+    """
+    session = requests.Session()
+    try:
+        spy_res = session.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": "SPY", "interval": "1day", "outputsize": 200, "apikey": TD_API_KEY},
+            timeout=15).json()
+        spy_vals  = spy_res.get("values", [])
+        spy_price = float(spy_vals[0]["close"]) if spy_vals else 0.0
+        sma200    = sum(float(v["close"]) for v in spy_vals) / len(spy_vals) if spy_vals else 0.0
+        bull      = spy_price > sma200 if sma200 > 0 else None
+    except Exception as e:
+        logger.error(f"SPY regime fetch failed: {e}")
+        spy_price, bull = 0.0, None
+
+    try:
+        vix_res  = session.get(
+            "https://api.twelvedata.com/time_series",
+            params={"symbol": "VIXY", "interval": "1day", "outputsize": 20, "apikey": TD_API_KEY},
+            timeout=12).json()
+        closes   = [float(v["close"]) for v in vix_res.get("values", [])]
+        mean     = sum(closes) / len(closes)
+        std      = (sum((c - mean) ** 2 for c in closes) / len(closes)) ** 0.5
+        vixy_z   = (closes[0] - mean) / std if std > 0 else 0.0
+    except Exception as e:
+        logger.error(f"VIXY fetch failed: {e}")
+        vixy_z = 0.0
+
+    vixy_label = "calm" if vixy_z < 0.75 else ("elevated ⚠️" if vixy_z < 1.5 else "spike 🚨")
+    return spy_price, bull, vixy_z, vixy_label
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATE — Net Worth Delta
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_state():
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE) as f:
@@ -173,7 +192,7 @@ def load_state() -> dict:
         pass
     return {}
 
-def save_state(state: dict):
+def save_state(state):
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
@@ -181,136 +200,154 @@ def save_state(state: dict):
         logger.error(f"State save failed: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Format Pushover Message
+# FORMAT — ┣/┗ Pulse Message
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_pulse_message(accounts: list[dict], cef: dict, state: dict) -> tuple[str, str, int]:
-    """
-    Returns (title, message, priority).
-    Priority 1 = high (audible alert) for low-balance condition, else 0 = normal.
-    """
-    today     = date.today().strftime("%b %d, %Y")
-    priority  = 0
-    lines     = [f"Daily Pulse — {today}\n"]
+def _delta_str(current, previous):
+    if previous is None or previous == 0:
+        return ""
+    delta = current - previous
+    arrow = "↑" if delta >= 0 else "↓"
+    return f" {arrow} ${abs(delta):,.2f} vs yesterday"
 
-    # ── Account Balances
-    total_cash = 0.0
-    nfcu_low   = False
-    if accounts:
-        lines.append("ACCOUNTS")
-        for a in accounts:
-            bal_str = f"${a['balance']:,.2f}"
-            avail_str = f"${a['available']:,.2f}" if a['available'] != a['balance'] else ""
-            avail_tag = f" (avail {avail_str})" if avail_str else ""
-            lines.append(f"  {a['org']} — {a['name']}: {bal_str}{avail_tag}")
-            # Sum positive balances as cash (exclude credit card debt)
-            if a["balance"] > 0:
-                total_cash += a["balance"]
-            # Low-balance check on any NFCU checking-type account
-            if "navy federal" in a["org"].lower() or "nfcu" in a["org"].lower():
-                if a["available"] < NFCU_LOW_BALANCE_THRESHOLD:
-                    nfcu_low = True
-                    priority = 1
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
+    today    = date.today().strftime("%b %d, %Y")
+    spy_price, bull, vixy_z, vixy_label = regime
+    lines    = []
+    priority = 0
+
+    # ── Section 1: Cash Reserves
+    total_liquid = sum(a["balance"] for a in liquid)
+    prev_liquid  = state.get("total_liquid")
+    liquid_low   = total_liquid < LIQUID_LOW_THRESHOLD and liquid
+
+    lines.append("CASH RESERVES")
+    for a in liquid:
+        tag  = f"({a['org'].split()[0]})" if len(liquid) > 1 else ""
+        lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
+    lines.append(f"┗ Total Liquid: ${total_liquid:,.2f}{_delta_str(total_liquid, prev_liquid)}")
+
+    if liquid_low:
+        priority = 1
+        lines.append(f"⚠️  LOW CASH — below ${LIQUID_LOW_THRESHOLD:,.0f} buffer target")
+
+    # ── Section 2: Credit / Liabilities
+    total_owed = sum(a["balance"] for a in credit)  # negative values
+    lines.append("")
+    lines.append("CREDIT / LIABILITIES")
+    if credit:
+        for a in credit:
+            lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
+        lines.append(f"┗ Total Owed: ${total_owed:,.2f}")
     else:
-        lines.append("ACCOUNTS")
-        lines.append("  ⚠️  No SimpleFIN accounts connected yet")
-        lines.append("  Run: python daily_pulse.py --claim to set up")
+        lines.append("┗ No credit balances on record")
 
-    # ── CEF Snapshot
+    # ── Section 3: Brokerage
+    total_brokerage = sum(a["balance"] for a in brokerage if a["balance"] > 0)
+    prev_brokerage  = state.get("total_brokerage")
+    lines.append("")
+    lines.append("BROKERAGE")
+    for a in brokerage:
+        if a["balance"] != 0:
+            lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
+    lines.append(f"┗ Total Portfolio: ${total_brokerage:,.2f}{_delta_str(total_brokerage, prev_brokerage)}")
+
+    # ── Section 4: Net Worth Snapshot
+    net_worth      = total_liquid + total_owed + total_brokerage
+    prev_net_worth = state.get("net_worth")
+    lines.append("")
+    lines.append("NET WORTH SNAPSHOT")
+    lines.append(f"┣ Liquid Cash: ${total_liquid:,.2f}")
+    lines.append(f"┣ Credit Owed: ${total_owed:,.2f}")
+    lines.append(f"┣ Portfolio:   ${total_brokerage:,.2f}")
+    lines.append(f"┗ Net Worth:   ${net_worth:,.2f}{_delta_str(net_worth, prev_net_worth)}")
+
+    # ── Section 5: Cornerstone CEFs
     lines.append("")
     lines.append("CORNERSTONE CEFs")
     for ticker, d in cef.items():
-        prem_flag = "⚠️ " if d["premium"] > 15 else ""
+        rsi_tag  = "neutral" if 40 <= d["rsi"] <= 60 else ("overbought" if d["rsi"] > 70 else "oversold")
+        prem_tag = "⚠️ elevated" if d["premium"] > 15 else "neutral"
         lines.append(
-            f"  {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | "
-            f"{prem_flag}Premium {d['premium']:+.1f}%"
+            f"┣ {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | "
+            f"Premium {d['premium']:+.1f}% ({prem_tag}) | RSI {d['rsi']:.0f} ({rsi_tag})"
         )
+    # DRIP gate
+    any_elevated = any(d["premium"] > 15 for d in cef.values())
+    drip_status  = "🔴 WAIT — Premium >15% to NAV (DRIP paused)" if any_elevated else "🟢 Accumulate — premium within range"
+    lines.append(f"┗ DRIP Gate: {drip_status}")
 
-    # ── Net Worth Delta
-    yesterday_total = state.get("total_cash", None)
-    if yesterday_total is not None and total_cash > 0:
-        delta = total_cash - yesterday_total
-        arrow = "↑" if delta >= 0 else "↓"
-        lines.append("")
-        lines.append(f"NET CASH DELTA vs Yesterday: {arrow} ${abs(delta):,.2f}")
+    # ── Section 6: Market Regime
+    lines.append("")
+    lines.append("MARKET REGIME")
+    regime_str = "Bull (above 200 SMA)" if bull else ("Bear (below 200 SMA)" if bull is False else "Unknown")
+    lines.append(f"┣ SPY: ${spy_price:,.2f} — {regime_str}")
+    lines.append(f"┣ VIXY z: {vixy_z:+.1f}σ ({vixy_label}) — fear gauge vs 20D avg")
+    deploy = "🟢 GO — conditions met" if (bull and vixy_z < 1.5) else ("🔴 HOLD — bear regime or elevated fear" if not bull else "⚠️ CAUTION — fear elevated")
+    lines.append(f"┗ Margin Deploy: {deploy}")
 
-    # ── Low-balance warning
-    if nfcu_low:
-        lines.append("")
-        lines.append(f"⚠️  LOW BALANCE ALERT")
-        lines.append(f"  NFCU available balance below ${NFCU_LOW_BALANCE_THRESHOLD:,.0f} buffer target")
-        lines.append(f"  Review bill timing — margin paydown may need to pause")
+    title   = f"⚠️ Low Cash Alert — {today}" if liquid_low else f"💼 Daily Pulse — {today}"
+    message = "\n".join(lines)
+    return title, message, priority
 
-    # ── Premium gate reminder
-    for ticker, d in cef.items():
-        if d["premium"] > 15:
-            lines.append("")
-            lines.append(f"⚠️  {ticker} DRIP GATE: Premium {d['premium']:.1f}% > 15% — DRIP paused per accumulation gate")
 
-    title = f"💼 Daily Pulse — {today}"
-    if nfcu_low:
-        title = f"⚠️ Low Balance — {today}"
-
-    return title, "\n".join(lines), priority
+def _short_name(name):
+    """Strip the trailing (XXXX) account number suffix SimpleFIN appends."""
+    import re
+    return re.sub(r"\s*\(\w+\)\s*$", "", name).strip()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Dispatch to Pushover
+# PUSHOVER DISPATCH — personal financial data, never Discord
 # ─────────────────────────────────────────────────────────────────────────────
 
-def push_to_pushover(title: str, message: str, priority: int = 0):
-    """
-    Sends to Pushover only — never Discord (personal financial data).
-    Priority 1 requires retry + expire params (Pushover API requirement).
-    """
+def push_to_pushover(title, message, priority=0):
     if not PUSHOVER_API_TOKEN or not PUSHOVER_USER_KEY:
-        logger.error("Pushover credentials not set — cannot send")
+        logger.error("Pushover credentials missing")
         return False
-
     payload = {
-        "token":   PUSHOVER_API_TOKEN,
-        "user":    PUSHOVER_USER_KEY,
-        "title":   title,
-        "message": message,
-        "priority": priority,
+        "token": PUSHOVER_API_TOKEN, "user": PUSHOVER_USER_KEY,
+        "title": title, "message": message, "priority": priority,
     }
     if priority == 1:
-        payload["retry"]  = 60   # retry every 60s
-        payload["expire"] = 3600 # for up to 1 hour
-
+        payload["retry"] = 60
+        payload["expire"] = 3600
     try:
-        res = requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=15)
-        res.raise_for_status()
+        requests.post("https://api.pushover.net/1/messages.json", data=payload, timeout=15).raise_for_status()
         logger.info(f"Pushover dispatched (priority {priority}): {title}")
         return True
     except Exception as e:
-        logger.error(f"Pushover dispatch failed: {e}")
+        logger.error(f"Pushover failed: {e}")
         return False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_daily_pulse(force: bool = False):
+def run_daily_pulse(force=False):
     today_str = date.today().isoformat()
     state     = load_state()
 
-    # Deduplication — skip if already ran today (unless --force)
     if not force and state.get("last_run_date") == today_str:
-        logger.info("Daily pulse already sent today — use --force to override")
+        logger.info("Already sent today — use --force to override")
         return
 
-    accounts = fetch_simplefin_accounts()
-    cef      = fetch_cef_snapshot()
-    title, message, priority = format_pulse_message(accounts, cef, state)
+    liquid, credit, brokerage = fetch_simplefin_accounts()
+    cef    = fetch_cef_snapshot()
+    regime = fetch_market_regime()
 
+    title, message, priority = format_pulse_message(liquid, credit, brokerage, cef, regime, state)
     success = push_to_pushover(title, message, priority)
 
     if success:
-        # Save state for next-day delta calc
-        total_cash = sum(a["balance"] for a in accounts if a["balance"] > 0)
-        state["last_run_date"] = today_str
-        if total_cash > 0:
-            state["total_cash"] = total_cash
+        total_liquid    = sum(a["balance"] for a in liquid)
+        total_brokerage = sum(a["balance"] for a in brokerage if a["balance"] > 0)
+        net_worth       = total_liquid + sum(a["balance"] for a in credit) + total_brokerage
+        state.update({
+            "last_run_date":   today_str,
+            "total_liquid":    total_liquid,
+            "total_brokerage": total_brokerage,
+            "net_worth":       net_worth,
+        })
         save_state(state)
 
 
@@ -318,6 +355,4 @@ if __name__ == "__main__":
     if "--claim" in sys.argv:
         claim_simplefin_access_url()
         sys.exit(0)
-
-    force = "--force" in sys.argv
-    run_daily_pulse(force=force)
+    run_daily_pulse(force="--force" in sys.argv)
