@@ -987,37 +987,37 @@ class HighFidelityAnalyticsEngine:
         # affordable (< ~$50/share so 1 contract = <$5k collateral), good options liquidity,
         # and ideally monthly dividends so you keep earning income while selling CCs post-assignment.
         WHEEL_UNIVERSE = [
-            # ── Affordable Monthly Dividend Payers (ideal for wheel — collect div while holding) ──
-            "F",    # Ford ~$10 | quarterly div | liquid options | very popular wheel stock
-            "AGNC", # AGNC Investment ~$10 | monthly mREIT ~10% yield | great post-assignment income
-            "NLY",  # Annaly Capital ~$8 | monthly mREIT ~12% yield
-            "PFLT", # PennantPark ~$12 | monthly BDC | consistent payer
-            "GAIN", # Gladstone Investment ~$15 | monthly BDC + occasional special divs
-            "STAG", # STAG Industrial ~$37 | monthly REIT | liquid options
-            # ── Monthly Income Anchors (already in Tier 2 universe, excellent wheel stocks) ──
-            "MAIN", # Main Street Capital ~$52 | monthly BDC | 7% yield | never cut since 2007
-            "O",    # Realty Income ~$62 | monthly REIT | 5% yield
-            # ── High-IV Affordable Stocks (premium machines, no/low div but pure premium income) ──
-            "SOFI", # SoFi Technologies ~$12 | no div | high IV = fat premiums | popular wheel
-            "INTC", # Intel ~$20 | quarterly div | elevated IV from turnaround volatility
-            "PLTR", # Palantir ~$30 | no div | high IV | liquid weekly options
-            # ── High-Yield Income Stocks (affordable, great if assigned) ──
-            "MO",   # Altria ~$55 | quarterly 8%+ yield | low vol, good for conservative wheel
-            "T",    # AT&T ~$22 | quarterly 6% yield | high liquidity
-            "VZ",   # Verizon ~$42 | quarterly 6.5% yield
-            "KMI",  # Kinder Morgan ~$25 | quarterly 5% yield | pipeline stability
-            "ET",   # Energy Transfer ~$18 | quarterly 8% yield | very liquid options
-            # ── REITs / BDCs with liquid options ──
-            "MPW",  # Medical Properties ~$5 | distressed/recovering | high IV = premium
-            "ARCC", # Ares Capital ~$22 | quarterly BDC | 9% yield
+            # ── Premium Machines — high IV, liquid options, affordable strikes ──
+            "PLTR", # Palantir | high IV | liquid weeklies | popular income wheel stock
+            "SOFI", # SoFi Technologies | high IV | fat premiums | no div, pure premium play
+            "MARA", # Marathon Digital | crypto beta | very high IV | weekly options
+            "RIOT", # Riot Platforms | crypto beta | very high IV | weekly options
+            "COIN", # Coinbase | crypto beta | high IV | liquid chain
+            "HOOD", # Robinhood | fintech | elevated IV | affordable strikes
+            "SOXL", # Direxion Semis 3x | leveraged ETF | extreme IV | very liquid options
+            "ARKK", # ARK Innovation | high IV from volatility | popular premium target
+            # ── Monthly Dividend Payers (ideal post-assignment — collect div while selling CCs) ──
+            "MAIN", # Main Street Capital | monthly BDC | 7% yield | never cut since 2007
+            "O",    # Realty Income | monthly REIT | 5% yield | liquid options
+            "AGNC", # AGNC Investment | monthly mREIT | ~10% yield | great premium + div combo
+            "NLY",  # Annaly Capital | monthly mREIT | ~12% yield | affordable strikes
+            "STAG", # STAG Industrial | monthly REIT | liquid options
+            "PFLT", # PennantPark | monthly BDC | consistent payer
+            # ── High-Yield Income Stocks ──
+            "F",    # Ford | affordable | quarterly div | very liquid options | classic wheel
+            "T",    # AT&T | quarterly 6% yield | high liquidity | tight spreads
+            "VZ",   # Verizon | quarterly 6.5% yield
+            "ET",   # Energy Transfer | quarterly 8% yield | very liquid options
+            "MO",   # Altria | quarterly 8%+ yield | low vol, conservative wheel
+            "KMI",  # Kinder Morgan | quarterly 5% yield | pipeline stability
+            # ── Turnaround / High-IV Value ──
+            "INTC", # Intel | elevated IV from turnaround | quarterly div
+            "PFE",  # Pfizer | quarterly 6% yield | post-spinoff elevated IV
+            "MPW",  # Medical Properties | distressed recovery | high IV = premium
+            # ── BDCs / REITs with liquid options ──
+            "ARCC", # Ares Capital | quarterly BDC | 9% yield
             # ── Banks / Financials ──
-            "BAC",  # Bank of America ~$45 | quarterly div | liquid options
-            "WFC",  # Wells Fargo ~$77 | quarterly div | high OI
-            # ── Dividend Aristocrats (higher share price but liquid options, best for larger accounts) ──
-            "KO",   # Coca-Cola ~$72 | quarterly | recession-proof, low IV
-            "PFE",  # Pfizer ~$25 | quarterly 6% yield | post-spinoff high IV
-            "BMY",  # Bristol-Myers Squibb ~$48 | quarterly 5% yield
-            "CSCO", # Cisco ~$56 | quarterly 3.5% yield | tech div
+            "BAC",  # Bank of America | quarterly div | liquid options
         ]
         candidates = []
         TARGET_DTE_MIN, TARGET_DTE_MAX = 21, 45

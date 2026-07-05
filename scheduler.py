@@ -345,31 +345,29 @@ def main():
         elif args.mode == "income":
             logger.info("Executing Income Channel: CC ETF Pulse + Wheel Candidates + Ex-Div Radar...")
 
-            # ── SEGMENT 1: CC ETF & INCOME FUND PULSE ─────────────────────────
-            # Covers: JEPI, JEPQ, DIVO, XYLD, QYLD, RYLD, SCHD, O, MAIN, ARCC
-            # Surfaces: next ex-date, annualized yield, urgency tags, moat rating
+            # ── SEGMENT 1: EX-DIV URGENCY BOARD (imminent only, ≤14 days) ────
             try:
                 etf_data = engine.generate_income_etf_pulse()
-                if etf_data:
-                    etf_payload = "Monthly & Weekly Income Fund Tracker — Ex-Dividend Urgency Board\n\n"
-                    for item in etf_data:
-                        etf_payload += (
-                            f"**{item['symbol']}** {item['moat']} | {item['type']} | {item['freq']}\n"
-                            f"┣ Spot: `${item['spot']:.2f}` | Div: `${item['div_amount']:.4f}` | Yield: `{item['ann_yield']:.1f}%` ann.\n"
-                            f"┣ Ex-Date: `{item['ex_date']}` ({item['days_away']} days)\n"
-                            f"┗ Status: {item['urgency']}\n\n"
+                imminent = [e for e in etf_data if e["days_away"] <= 14]
+                if imminent:
+                    lines = []
+                    for item in imminent:
+                        urgency_icon = "🔥" if item["days_away"] <= 3 else ("⚡" if item["days_away"] <= 7 else "📅")
+                        div_str = f"${item['div_amount']:.4f}" if item["div_amount"] > 0 else "TBD"
+                        lines.append(
+                            f"{urgency_icon} **{item['symbol']}** | Ex: `{item['ex_date']}` ({item['days_away']}d) "
+                            f"| Div: `{div_str}` | Yield: `{item['ann_yield']:.1f}%` | Spot: `${item['spot']:.2f}`"
                         )
-                    etf_payload += (
-                        "✅ = Wide-moat, institutionally vetted | ⚠️ = Yield chase risk — verify payout sustainability\n"
-                        "Directive: Deploy capital before ex-date. Position must settle (T+1) to capture distribution."
-                    )
-                    state_key = f"ETFPULSE_{len(etf_data)}_{'_'.join([e['symbol'] for e in etf_data[:3]])}"
-                    if engine.db.track_and_limit_alerts("income_etf_pulse", state_key, float(len(etf_data)), max_broadcasts=3, threshold_pct=0.1):
+                    etf_payload = "\n".join(lines) + "\n*Deploy before ex-date. Position settles T+1.*"
+                    state_key = f"EXDIV_{'_'.join(e['symbol'] for e in imminent)}"
+                    if engine.db.track_and_limit_alerts("income_etf_pulse", state_key, float(len(imminent)), max_broadcasts=2, threshold_pct=0.1):
                         if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "INCOME ETF PULSE | CC ETF & Dividend Fund Radar", etf_payload, 0x1abc9c)
-                            logger.info(f"CC ETF pulse dispatched: {len(etf_data)} funds tracked.")
+                            send_essentials_embed(WEBHOOK_INCOME, "Ex-Div Radar | Action Window", etf_payload, 0x1abc9c)
+                            logger.info(f"Ex-div urgency board: {len(imminent)} imminent.")
+                else:
+                    logger.info("Ex-div board: no imminent ex-dates ≤14 days, skipping embed.")
             except Exception as e:
-                logger.error(f"Income ETF pulse segment failed: {e}")
+                logger.error(f"Ex-div radar segment failed: {e}")
 
             # ── SEGMENT 2: DIVIDEND WHEEL CANDIDATES v2 ───────────────────────
             # Enhanced scanner: RSI-14, Bollinger %B, IVR proxy, theta, break-even,
@@ -387,46 +385,19 @@ def main():
                         max_broadcasts=3,
                         threshold_pct=0.01
                     ):
-                        wheel_payload = "Cash-Secured Put Setups on Dividend Stocks — Institutional-Grade Screen\n\n"
-                        avg_pop = 0.0
-
-                        for c in wheel_candidates:
-                            div_growth_tag = ""
-                            if c.get("div_growth_5y") is not None:
-                                div_growth_tag = f" | 5yr Div Growth: `{c['div_growth_5y']:.1f}%`"
-                            payout_tag = ""
-                            if c.get("payout_ratio") is not None:
-                                payout_tag = f" | Payout Ratio: `{c['payout_ratio']:.0f}%`"
-                            div_line = ""
-                            div_badge = ""
-                            if c.get("div_yield") is not None:
-                                # Monthly div badge on header — key info when deciding whether to let
-                                # assignment happen (monthly payer = keeps earning income post-assignment)
-                                div_badge = " | 💰 Monthly Div" if c.get("div_freq") == "Monthly" else ""
-                                div_line = f"┣ Dividend: `{c['div_freq']}` | Yield `{c['div_yield']:.1f}%` | Amount `${c['div_amount']:.4f}`/share\n"
-
-                            wheel_payload += (
-                                f"**{c['symbol']}**{div_badge} | Spot: `${c['spot']:.2f}` | {c['trend']} {c['sma50_tag']}\n"
-                                f"┣ Strategy: {c['strategy']}\n"
-                                f"┣ RSI-14: `{c['rsi14']}` {c['rsi_tag']} | BB Zone: {c['bb_zone']}\n"
-                                f"┣ Setup: `STO ${c['strike']:.1f} Put` | Exp: `{c['expiration']}` ({c['dte']} DTE)\n"
-                                f"┣ Greeks: Δ `{c['delta']:.2f}` | θ ~`${c['theta_daily']:.3f}`/day | IV `{c['iv']:.1f}%` | IVR `{c['ivr_proxy']:.0f}%` ({c['ivr_tag']})\n"
-                                f"┣ Liquidity: Volume `{c['volume']:,}` | OI Range `{c['oi_low']:,}`–`{c['oi_high']:,}`\n"
-                                f"┣ Premium: `${c['premium']*100:.0f}/contract` | PoP: `{c['pop']:.1f}%` | Ann. ROI: `{c['annualized_roi']:.1f}%`\n"
-                                f"┣ Break-Even: `${c['break_even']:.2f}` | Downside Protected: `{c['pct_downside']:.1f}%`\n"
-                                f"{div_line}"
-                                f"┣ Sizing (3% rule): `{c['contracts_10k']}x @ $10k` | `{c['contracts_25k']}x @ $25k`\n"
-                                f"┗ Div Safety: {c['safety_grade']}{payout_tag}{div_growth_tag}\n\n"
-                            )
-                            avg_pop += c['pop']
-
-                        avg_pop = avg_pop / len(wheel_candidates)
+                        avg_pop = sum(c["pop"] for c in wheel_candidates) / len(wheel_candidates)
                         setup_color = 0x2ecc71 if avg_pop >= 75.0 else 0xf1c40f
-
-                        wheel_payload += (
-                            "Wheel Strategy Path: CSP → Assignment → Covered Call → Repeat\n"
-                            "Capital Rule: 3% max per position. Scale contracts to account size."
-                        )
+                        lines = []
+                        for c in wheel_candidates:
+                            div_badge = " 💰" if c.get("div_freq") == "Monthly" else ""
+                            div_note = f" | Div {c['div_yield']:.1f}%" if c.get("div_yield") else ""
+                            pop_icon = "✅" if c["pop"] >= 75 else "⚠️"
+                            lines.append(
+                                f"{pop_icon} **{c['symbol']}**{div_badge} `STO ${c['strike']:.0f}P` exp `{c['expiration']}` ({c['dte']}d) "
+                                f"| `${c['premium']*100:.0f}/ct` | Δ`{c['delta']:.2f}` IVR`{c['ivr_proxy']:.0f}%` PoP`{c['pop']:.0f}%`\n"
+                                f"┗ BE: `${c['break_even']:.2f}` ({c['pct_downside']:.1f}% protected){div_note} | {c['trend']} | RSI `{c['rsi14']}`"
+                            )
+                        wheel_payload = "\n\n".join(lines)
 
                         if WEBHOOK_INCOME:
                             send_essentials_embed(WEBHOOK_INCOME, "DIVIDEND WHEEL v2 | Premium Selling Setups", wheel_payload, setup_color)
