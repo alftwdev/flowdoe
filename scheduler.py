@@ -96,84 +96,33 @@ def main():
         if args.mode == "macro":
             liq_payload = engine.generate_macro_liquidity_payload()
             if liq_payload and WEBHOOK_MARKET:
-                send_essentials_embed(WEBHOOK_MARKET, "Institutional Liquidity Radar", liq_payload, 0x3498db)
-            
-            fx_payload = engine.generate_forex_matrix_payload()
-            if fx_payload and WEBHOOK_FOREX:
-                send_essentials_embed(WEBHOOK_FOREX, "Forex Performance Grid", fx_payload, 0x34495e)
+                send_essentials_embed(WEBHOOK_MARKET, "Credit & Liquidity Check", liq_payload, 0x3498db)
 
-                # Refresh ATR-based expected-range bounds for the streamed pairs — this is what
-                # stream.py's real-time perimeter alerts read; without this refresh those bounds
-                # default to 0 and the alert silently never fires.
-                for pair in engine.FX_STREAMED_PAIRS:
-                    try:
-                        engine.update_fx_volatility_bounds(pair)
-                    except Exception as e:
-                        logger.error(f"FX volatility bounds refresh failed for {pair}: {e}")
+            # Cross-sector carry-trade regime: USD/JPY + Gold gives a clean risk-on/off read.
+            # Dispatches to #market-analysis only when unambiguous (not MIXED) — no forex channel.
+            try:
+                fx_quotes = engine._fetch_twelve_data_quotes(["USD/JPY", "XAU/USD"])
+                regime, explanation, usdjpy_chg, gold_chg = engine.assess_risk_sentiment_regime(fx_quotes)
+                if regime != "🟡 MIXED" and WEBHOOK_MARKET:
+                    if engine.db.track_and_limit_alerts("fx_risk_regime_sync", regime, usdjpy_chg, max_broadcasts=2, threshold_pct=0.3):
+                        regime_payload = (
+                            f"┣ Regime: {regime}\n"
+                            f"┣ USD/JPY: `{usdjpy_chg:+.2f}%` | Gold (XAU/USD): `{gold_chg:+.2f}%`\n"
+                            f"┗ {explanation}"
+                        )
+                        send_essentials_embed(WEBHOOK_MARKET, "Carry Trade Risk Regime", regime_payload, 0x16a085)
+                        logger.info(f"Dispatched carry-trade regime sync ({regime})")
 
-                # Mover-of-the-day deep dive: pivot levels + multi-timeframe trend confluence +
-                # chart snapshot (mirrors the Finviz-style candlestick reference image), only for
-                # whichever pair actually moved — avoids spamming a chart every cron tick.
-                try:
-                    fx_quotes = engine._fetch_twelve_data_quotes(engine.FX_UNIVERSE)
-                    mover = engine.find_biggest_mover(fx_quotes, engine.FX_UNIVERSE)
-                    if mover and abs(mover[3]) >= 0.35:
-                        symbol, price, change, pct_change = mover
-                        pivots = engine.calculate_fx_pivot_points(symbol)
-                        confluence_tag, confluence_detail = engine.calculate_fx_trend_confluence(symbol)
-                        ohlc = engine.fetch_crypto_ohlc(symbol, outputsize=60)
-                        if ohlc is not None and not ohlc.empty:
-                            chart_bytes = generate_candlestick_chart(symbol, ohlc, last_change=change, last_change_pct=pct_change)
-                            pivot_block = ""
-                            if pivots:
-                                pivot_block = (
-                                    f"┣ Pivot: `{pivots['pivot']:.4f}`\n"
-                                    f"┣ R1: `{pivots['r1']:.4f}`\n"
-                                    f"┣ S1: `{pivots['s1']:.4f}`\n"
-                                )
-                            fx_deep_dive = (
-                                f"┣ Spot: `{price:,.4f}`\n"
-                                f"┣ Move: `{pct_change:+.2f}%`\n"
-                                f"{pivot_block}"
-                                f"┣ Trend Confluence (1h/4h/1D): {confluence_tag}\n"
-                                f"┗ Trajectory: [{confluence_detail}]"
+                        spy_price_data = engine._execute_query("price", {"symbol": "SPY"})
+                        if spy_price_data and "price" in spy_price_data:
+                            direction = "UP" if regime == "🟢 RISK-ON" else "DOWN"
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            engine.log_ledger_prediction(
+                                "forex", f"SPY_{today_str}", direction, float(spy_price_data["price"]),
+                                ticker="SPY", context=regime
                             )
-                            send_essentials_embed_with_chart(
-                                WEBHOOK_FOREX, f"💱 FX MOVER OF THE DAY: {symbol}", fx_deep_dive, chart_bytes, color=0x34495e
-                            )
-                            logger.info(f"Dispatched FX mover chart for {symbol} ({pct_change:+.2f}%)")
-                except Exception as e:
-                    logger.error(f"FX mover chart dispatch failed: {e}")
-
-                # Cross-sector sync: USD/JPY (carry-trade barometer) + Gold direction gives a quick
-                # risk-on/off read. When it's unambiguous, broadcast it to Market Analysis so the
-                # whole ecosystem (equities, futures, crypto) is reading the same macro tape.
-                try:
-                    regime, explanation, usdjpy_chg, gold_chg = engine.assess_risk_sentiment_regime(fx_quotes)
-                    if regime != "🟡 MIXED" and WEBHOOK_MARKET:
-                        if engine.db.track_and_limit_alerts("fx_risk_regime_sync", regime, usdjpy_chg, max_broadcasts=2, threshold_pct=0.3):
-                            regime_payload = (
-                                f"⚡ **CROSS-ASSET CONVICTION | CARRY-TRADE RISK REGIME**\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"┣ Regime: {regime}\n"
-                                f"┣ USD/JPY: `{usdjpy_chg:+.2f}%` | Gold (XAU/USD): `{gold_chg:+.2f}%`\n"
-                                f"┗ {explanation}"
-                            )
-                            send_essentials_embed(WEBHOOK_MARKET, "FOREX → GLOBAL MACRO SIGNAL SYNC", regime_payload, 0x16a085)
-                            logger.info(f"Dispatched FX risk regime sync ({regime})")
-
-                            # Ledger: only logged when the regime is unambiguous (RISK-ON/OFF), same
-                            # gate as the dispatch above — MIXED makes no claim, so nothing is logged.
-                            spy_price_data = engine._execute_query("price", {"symbol": "SPY"})
-                            if spy_price_data and "price" in spy_price_data:
-                                direction = "UP" if regime == "🟢 RISK-ON" else "DOWN"
-                                today_str = datetime.now().strftime("%Y-%m-%d")
-                                engine.log_ledger_prediction(
-                                    "forex", f"SPY_{today_str}", direction, float(spy_price_data["price"]),
-                                    ticker="SPY", context=regime
-                                )
-                except Exception as e:
-                    logger.error(f"FX risk regime sync failed: {e}")
+            except Exception as e:
+                logger.error(f"Carry-trade regime sync failed: {e}")
 
             crypto_payload = engine.generate_crypto_matrix_payload()
             if crypto_payload and WEBHOOK_CRYPTO:

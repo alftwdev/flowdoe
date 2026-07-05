@@ -420,14 +420,14 @@ class HighFidelityAnalyticsEngine:
         
         if not should_broadcast and not is_test: return None
 
-        risk_emoji, regime_alert = ("🚨", "CREDIT STRESS DETECTED") if credit_spread > 4.5 else ("🟢", "Credit markets stable.")
+        spread_emoji = "🚨" if credit_spread > 4.5 else ("⚠️" if credit_spread > 3.5 else "🟢")
+        spread_note = "PAUSE MARGIN DRAWS" if credit_spread > 4.5 else ("watch" if credit_spread > 3.5 else "safe — margin deployment supported")
+        vel_note = "draining ⚠️" if liv <= -1.5 else ("expanding" if liv >= 1.5 else "flat")
+        posture = "Risk-off — reduce exposure" if credit_spread > 4.5 else ("Caution — monitor spread" if credit_spread > 3.5 else "Risk-on — conditions support margin")
         return (
-            f"**Federal Reserve System Liquidity Snapshot**\n"
-            f"┣ **Fed Balance Sheet:** `${fed_assets:,.0f}B`\n"
-            f"┣ **Global Net Liquidity:** `${net_liquidity:,.0f}B`\n"
-            f"┣ **Liquidity Velocity (5D):** `{liv:+.2f}%`\n"
-            f"┗ **High Yield Credit Spread:** `{credit_spread:.2f}%`\n\n"
-            f"**System Interpretation:**\n{risk_emoji} *{regime_alert}*\n{liv_alert}"
+            f"┣ HY Spread: `{credit_spread:.2f}%` — {spread_emoji} {spread_note} (danger: >4.5%)\n"
+            f"┣ Net Liquidity Vel: `{liv:+.2f}%` (5D) — {vel_note}\n"
+            f"┗ Posture: {posture}"
         )
 
     FX_UNIVERSE = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF"]
