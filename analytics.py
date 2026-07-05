@@ -1995,29 +1995,57 @@ class HighFidelityAnalyticsEngine:
 
         bullish_breakouts = boundary_verdicts.count("🔥 BULLISH BREAKOUT")
         bearish_breakdowns = boundary_verdicts.count("🩸 BEARISH BREAKDOWN")
-        if bullish_breakouts == 2:
-            lesson = 'Both SPY and QQQ broke above expected ranges — textbook bullish expansion. Bias long on pullbacks to VWAP tomorrow.'
-        elif bearish_breakdowns == 2:
-            lesson = 'Both SPY and QQQ broke below expected ranges — distribution confirmed. Defensive posture; avoid new longs until breadth recovers.'
-        elif bullish_breakouts == 1:
-            lesson = 'Index divergence today — one broke out, one held range. Watch the laggard; divergence typically resolves in the breakout direction.'
-        elif bearish_breakdowns == 1:
-            lesson = 'One index cracked its floor while the other held — mixed tape. Risk management over new entries until both indexes align.'
-        elif abs(snap['conviction_score']) >= 2:
-            lesson = 'Breadth and gamma confirmed each other today — high-conviction setups like this are rare, note the pattern.'
+        breadth = snap['breadth']
+        vixy_z = snap['vixy_z']
+        credit = snap['credit_spread']
+
+        # Composite BLUF verdict
+        if bearish_breakdowns >= 1 or breadth < 0.40 or vixy_z > 1.5 or credit > 4.5:
+            bluf_emoji = "🔴"
+            if bearish_breakdowns == 2:
+                bluf_verdict = "RISK-OFF | Both indexes broke down — distribution confirmed, defensive posture"
+            elif bearish_breakdowns == 1:
+                bluf_verdict = "RISK-OFF | One index cracked support — avoid new longs until both align"
+            elif credit > 4.5:
+                bluf_verdict = "RISK-OFF | Credit stress detected — pause margin draws"
+            else:
+                bluf_verdict = "RISK-OFF | Fear spike or weak breadth — capital preservation mode"
+        elif bullish_breakouts >= 1 and breadth >= 0.55 and vixy_z < 0.5 and credit < 3.5:
+            bluf_emoji = "✅"
+            if bullish_breakouts == 2:
+                bluf_verdict = "RISK-ON | Both SPY and QQQ expanded — bias long on pullbacks tomorrow"
+            else:
+                bluf_verdict = "RISK-ON | Breakout with calm tape — divergence resolves in breakout direction"
         else:
-            lesson = 'Both indexes held within expected ranges — a contained, low-volatility session. No directional edge; capital preservation is correct.'
+            bluf_emoji = "⚠️"
+            if bullish_breakouts == 1:
+                bluf_verdict = "MIXED | Divergence day — watch the laggard for follow-through"
+            elif abs(snap['conviction_score']) >= 2:
+                bluf_verdict = "MIXED | Breadth confirmed direction but no range expansion — wait for clarity"
+            else:
+                bluf_verdict = "CHOP | Both indexes contained — no directional edge, no new entries"
+
+        # Compact boundary summary (ticker + close + verdict emoji only)
+        _verdict_icon = {"🔥 BULLISH BREAKOUT": "🔥", "🩸 BEARISH BREAKDOWN": "🩸", "🌪️ WHIPSAW": "🌪️", "🔒 CONTAINED": "🔒"}
+        boundary_compact = []
+        for i, ticker in enumerate(("SPY", "QQQ")):
+            try:
+                data = self._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "1"})
+                close = float(data["values"][0]["close"])
+                icon = _verdict_icon.get(boundary_verdicts[i], "🔒") if i < len(boundary_verdicts) else "🔒"
+                boundary_compact.append(f"{ticker} `${close:,.2f}` {icon}")
+            except Exception:
+                boundary_compact.append(ticker)
+        boundary_str = " | ".join(boundary_compact)
+
+        vixy_label = "calm" if vixy_z < 0.75 else ("elevated" if vixy_z < 1.5 else "spike ⚠️")
+        credit_label = "safe" if credit < 3.5 else ("watch" if credit < 4.5 else "STRESS ⚠️")
 
         payload = (
-            f"🌆 **MARKET ANALYSIS | END-OF-DAY RECAP**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{boundary_lines}"
-            f"┣ Final Gamma Regime: {snap['gex']['market_state']} | P/C OI: `{snap['gex']['pc_oi_ratio']:.2f}` ({snap['gex']['pc_tag']})\n"
-            f"┣ Breadth: `{snap['breadth']:.0%}` | VIXY z: `{snap['vixy_z']:+.2f}σ` | Macro: {snap['risk_regime']} | Credit Spread: `{snap['credit_spread']:.2f}%`\n"
-            f"┣ VRP (SPY): `{snap['vrp']['vrp']:+.1f}` ({snap['vrp']['regime']}) | Net Liquidity: `${snap['net_liquidity']['net_liquidity']/1e9:,.0f}B` ({snap['net_liquidity']['trend']})\n"
-            f"{vix_line}"
+            f"{bluf_emoji} **{bluf_verdict}**\n"
+            f"┣ {boundary_str} | Breadth: `{breadth:.0%}` | VIXY: `{vixy_z:+.1f}σ` {vixy_label} | Credit: `{credit:.2f}%` {credit_label}\n"
             f"{flags_line}"
-            f"┣ Lesson: {lesson}\n"
+            f"{vix_line}"
             f"{call_review}"
         )
         return payload, snap
