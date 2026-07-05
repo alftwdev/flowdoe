@@ -120,12 +120,43 @@ def detect_equal_highs_lows(df, lookback=50, tolerance_pct=0.0015, swing_lookbac
     return cluster(high_vals), cluster(low_vals)
 
 
-def calculate_supertrend(df, period=10, multiplier=3.0):
+def calculate_supertrend(symbol_or_df, interval: str = "1day", period: int = 10,
+                         multiplier: float = 3.0, api_key: str = None):
     """
-    Standard ATR-banded Supertrend — generic, publicly-documented technical indicator (Olivier
-    Seban, widely implemented across every charting platform), not proprietary to any vendor.
-    Returns the latest trend direction ("BULLISH"/"BEARISH") and the active band level.
+    Supertrend indicator — trend direction ("BULLISH"/"BEARISH") and active band level.
+
+    Two paths:
+      • symbol_or_df is a str  → TD native SuperTrendEndpoint (authoritative, zero manual math)
+      • symbol_or_df is a df   → local ATR-banded fallback (for callers that only have OHLCV)
+
+    Callers with a symbol should pass it as a string; the TD path saves CPU and avoids the
+    edge-case rounding differences in the manual loop. The DataFrame path is preserved so
+    analyze_market_structure() and any caller without API access continues to work unchanged.
     """
+    # ── TD native path (preferred when a symbol string is provided)
+    if isinstance(symbol_or_df, str):
+        try:
+            import os
+            from twelvedata import TDClient
+            key = api_key or os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TD_API_KEY")
+            td = TDClient(apikey=key)
+            result = td.supertrend(
+                symbol=symbol_or_df, interval=interval,
+                period=period, multiplier=multiplier
+            ).as_json()
+            if result and len(result) > 0:
+                latest = result[0]
+                raw_trend = str(latest.get("trend", "")).lower()
+                trend_dir = "BULLISH" if raw_trend == "up" else ("BEARISH" if raw_trend == "down" else "NEUTRAL")
+                level = round(float(latest.get("supertrend", 0.0)), 2)
+                return {"trend": trend_dir, "level": level}
+        except Exception as e:
+            import logging
+            logging.getLogger("market_structure").error(f"TD SuperTrend native failed for {symbol_or_df}: {e}")
+        return {"trend": "NEUTRAL", "level": 0.0}
+
+    # ── DataFrame fallback path (callers that pass OHLCV directly)
+    df = symbol_or_df
     if df is None or len(df) < period + 2:
         return {"trend": "NEUTRAL", "level": 0.0}
     try:
@@ -134,7 +165,7 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
         upper_band = hl2 + multiplier * atr
         lower_band = hl2 - multiplier * atr
 
-        trend = pd.Series(1, index=df.index)  # 1 = bullish, -1 = bearish
+        trend = pd.Series(1, index=df.index)
         final_upper = upper_band.copy()
         final_lower = lower_band.copy()
 

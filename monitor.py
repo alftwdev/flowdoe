@@ -110,21 +110,41 @@ ALERT_COOLDOWN_HOURS    = 24
 MINOR_CHANGE_THRESHOLD  = 0.5  # price/score delta below this = minor, do not broadcast
 
 # RO composite score weights — N-2 SEC filing is the single highest-conviction signal.
+# EDGAR sources stack: multiple filings in the same cycle = multi-source conviction.
 RO_SCORE_WEIGHTS = {
-    "sec_n2":              60,
+    # EDGAR filing signals (stacking — each detected form adds independently)
+    "sec_n2":              60,   # N-2 registration — RO confirmed, act immediately
+    "sec_n2a":             50,   # N-2/A amendment — final RO terms/pricing
+    "sec_ncsr":             8,   # N-CSR semi-annual — distribution sustainability language
+    "sec_def14a":           8,   # DEF 14A proxy — board vote on distribution policy
+    "13f_holder_exit":     12,   # SC 13D/G large holder change
+    # Premium / spread signals
     "z_danger":            25,
     "z_caution":           12,
     "premium_extreme":     10,
+    "premium_compression": 15,
+    "premium_30pct_watch": 20,
+    # Flow / institutional signals
     "whale_distribution":  15,
+    "dark_pool":           18,
+    # Macro / systemic signals
     "credit_stress":       10,
-    "ex_div_relief":      -10,
-    "ro_season":            8,
+    "macro_underperform":  10,
     "crisis_amplification":12,
-    "dark_pool":           18,   # NEW: off-exchange drop on low public vol
-    "premium_compression": 15,   # NEW: fast intra-session premium collapse
-    "macro_underperform":  10,   # NEW: CLM/CRF drops harder than SPY same session
-    "13f_holder_exit":     12,   # NEW: large holder SC 13D/G change detected
-    "premium_30pct_watch": 20,   # NEW: 30%+ premium crossed — Todd Akin RO Watch gate
+    "ro_season":            8,
+    # Suppressors
+    "ex_div_relief":      -10,
+}
+
+# EDGAR forms watched and their conviction weights.
+# Multiple forms detected simultaneously = conviction stacking.
+EDGAR_FORMS_TO_WATCH = {
+    "N-2":     "sec_n2",       # RO registration
+    "N-2/A":   "sec_n2a",      # RO amendment — final terms
+    "SC 13D":  "13f_holder_exit",
+    "SC 13G":  "13f_holder_exit",
+    "N-CSR":   "sec_ncsr",     # Semi-annual — distribution language
+    "DEF 14A": "sec_def14a",   # Proxy — board distribution vote
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,8 +198,16 @@ def can_broadcast(sector: str, is_major: bool = True) -> bool:
 
 def check_sec_edgar(session, ticker):
     """
-    Scrapes SEC EDGAR for N-2 (Rights Offering) and SC 13D/G (large-holder change).
-    Returns a status string; callers check for 'N-2' or '13D' substrings.
+    Scrapes SEC EDGAR for all forms in EDGAR_FORMS_TO_WATCH.
+    Returns a pipe-delimited string of detected signals. Callers check for
+    'N-2', 'N-2/A', '13D', '13G', 'N-CSR', 'DEF 14A' substrings.
+
+    Multiple detections = multiple conviction sources — the string will contain
+    'MULTI-SOURCE' when ≥2 EDGAR signals fire simultaneously. This is the
+    highest-confidence RO pre-signal available outside of a press release.
+
+    EDGAR is always the primary, free, authoritative source. It runs alongside
+    (not instead of) market data signals — both must agree for highest conviction.
     """
     cik_map = {"CLM": "0000814083", "CRF": "0000033934"}
     cik = cik_map.get(ticker)
@@ -194,17 +222,43 @@ def check_sec_edgar(session, ticker):
             return "No N2/RO detected"
 
         data         = res.json()
-        recent_forms = data.get("filings", {}).get("recent", {}).get("form", [])
+        filings      = data.get("filings", {}).get("recent", {})
+        recent_forms = filings.get("form", [])
+        recent_dates = filings.get("filingDate", [])
         flags        = []
+        seen_forms   = set()  # deduplicate — N-CSR filed twice/year, only flag once
 
-        for i in range(min(15, len(recent_forms))):
+        # Expanded scan depth: N-CSR/DEF 14A are filed less frequently than N-2
+        scan_depth = min(30, len(recent_forms))
+        for i in range(scan_depth):
             form = recent_forms[i]
-            if "N-2" in form:
-                flags.append("⚠️ N-2 FILING DETECTED")
-            if "SC 13D" in form or "SC 13G" in form:
-                flags.append("⚠️ 13D/G LARGE HOLDER CHANGE DETECTED")
+            date = recent_dates[i] if i < len(recent_dates) else "unknown"
 
-        return " | ".join(flags) if flags else "No N2/RO detected"
+            if form == "N-2" and "N-2" not in seen_forms:
+                flags.append(f"⚠️ N-2 RO REGISTRATION ({date})")
+                seen_forms.add("N-2")
+            elif form == "N-2/A" and "N-2/A" not in seen_forms:
+                flags.append(f"⚠️ N-2/A RO AMENDMENT ({date})")
+                seen_forms.add("N-2/A")
+            elif "SC 13D" in form and "SC 13D" not in seen_forms:
+                flags.append(f"⚠️ 13D LARGE HOLDER CHANGE ({date})")
+                seen_forms.add("SC 13D")
+            elif "SC 13G" in form and "SC 13G" not in seen_forms:
+                flags.append(f"⚠️ 13G INSTITUTIONAL HOLDER CHANGE ({date})")
+                seen_forms.add("SC 13G")
+            elif form == "N-CSR" and "N-CSR" not in seen_forms:
+                flags.append(f"📋 N-CSR SEMI-ANNUAL REPORT ({date})")
+                seen_forms.add("N-CSR")
+            elif form == "DEF 14A" and "DEF 14A" not in seen_forms:
+                flags.append(f"📋 DEF 14A PROXY STATEMENT ({date})")
+                seen_forms.add("DEF 14A")
+
+        if not flags:
+            return "No N2/RO detected"
+
+        # Conviction stacking: ≥2 EDGAR sources firing = higher confidence signal
+        conviction = "🔴 MULTI-SOURCE EDGAR CONVICTION" if len(flags) >= 2 else "single source"
+        return f"[{conviction}] " + " | ".join(flags)
 
     except Exception as e:
         logger.error(f"[SEC Fetch Error] {e}")
@@ -316,22 +370,48 @@ def check_crisis_amplification_risk(session):
 # WHALE FLOW — DIRECTION-AWARE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fetch_rvol_native(symbol: str):
+    """
+    Fetch RVOL from TD's native RVOLEndpoint — more accurate than a manual 20D rolling
+    ratio because TD applies their own session-aware volume normalization.
+    Returns the float rvol ratio, or None on failure (caller falls back to manual calc).
+    """
+    try:
+        from twelvedata import TDClient
+        td     = TDClient(apikey=TD_API_KEY)
+        result = td.rvol(symbol=symbol, interval="1day").as_json()
+        if result and len(result) > 0:
+            return float(result[0].get("rvol", 1.0))
+    except Exception as e:
+        logger.debug(f"[RVOL Native] {symbol}: {e} — falling back to manual")
+    return None
+
+
 def detect_whale_flow_direction(session, symbol):
     """
     Distinguishes accumulation from distribution. Generic volume spike alone is not
     actionable — direction of capital flow is what matters for RO front-running.
+    RVOL sourced from TD native RVOLEndpoint (authoritative); price change from a
+    2-bar time_series fetch. Falls back to manual 20-day ratio if TD endpoint fails.
     Returns (tag_string, relative_volume_ratio).
     """
     try:
-        values = fetch_time_series(session, symbol, outputsize=21)
-        if len(values) < 11:
+        # Price change requires at least 2 bars regardless of which RVOL path we take
+        values = fetch_time_series(session, symbol, outputsize=2)
+        if len(values) < 2:
             return "NORMAL", 1.0
-        today_vol    = float(values[0]["volume"])
-        baseline_vol = sum(float(v["volume"]) for v in values[1:21]) / len(values[1:21])
-        if baseline_vol == 0:
-            return "NORMAL", 1.0
-        rvol         = today_vol / baseline_vol
-        price_chg    = (float(values[0]["close"]) - float(values[1]["close"])) / float(values[1]["close"]) * 100
+        price_chg = (float(values[0]["close"]) - float(values[1]["close"])) / float(values[1]["close"]) * 100
+
+        # Try TD native RVOL first — falls back to manual 20D ratio on failure
+        rvol = _fetch_rvol_native(symbol)
+        if rvol is None:
+            # Manual fallback: fetch 21 bars for baseline, use today as numerator
+            extended = fetch_time_series(session, symbol, outputsize=21)
+            if len(extended) < 11:
+                return "NORMAL", 1.0
+            today_vol    = float(extended[0]["volume"])
+            baseline_vol = sum(float(v["volume"]) for v in extended[1:21]) / max(len(extended[1:21]), 1)
+            rvol         = today_vol / baseline_vol if baseline_vol > 0 else 1.0
 
         if rvol >= 1.8 and price_chg <= -0.5:
             return "🔴 DISTRIBUTION (Whale Sell-Off)", rvol
@@ -523,13 +603,31 @@ def check_macro_correlation(session, clm_chg: float, crf_chg: float) -> tuple:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def check_accumulation_readiness(session, ticker: str, vixy_z: float,
-                                  spy_vals_200: list = None) -> dict:
+                                  spy_vals_200: list = None,
+                                  premium: float = None) -> dict:
     """
     Returns a dict: {ready, status, detail, down_streak}.
     Uses pre-fetched spy_vals_200 list (from shared cache) to avoid re-querying SPY.
     Falls back to fetching SPY internally if cache is empty.
     """
     try:
+        # ── PREMIUM GATE — evaluated before all other conditions.
+        # Buying CLM/CRF at >15% premium to NAV compounds downside even when every
+        # other macro signal looks clean. Feb 2, 2026: CLM at 15.6% premium —
+        # all other conditions were neutral, but the elevated premium amplified every
+        # subsequent point of price decline. This gate closes that gap at zero cost.
+        if premium is not None and premium > 15.0:
+            return {
+                "ready":       False,
+                "status":      "WAIT — Elevated Premium (>15% to NAV)",
+                "detail":      (
+                    f"Premium: {premium:.1f}% to NAV — buying at this spread compounds downside. "
+                    f"Target entry: premium < 15% (ideally near NAV during ex-div dip or post-RO). "
+                    f"Historical: CLM/CRF at 15%+ premium = elevated RO announcement risk window."
+                ),
+                "down_streak": 0,
+            }
+
         # 1. Consecutive down days for this ticker (last 10 closes)
         values = fetch_time_series(session, ticker, outputsize=10)
         down_streak = 0
@@ -601,13 +699,11 @@ def check_accumulation_readiness(session, ticker: str, vixy_z: float,
                 "down_streak": down_streak,
             }
         else:
+            bull_bear = "Bull" if spy_above_200 else "Bear"
             return {
                 "ready":       True,
-                "status":      "OPEN — Conditions Support Accumulation",
-                "detail":      (
-                    f"{down_streak} down day(s) | {regime_str} | "
-                    f"VIXY z {vixy_z:+.1f}σ — margin deployment conditions met"
-                ),
+                "status":      "OPEN",
+                "detail":      f"{bull_bear} regime | VIXY z {vixy_z:+.1f}σ | {down_streak}d streak — deploy",
                 "down_streak": down_streak,
             }
 
@@ -637,8 +733,15 @@ def calculate_ro_risk_score(
     added alongside all original signals — weights defined in RO_SCORE_WEIGHTS.
     """
     score = 0
-    if "N-2" in sec_shield:
+    # EDGAR signals stack independently — each detected form adds conviction
+    if "N-2 RO REGISTRATION" in sec_shield:
         score += RO_SCORE_WEIGHTS["sec_n2"]
+    if "N-2/A" in sec_shield:
+        score += RO_SCORE_WEIGHTS["sec_n2a"]
+    if "N-CSR" in sec_shield:
+        score += RO_SCORE_WEIGHTS["sec_ncsr"]
+    if "DEF 14A" in sec_shield:
+        score += RO_SCORE_WEIGHTS["sec_def14a"]
     if z_premium >= 2.0:
         score += RO_SCORE_WEIGHTS["z_danger"]
     elif z_premium >= 1.5:
@@ -696,25 +799,33 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
     if status == "✅ STABLE":
-        sec_n2_line  = "No N-2 filing/ RO detected" if "N-2" not in sec_shield else sec_shield
-        # 13D/G = large institutional holder (>5% ownership) filing a position change.
-        # Clean = no entry/exit by a major holder detected in recent SEC filings.
-        # A change here is an early warning — institutions move before price does.
-        holder_line  = "Clean" if "13D" not in sec_shield and "13G" not in sec_shield else "⚠️ HOLDER CHANGE DETECTED"
-        ro_watch_line = f"┣ ⚠️ RO Watch: Premium at {premium:.1f}% — approaching 30% trigger\n" if premium >= PREMIUM_RO_WATCH_THRESHOLD else ""
+        # EDGAR conviction display — show each source independently for transparency
+        has_ro      = "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield
+        has_holder  = "13D" in sec_shield or "13G" in sec_shield
+        has_ncsr    = "N-CSR" in sec_shield
+        has_def14a  = "DEF 14A" in sec_shield
+        multi       = "MULTI-SOURCE" in sec_shield
+
+        sec_ro_line     = sec_shield if has_ro else "No N-2/RO (safe)"
+        holder_line     = "⚠️ LARGE HOLDER CHANGE — review 13D/G filing" if has_holder else "No large-holder changes (safe)"
+        ncsr_line       = f"┣ EDGAR N-CSR: {[f for f in sec_shield.split(' | ') if 'N-CSR' in f][0] if has_ncsr else ''}\n" if has_ncsr else ""
+        def14a_line     = f"┣ EDGAR DEF 14A: {[f for f in sec_shield.split(' | ') if 'DEF 14A' in f][0] if has_def14a else ''}\n" if has_def14a else ""
+        conviction_line = f"┣ ⚡ EDGAR: {sec_shield[:80]}{'...' if len(sec_shield) > 80 else ''}\n" if multi else ""
+        ro_watch_line   = f"┣ ⚠️ RO Watch: Premium at {premium:.1f}% — approaching 30% trigger\n" if premium >= PREMIUM_RO_WATCH_THRESHOLD else ""
+
         return (
             f"**{ticker} — {status}**\n"
-            f"┣ SEC: {sec_n2_line}\n"
+            f"┣ SEC (N-2/RO): {sec_ro_line}\n"
+            f"┣ Holder (13D/G): {holder_line}\n"
+            f"{ncsr_line}"
+            f"{def14a_line}"
+            f"{conviction_line}"
             f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
             f"{ro_watch_line}"
             f"┣ Whale Flow: {whale_status}\n"
-            f"┣ Holder (13D/G): {holder_line}\n"
             f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
             f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
-            f"┣ Dist. Yield: {y_dist:.1f}%\n"
-            f"┣ DRIP Alpha: +{alpha_drip:.2f}%\n"
-            f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
-            f"┗ Verdict: {income_note} ✓\n"
+            f"┗ Dist. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
         )
 
     seasonal_line      = "┣ ⚠️ Seasonal Caution: Active (March/Sept historically weak)\n" if seasonal_caution else ""
@@ -820,7 +931,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
 
     # ── NEW: Track N-2 detection across cycles (used by RO completion dip detector)
     n2_key = f"cornerstone_n2_detected_{ticker}"
-    if "N-2" in sec_shield:
+    if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         if not db.get_state(n2_key, ""):
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
             # Reset the dip-fired flag when a new RO cycle starts
@@ -871,7 +982,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
-    if ro_tier in ("ELEVATED", "CRITICAL") or "N-2" in sec_shield:
+    if ro_tier in ("ELEVATED", "CRITICAL") or "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         try:
             from analytics import HighFidelityAnalyticsEngine
             prediction_id = f"{ticker}_{datetime.now().strftime('%Y%m%d')}"
@@ -883,7 +994,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
             logger.error(f"Cornerstone ledger logging failed: {e}")
 
     # ── Status / recommendation logic (original tiers preserved, new signals feed score)
-    if "N-2" in sec_shield:
+    if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         status       = "🚨 CRITICAL: N-2 DETECTED"
         income_note  = "Distribution/Caution phase"
         verdict      = "Active SEC N-2/RO filing detected. NAV dilution imminent. SELL to minimum 3 shares — keeping ≥3 shares preserves CS DRIP status permanently; going to zero forces you to re-apply."
@@ -926,15 +1037,10 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         seasonal_caution=seasonal_caution, y_dist=y_dist
     )
 
-    # ── Accumulation gate — appended to every report, STABLE or not.
-    # This is the Feb/March 2026 guard: tells you whether conditions support
-    # adding margin today, independent of the RO risk tier.
-    acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200)
+    # ── Accumulation gate — one-line summary appended to every report.
+    acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200, premium=premium)
     gate_icon = "🟢" if acc["ready"] else ("🔴" if "WAIT" in acc["status"] else "⚠️")
-    report_text += (
-        f"┣ {gate_icon} Margin Gate: {acc['status']}\n"
-        f"┗ {acc['detail']}\n"
-    )
+    report_text += f"┗ {gate_icon} Margin: {acc['status']} | {acc['detail']}\n"
 
     return report_text, ro_tier, ro_score
 
@@ -943,29 +1049,51 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_cornerstone_chart():
-    """Price vs. NAV for both funds rebased to 100 over 60 days."""
+    """
+    Fetches live Finviz daily charts for CLM and CRF, stitches them vertically
+    into one image (CLM on top, CRF below) for the Discord embed attachment.
+    Falls back to None if either fetch fails — dispatch continues without a chart.
+    """
     try:
-        from analytics import HighFidelityAnalyticsEngine
-        engine = HighFidelityAnalyticsEngine()
-        series = {}
-        for ticker, cfg in PRIORITY_ASSETS.items():
-            price_df = engine.fetch_crypto_ohlc(ticker, outputsize=60)
-            nav_df   = engine.fetch_crypto_ohlc(cfg["nav_ticker"], outputsize=60)
-            if price_df is not None and not price_df.empty:
-                # Reset index + explicit float conversion before handing to matplotlib —
-                # newer numpy (2.0+) no longer supports obj[:, None] on pandas Series,
-                # which matplotlib uses internally. reset_index + astype ensures a clean
-                # RangeIndex float Series that matplotlib can handle without casting.
-                series[f"{ticker} Price"] = price_df["close"].reset_index(drop=True).astype(float)
-            if nav_df is not None and not nav_df.empty:
-                series[f"{ticker} NAV"]   = nav_df["close"].reset_index(drop=True).astype(float)
-        if not series:
+        from PIL import Image
+        import io
+        charts = []
+        headers = {"User-Agent": "Mozilla/5.0"}
+        for ticker in PRIORITY_ASSETS:
+            url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l"
+            res = requests.get(url, headers=headers, timeout=15)
+            res.raise_for_status()
+            img = Image.open(io.BytesIO(res.content)).convert("RGB")
+            charts.append(img)
+
+        if not charts:
             return None
-        return generate_line_comparison_chart(
-            series, "Cornerstone CLM/CRF | Price vs. NAV (Rebased to 100, 60D)"
-        )
+
+        # Stack vertically — both charts same width (Finviz returns consistent dimensions)
+        total_height = sum(c.height for c in charts)
+        combined = Image.new("RGB", (charts[0].width, total_height), (30, 30, 30))
+        y_offset = 0
+        for c in charts:
+            combined.paste(c, (0, y_offset))
+            y_offset += c.height
+
+        buf = io.BytesIO()
+        combined.save(buf, format="PNG")
+        return buf.getvalue()
+
+    except ImportError:
+        # Pillow not installed — return individual CLM chart as fallback
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            url = f"https://finviz.com/chart.ashx?t=CLM&ty=c&ta=1&p=d&s=l"
+            res = requests.get(url, headers=headers, timeout=15)
+            res.raise_for_status()
+            return res.content
+        except Exception as e:
+            logger.error(f"Finviz chart fallback failed: {e}")
+            return None
     except Exception as e:
-        logger.error(f"Cornerstone chart generation failed: {e}")
+        logger.error(f"Finviz chart generation failed: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1175,7 +1303,41 @@ def check_and_escalate_if_critical():
 # MAIN MONITOR LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _make_ws_callback():
+    """
+    Returns a WebSocket callback that fires an immediate escalation check when CLM,
+    CRF, or VIXY price moves. The check runs in a thread so the WS receive loop is
+    never blocked by the REST calls inside compute_cornerstone_reports().
+
+    Debounce: at most one WS-triggered escalation per 60 seconds to prevent
+    callback storms during volatile intraday sessions.
+    """
+    _last_ws_check = [0.0]  # mutable container for closure state
+
+    def _ws_price_callback(symbol: str, price: float, event: dict):
+        if symbol not in ("CLM", "CRF", "VIXY"):
+            return
+        now = time.monotonic()
+        if now - _last_ws_check[0] < 60.0:
+            return
+        _last_ws_check[0] = now
+        logger.info(f"[WS] {symbol} price update ${price:.4f} — triggering immediate escalation check")
+        t = threading.Thread(target=_ws_escalation_check, daemon=True)
+        t.start()
+
+    return _ws_price_callback
+
+
+def _ws_escalation_check():
+    """Runs check_and_escalate_if_critical() from the WebSocket callback thread."""
+    try:
+        check_and_escalate_if_critical()
+    except Exception as e:
+        logger.error(f"[WS Escalation] Error: {e}")
+
+
 def run_monitor():
+    import threading
     tz_h = pytz.timezone('Pacific/Honolulu')
 
     # CLI test/force mode — fires once and exits
@@ -1184,6 +1346,18 @@ def run_monitor():
         return
 
     logger.info("⏳ [Engine Loop] Cornerstone monitor active. DB state tracking enabled.")
+
+    # ── WebSocket: real-time CLM/CRF/VIXY price stream
+    # Supplements the 5-min REST polling loop — price moves trigger immediate
+    # escalation checks rather than waiting for the next scheduled tick.
+    try:
+        from shared_ws import get_ws_manager
+        ws_mgr = get_ws_manager()
+        ws_mgr.register_callback(_make_ws_callback())
+        ws_mgr.start_background()
+        logger.info("[WS] Shared WebSocket manager started — CLM/CRF/VIXY streaming active.")
+    except Exception as e:
+        logger.warning(f"[WS] WebSocket startup failed (REST polling continues): {e}")
 
     while True:
         try:
@@ -1206,7 +1380,7 @@ def run_monitor():
         except Exception as e:
             logger.critical(f"FATAL LOOP EXCEPTION: {e}")
 
-        time.sleep(300)  # 5-minute tick
+        time.sleep(300)  # 5-minute tick — WS handles intraday real-time between ticks
 
 if __name__ == "__main__":
     run_monitor()
