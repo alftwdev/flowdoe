@@ -77,7 +77,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "finviz_snapshot", "crypto_social", "futures_social"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -283,51 +283,6 @@ def main():
                     send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS DESK | Pre-Market Conditions Brief", options_brief, 0x00ffff)
             except Exception as e:
                 logger.error(f"Morning options brief failed: {e}")
-
-            # ── FINVIZ MARKET SNAPSHOT (bundled into morning — no separate cron slot needed) ──
-            try:
-                snap = engine.fetch_finviz_market_snapshot()
-                today_label = datetime.now().strftime("%b %-d")
-
-                def _mover_line(m):
-                    """Returns formatted mover string, or None if data is missing/zero."""
-                    if not m.get("symbol") or m.get("price", 0) == 0:
-                        return None
-                    arrow = "▲" if m["chg"] >= 0 else "▼"
-                    return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
-
-                def _mover_str(items):
-                    lines = [_mover_line(m) for m in items]
-                    valid = [l for l in lines if l]
-                    return "  ".join(valid) if valid else "Pre-market — updates after 09:30 ET"
-
-                gainers_str = _mover_str(snap["gainers"])
-                losers_str  = _mover_str(snap["losers"])
-                unusual_str = _mover_str(snap["unusual_vol"])
-                adv = snap["sectors_advancing"]
-                dec = snap["sectors_declining"]
-                tot = snap["total_sectors"]
-                breadth_bar = "▲" * adv + "▼" * dec
-
-                snap_payload = (
-                    f"**MARKET SNAPSHOT — {today_label}**\n\n"
-                    f"**Sector Breadth** (prior close)\n"
-                    f"┣ {breadth_bar}\n"
-                    f"┗ {adv}/{tot} sectors advancing\n\n"
-                    f"**Top Gainers**\n"
-                    f"┗ {gainers_str}\n\n"
-                    f"**Top Losers**\n"
-                    f"┗ {losers_str}\n\n"
-                    f"**Unusual Volume**\n"
-                    f"┗ {unusual_str}\n\n"
-                    f"─────────────────────────\n"
-                    f"Source: Finviz · SPDR sector ETFs\n"
-                    f"Not financial advice — for informational/educational use only."
-                )
-                if WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | Finviz Snapshot", snap_payload, 0x2ecc71)
-            except Exception as e:
-                logger.error(f"Morning Finviz snapshot failed: {e}")
 
             logger.info("Morning primers successfully compiled and dispatched.")
 
@@ -928,58 +883,6 @@ def main():
                         logger.info(f"Trending plays dispatched: {len(plays)} plays.")
             except Exception as e:
                 logger.error(f"Trending plays scanner failed: {e}")
-
-        elif args.mode == "finviz_snapshot":
-            # ── FINVIZ MARKET SNAPSHOT → #market-analysis ────────────────────
-            # Top 5 gainers, top 5 losers, top 5 unusual volume (Finviz CSV export).
-            # Sector breadth proxy: 11 SPDR ETFs advancing vs declining.
-            # Run alongside the morning report or as a standalone mid-session refresh.
-            try:
-                snap = engine.fetch_finviz_market_snapshot()
-                today_label = datetime.now().strftime("%b %-d")
-
-                def _mover_line(m):
-                    if not m.get("symbol") or m.get("price", 0) == 0:
-                        return None
-                    arrow = "▲" if m["chg"] >= 0 else "▼"
-                    return f"`{m['symbol']}` ${m['price']:.2f} {arrow}{abs(m['chg']):.1f}%"
-
-                def _mover_str(items):
-                    valid = [_mover_line(m) for m in items if _mover_line(m)]
-                    return "  ".join(valid) if valid else "Pre-market — updates after 09:30 ET"
-
-                gainers_str = _mover_str(snap["gainers"])
-                losers_str  = _mover_str(snap["losers"])
-                unusual_str = _mover_str(snap["unusual_vol"])
-                adv, dec, tot = snap["sectors_advancing"], snap["sectors_declining"], snap["total_sectors"]
-                breadth_bar = "▲" * adv + "▼" * dec
-                breadth_pct = f"{adv}/{tot} sectors advancing"
-
-                payload = (
-                    f"**MARKET SNAPSHOT — {today_label}**\n\n"
-                    f"**Sector Breadth** (prior close)\n"
-                    f"┣ {breadth_bar}\n"
-                    f"┗ {breadth_pct}\n\n"
-                    f"**Top Gainers**\n"
-                    f"┗ {gainers_str}\n\n"
-                    f"**Top Losers**\n"
-                    f"┗ {losers_str}\n\n"
-                    f"**Unusual Volume**\n"
-                    f"┗ {unusual_str}\n\n"
-                    f"─────────────────────────\n"
-                    f"Source: Finviz · SPDR sector ETFs\n"
-                    f"Not financial advice — for informational/educational use only."
-                )
-
-                if WEBHOOK_MARKET:
-                    send_essentials_embed(
-                        WEBHOOK_MARKET,
-                        "MARKET ANALYSIS | Finviz Snapshot",
-                        payload, 0x2ecc71
-                    )
-                    logger.info("Finviz market snapshot dispatched to #market-analysis.")
-            except Exception as e:
-                logger.error(f"Finviz snapshot failed: {e}")
 
         elif args.mode == "crypto_social":
             # ── CRYPTO SOCIAL SNAPSHOT → #crypto ─────────────────────────────
