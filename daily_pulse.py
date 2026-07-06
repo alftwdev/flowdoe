@@ -106,7 +106,7 @@ def fetch_simplefin_accounts(debug=False):
 
     liquid, credit, brokerage = [], [], []
     brokerage_orgs = ("e*trade", "etrade", "fidelity", "schwab", "td ameritrade",
-                      "vanguard", "robinhood", "webull", "m1 finance")
+                      "vanguard", "robinhood", "webull", "m1")
 
     for a in raw:
         org   = a.get("org", {}).get("name", "Unknown")
@@ -241,13 +241,32 @@ def save_state(state):
 # Noisy account names from bank feeds → cleaner display labels.
 # Keys are substrings (lowercased) found in the raw account name.
 ACCOUNT_NAME_MAP = {
-    "active duty checking": "Checking",
+    "active duty":          "Checking",   # M1 / NFCU feed labels
     "flagship rewards":     "Flagship Visa",
     "visa signature":       "Visa",
     "platinum card":        "Amex Platinum",
     "gold card":            "Amex Gold",
     "individual brokerage": "Brokerage",
+    "custodial":            "Custodial",
 }
+
+# Org names from SimpleFIN feeds → clean short labels shown before the dash.
+ORG_NAME_MAP = {
+    "navy federal":   "NFCU",
+    "american expre": "Amex",    # matches "American Express"
+    "e*trade":        "E*Trade",
+    "etrade":         "E*Trade",
+    "m1 finance":     "M1",
+}
+
+def _org_label(org):
+    """Map verbose SimpleFIN org names to short display labels."""
+    org_lower = org.lower()
+    for fragment, label in ORG_NAME_MAP.items():
+        if fragment in org_lower:
+            return label
+    # Fallback: first word of org name
+    return org.split()[0] if org and org != "Unknown" else ""
 
 def _clean_name(org, name):
     """
@@ -261,7 +280,7 @@ def _clean_name(org, name):
         if fragment in name_lower:
             name = replacement
             break
-    org_short = org.split()[0] if org and org != "Unknown" else ""
+    org_short = _org_label(org)
     return f"{org_short} — {name}" if org_short else name
 
 
@@ -311,14 +330,13 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
         lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
     lines.append(f"┗ Total: ${total_liquid:,.2f}{_delta(total_liquid, prev_liquid)}")
 
-    # ── Section 2: Credit / Liabilities (sorted most-negative first)
-    total_owed = sum(a["balance"] for a in credit)
+    # ── Section 2: Credit / Liabilities (sorted most-negative first, skip zero-balance)
+    active_credit = [a for a in credit if round(a["balance"], 2) != 0.0]
+    total_owed = sum(a["balance"] for a in active_credit)
     lines.append("")
     lines.append("CREDIT / LIABILITIES")
-    if credit:
-        for i, a in enumerate(credit):
-            connector = "┗" if i == len(credit) - 1 and not True else "┣"
-            # Always show negative liabilities with a minus sign before the dollar sign
+    if active_credit:
+        for a in active_credit:
             bal_str = f"$-{abs(a['balance']):,.2f}" if a["balance"] <= 0 else f"${a['balance']:,.2f}"
             lines.append(f"┣ {_clean_name(a['org'], a['name'])}: {bal_str}")
         lines.append(f"┗ Total Owed: $-{abs(total_owed):,.2f}")
