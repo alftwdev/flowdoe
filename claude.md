@@ -128,7 +128,10 @@ STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 | #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board, ES/NQ market profile deep-dive, Initial Balance breakout scanner |
 | #crypto | WEBHOOK_CRYPTO | crypto.py | BTC/ETH spot, Fear & Greed, on-chain |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | options.py | Wheel strategy + TQQQ sniper signals |
-| #dividend-ccetfs | WEBHOOK_DIVIDEND_CCETFS | scheduler.py (`--mode income`) | CC ETF/dividend pulse, wheel v2, ex-div radar, new-ETF discovery |
+| #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode trending_plays`) | Social sentiment scanner (StockTwits + Reddit WSB + Finviz) → top 5 options plays with BTO setup when HIGH conviction |
+| #crypto | WEBHOOK_CRYPTO | scheduler.py (`--mode crypto_social`) | Fear & Greed + Reddit r/CryptoCurrency + BTC/ETH/SOL/AVAX/LINK/DOGE spot — foundation layer until crypto.py is built |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | scheduler.py (`--mode futures_social`) | StockTwits + Reddit WSB filtered to energy/metals/rates/ag names — commodity rotation social overlay for cross_asset.py context |
+| #dividend-ccetfs | WEBHOOK_DIVIDEND_CCETFS | scheduler.py (`--mode income`) | Wheel Candidates v2 (dynamic RSI/BB/IVR scanner) + New CC ETF Screener (YieldMax/Roundhill/NEOS/TappAlpha) |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode wheel_signals`) | Tier 2 IV Rank screener + open wheel position DTE countdown |
 | #fed | WEBHOOK_FED | fed.py | Fed rate/macro signals |
 
@@ -254,6 +257,7 @@ margin_rate = 7.25                      # benchmark margin cost %
 
 | File | Status | Purpose |
 |------|--------|---------|
+| `audit.py` | ✅ Live | Daily DB maintenance — prunes stale alert locks (>24h), caps audit_logs at 500 rows, runs VACUUM. Keeps 3-notification rule mathematically correct and DB lean. Runs once/day at 09:39 UTC via cron. |
 | `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine |
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
 | `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC |
@@ -262,7 +266,7 @@ margin_rate = 7.25                      # benchmark margin cost %
 | `cross_asset.py` | ✅ Live | Futures board, ES/NQ market profile + CVD + structure, Initial Balance breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
 | `scheduler.py` | ✅ Live | Central dispatcher — morning/eod/income/wheel_signals/wheel_position/iv_crush/gex/etc. |
-| `stream.py` | ✅ Live | Real-time REST/WebSocket sentry (FX perimeter, telemetry, traps) |
+| `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts, VIXY real-time price → DB for monitor.py. REST poller (StructuralBreakoutAgent) removed — was burning 2,880 API calls/day with no unique value vs tqqq.py. |
 | `tqqq.py` | ✅ Live | TQQQ directional sniper + standalone insurance-put renewal clock |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
 | `.env` | ✅ Live | All API keys + webhooks (never committed) |

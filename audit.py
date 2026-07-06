@@ -3,6 +3,7 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from database import EcosystemDatabase
 
 logger = logging.getLogger("Phase_C_Auditor")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -49,3 +50,4 @@ class EcosystemAuditor:
 if __name__ == "__main__":
     auditor = EcosystemAuditor()
     auditor.optimize_database_performance()
+    EcosystemDatabase().purge_expired_cache()

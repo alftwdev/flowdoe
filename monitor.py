@@ -828,28 +828,40 @@ def calculate_ro_risk_score(
 # Mobile-first Discord format: Title / ┣ Data / ┗ Final
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _sec_single_line(sec_shield: str) -> str:
+def _parse_sec_shield(sec_shield: str) -> dict:
     """
-    Distil the full EDGAR shield string into one actionable line for the pulse report.
-    Full detail is preserved in sec_shield for logging and escalation paths; this
-    function only controls what the daily Discord line shows. Dates are omitted —
-    they belong in the back-pocket log, not the daily status line.
+    Parse the full EDGAR shield string into structured components for display.
+    Returns a dict with keys: ro_active, holder_change, has_routine_only, sec_line, holder_line, edgar_line.
+    Routine filings (N-CSR, DEF 14A) are back-pocket only — they do not appear as
+    conviction signals in the output when no N-2 or 13D/G is present.
     """
-    if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
-        form_bit = "N-2/A amendment" if "N-2/A" in sec_shield else "N-2 registration"
-        return f"⚠️ {form_bit} — RO ACTIVE"
-    if "13D" in sec_shield or "13G" in sec_shield:
-        return "⚠️ Large holder change detected — monitor"
-    # Routine filings (N-CSR, DEF 14A) — show form type only, no date
-    for part in sec_shield.split(" | "):
-        clean = (part.replace("📋 ", "")
-                    .replace("[single source] ", "")
-                    .replace("[🔴 MULTI-SOURCE EDGAR CONVICTION] ", "")
-                    .split("(")[0]   # strip trailing (date)
-                    .strip())
-        if clean:
-            return f"{clean} — routine"
-    return "No recent EDGAR activity"
+    ro_active     = "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield
+    holder_change = "13D" in sec_shield or "13G" in sec_shield
+    has_routine   = "N-CSR" in sec_shield or "DEF 14A" in sec_shield
+
+    if ro_active:
+        form_bit   = "N-2/A amendment" if "N-2/A" in sec_shield else "N-2 registration"
+        sec_line   = f"⚠️ {form_bit} — RO ACTIVE"
+        edgar_line = f"⚠️ {form_bit} — RO ACTIVE"
+    else:
+        sec_line   = "No N-2/RO (safe)"
+        # ⚡ EDGAR: only show conviction when actionable signal present (13D/G or N-2).
+        # Routine N-CSR/DEF 14A filings are stored in DB but never surfaced as red alerts.
+        edgar_line = "None"
+
+    if holder_change:
+        holder_line = "⚠️ Large holder change detected — monitor"
+        edgar_line  = "⚠️ Large holder change (13D/G)"
+    else:
+        holder_line = "No large-holder changes (safe)"
+
+    return {
+        "sec_line":    sec_line,
+        "holder_line": holder_line,
+        "edgar_line":  edgar_line,
+        "ro_active":   ro_active,
+        "holder_change": holder_change,
+    }
 
 
 def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
@@ -860,48 +872,48 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          income_note, s_net, alpha_drip, seasonal_caution,
                          y_dist=0.0) -> str:
     """
-    4-line compact Cornerstone Pulse — mobile-first.
+    Cornerstone Pulse — mobile-first labeled format.
 
-    Core lines (always present):
-      Line 1: ticker + status header
-      Line 2: Price | NAV | Premium
-      Line 3: RSI | z-score
-      Line 4: EDGAR — single-line signal
+    Fixed lines (always present):
+      SEC Filing, Premium to NAV, Holder (13D/G), ⚡ EDGAR, Whale Flow,
+      Z-Score, RSI (1D), Div. Yield + RO Risk
 
-    Conditional lines (only when triggered, inserted before verdict):
-      Whale DISTRIBUTION, Dark Pool, VIXY spike, RO Season, Seasonal Caution
+    Conditional lines (only when triggered):
+      OBV divergence, VIXY spike, RO Season, Seasonal Caution, Ex-Div
 
-    Verdict always last. Removed from output (back-pocket / DB only):
-      Net Arb Spread, DRIP Alpha, RO Risk Score, Premium Compression, Macro Correlation, Margin Deploy.
+    Verdict always last.
+    Removed from output (back-pocket / DB only):
+      N-CSR, DEF 14A individual lines, Margin Deploy advisory.
     """
     prem_tag = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else ("(HIGH)" if premium > 15 else "(DISCOUNT)"))
-    rsi_tag  = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else "(OVERSOLD)")
+    rsi_tag  = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else ("(OVERSOLD)" if rsi < 30 else "(neutral)"))
     z_tag    = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
-    sec_line = _sec_single_line(sec_shield)
+    sec  = _parse_sec_shield(sec_shield)
 
-    # Conditional alert lines — only surface when signal is actually firing
-    whale_line     = f"┣ Whale: {whale_status} ⚠️\n" if "DISTRIBUTION" in whale_status.upper() else ""
-    dark_pool_line = f"┣ Dark Pool: {dark_pool_desc}\n" if "⚠️" in dark_pool_desc or "WARNING" in dark_pool_desc.upper() else ""
-    vixy_line      = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
+    # Whale flow: only surface when distribution is detected
+    whale_tag = f"⚠️ {whale_status}" if "DISTRIBUTION" in whale_status.upper() else "NORMAL"
+
+    # Conditional lines — inserted before verdict only when triggered
+    vixy_line    = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
     seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
     ex_div_line    = "┣ Ex-Div: Scheduled dip (not RO-related)\n" if ex_div_near else ""
 
     return (
         f"{ticker} — {status}\n"
-        f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
-        f"┣ Premium: {premium:.1f}% {prem_tag}\n"
-        f"┣ z: {z_premium:+.1f}σ {z_tag}\n"
-        f"┣ RSI: {rsi:.1f} {rsi_tag}\n"
-        f"┣ EDGAR: {sec_line}\n"
-        f"{whale_line}"
-        f"{dark_pool_line}"
+        f"┣ SEC Filing: {sec['sec_line']}\n"
+        f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+        f"┣ Holder (13D/G): {sec['holder_line']}\n"
+        f"┣ ⚡ EDGAR: {sec['edgar_line']}\n"
+        f"┣ Whale Flow: {whale_tag}\n"
+        f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
+        f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
         f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
         f"{ex_div_line}"
-        f"┗ {verdict}\n"
+        f"┗ Div. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────

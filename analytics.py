@@ -21,12 +21,18 @@ class HighFidelityAnalyticsEngine:
         self.base_url = "https://api.twelvedata.com"
 
     def _execute_query(self, endpoint, params):
+        cached = self.db.get_cached_response(endpoint, params)
+        if cached is not None:
+            return cached
         params["apikey"] = self.api_key
         try:
             r = requests.get(f"{self.base_url}/{endpoint}", params=params, timeout=12)
-            if r.status_code == 200: return r.json()
+            if r.status_code == 200:
+                data = r.json()
+                self.db.set_cached_response(endpoint, params, data)
+                return data
             return None
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"API Execution Failure ({endpoint}): {e}")
             return None
 
@@ -66,9 +72,14 @@ class HighFidelityAnalyticsEngine:
 
     def _fetch_twelve_data_quotes(self, symbols_list):
         if not self.api_key: return {}
-        url = f"https://api.twelvedata.com/quote?symbol={','.join(symbols_list)}&apikey={self.api_key}"
+        params = {"symbol": ",".join(sorted(symbols_list))}
+        cached = self.db.get_cached_response("quote", params)
+        if cached is not None:
+            return cached if len(symbols_list) > 1 else ({symbols_list[0]: cached} if "symbol" in cached else {})
         try:
+            url = f"https://api.twelvedata.com/quote?symbol={','.join(symbols_list)}&apikey={self.api_key}"
             res = requests.get(url, timeout=15).json()
+            self.db.set_cached_response("quote", params, res)
             if len(symbols_list) == 1:
                 return {symbols_list[0]: res} if "symbol" in res else {}
             return res

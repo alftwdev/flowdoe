@@ -3,7 +3,8 @@ import threading
 import json
 import os
 import logging
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 logger = logging.getLogger("Database_Engine")
@@ -55,6 +56,13 @@ class EcosystemDatabase:
                         last_trigger REAL,
                         broadcast_count INTEGER DEFAULT 0,
                         last_alert_time TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS market_data_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        response_json TEXT NOT NULL,
+                        cached_at TIMESTAMP NOT NULL
                     )
                 """)
                 cursor.execute("""
@@ -204,6 +212,85 @@ class EcosystemDatabase:
                 """, (key, val_str))
                 conn.commit()
         except sqlite3.OperationalError:
+            pass
+
+    # ------------------------------------------------------------------
+    # Market Data Cache — cross-process, cross-script TD response cache.
+    # Eliminates redundant API calls when multiple cron jobs run within
+    # the same session window (e.g., the 13:28-13:50 premarket cluster).
+    # ------------------------------------------------------------------
+
+    _CACHE_TTL = {
+        "dividends":   86400,   # 24h — payout schedule doesn't change intraday
+        "statistics":  86400,   # 24h — fundamentals are daily at best
+        "time_series_1day": 3600,  # 1h — daily bars are stable within a session
+        "time_series_1week": 86400,
+        "time_series_4h":    300,
+        "quote":        300,    # 5 min — fresh enough for any cron in the cluster
+        "default":      300,
+    }
+
+    @staticmethod
+    def _cache_key(endpoint, params):
+        """Deterministic cache key from endpoint + sorted params (api key excluded)."""
+        filtered = {k: v for k, v in sorted(params.items()) if k != "apikey"}
+        raw = f"{endpoint}|" + "&".join(f"{k}={v}" for k, v in filtered.items())
+        return hashlib.sha1(raw.encode()).hexdigest()
+
+    @staticmethod
+    def _cache_ttl(endpoint, params):
+        if endpoint == "time_series":
+            interval = params.get("interval", "1day")
+            key = f"time_series_{interval}"
+            return EcosystemDatabase._CACHE_TTL.get(key, EcosystemDatabase._CACHE_TTL["default"])
+        return EcosystemDatabase._CACHE_TTL.get(endpoint, EcosystemDatabase._CACHE_TTL["default"])
+
+    def get_cached_response(self, endpoint, params):
+        """Return cached API response dict if still fresh, else None."""
+        key = self._cache_key(endpoint, params)
+        ttl  = self._cache_ttl(endpoint, params)
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT response_json, cached_at FROM market_data_cache WHERE cache_key = ?", (key,)
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                age = (datetime.now() - datetime.fromisoformat(row[1])).total_seconds()
+                if age > ttl:
+                    return None
+                return json.loads(row[0])
+        except Exception:
+            return None
+
+    def set_cached_response(self, endpoint, params, data):
+        """Write an API response to the cache."""
+        if data is None:
+            return
+        key = self._cache_key(endpoint, params)
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """INSERT INTO market_data_cache (cache_key, response_json, cached_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(cache_key) DO UPDATE
+                       SET response_json=excluded.response_json, cached_at=excluded.cached_at""",
+                    (key, json.dumps(data), datetime.now().isoformat())
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def purge_expired_cache(self):
+        """Remove all cache entries older than their TTL. Called by audit.py daily."""
+        try:
+            cutoff = (datetime.now() - timedelta(seconds=max(self._CACHE_TTL.values()))).isoformat()
+            with self._get_connection() as conn:
+                conn.execute("DELETE FROM market_data_cache WHERE cached_at < ?", (cutoff,))
+                conn.commit()
+        except Exception:
             pass
 
     def get_state(self, key, default=None):

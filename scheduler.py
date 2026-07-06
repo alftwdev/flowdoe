@@ -343,33 +343,9 @@ def main():
                 logger.info("TSP report skipped — already reported today's official close, or data unavailable.")
 
         elif args.mode == "income":
-            logger.info("Executing Income Channel: CC ETF Pulse + Wheel Candidates + Ex-Div Radar...")
+            logger.info("Executing Income Channel: Wheel Candidates + New CC ETF Screener...")
 
-            # ── SEGMENT 1: EX-DIV URGENCY BOARD (imminent only, ≤14 days) ────
-            try:
-                etf_data = engine.generate_income_etf_pulse()
-                imminent = [e for e in etf_data if e["days_away"] <= 14]
-                if imminent:
-                    lines = []
-                    for item in imminent:
-                        urgency_icon = "🔥" if item["days_away"] <= 3 else ("⚡" if item["days_away"] <= 7 else "📅")
-                        div_str = f"${item['div_amount']:.4f}" if item["div_amount"] > 0 else "TBD"
-                        lines.append(
-                            f"{urgency_icon} **{item['symbol']}** | Ex: `{item['ex_date']}` ({item['days_away']}d) "
-                            f"| Div: `{div_str}` | Yield: `{item['ann_yield']:.1f}%` | Spot: `${item['spot']:.2f}`"
-                        )
-                    etf_payload = "\n".join(lines) + "\n*Deploy before ex-date. Position settles T+1.*"
-                    state_key = f"EXDIV_{'_'.join(e['symbol'] for e in imminent)}"
-                    if engine.db.track_and_limit_alerts("income_etf_pulse", state_key, float(len(imminent)), max_broadcasts=2, threshold_pct=0.1):
-                        if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "Ex-Div Radar | Action Window", etf_payload, 0x1abc9c)
-                            logger.info(f"Ex-div urgency board: {len(imminent)} imminent.")
-                else:
-                    logger.info("Ex-div board: no imminent ex-dates ≤14 days, skipping embed.")
-            except Exception as e:
-                logger.error(f"Ex-div radar segment failed: {e}")
-
-            # ── SEGMENT 2: DIVIDEND WHEEL CANDIDATES v2 ───────────────────────
+            # ── SEGMENT 1: DIVIDEND WHEEL CANDIDATES v2 ───────────────────────
             # Enhanced scanner: RSI-14, Bollinger %B, IVR proxy, theta, break-even,
             # Finnhub safety grade, 3% capital sizing. Returns top 5.
             try:
@@ -411,50 +387,7 @@ def main():
             except Exception as e:
                 logger.error(f"Dividend wheel v2 segment failed: {e}")
 
-            # ── SEGMENT 3: EX-DIVIDEND RADAR ──────────────────────────────────
-            # 14-day countdown for the broader dividend universe (10 tickers).
-            # Separate from ETF pulse — covers individual stocks too.
-            try:
-                ex_div_data = engine.generate_ex_dividend_radar()
-                if ex_div_data:
-                    ex_payload = "Targeted Capital Deployment Timeline — Next 14 Days\n\n"
-                    composite_ex_trigger = 0.0
-                    for item in ex_div_data:
-                        if item['days_away'] <= 1:
-                            urgency_tag = "🔥 **TOMORROW — LAST CHANCE**"
-                        elif item['days_away'] <= 3:
-                            urgency_tag = "⚡ **IMMINENT**"
-                        elif item['days_away'] <= 7:
-                            urgency_tag = "📅 **THIS WEEK**"
-                        else:
-                            urgency_tag = f"🔍 **In {item['days_away']} Days**"
-
-                        ex_payload += (
-                            f"**{item['symbol']}** | {urgency_tag}\n"
-                            f"┣ Ex-Dividend Date: `{item['ex_date']}`\n"
-                            f"┗ Declared Payout: `${item['amount']:,.4f}` per share\n\n"
-                        )
-                        composite_ex_trigger += item['amount']
-
-                    ex_payload += (
-                        "Directive: Position must be held at market open on ex-date. "
-                        "Settlement is T+1 — buy no later than the day before ex-date."
-                    )
-
-                    if engine.db.track_and_limit_alerts(
-                        "ex_dividend_radar_weekly",
-                        f"EX_DIV_{len(ex_div_data)}_AMT_{round(composite_ex_trigger, 2)}",
-                        composite_ex_trigger,
-                        max_broadcasts=2,
-                        threshold_pct=0.05
-                    ):
-                        if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "EX-DIVIDEND RADAR | Yield Capture Countdown", ex_payload, 0xf1c40f)
-                            logger.info(f"Ex-dividend radar dispatched: {len(ex_div_data)} upcoming events.")
-            except Exception as e:
-                logger.error(f"Ex-dividend radar segment failed: {e}")
-
-            # ── SEGMENT 4: NEW/TRENDING CC ETF SCREENER (Module 3) ─────────────
+            # ── SEGMENT 2: NEW/TRENDING CC ETF SCREENER ────────────────────────
             # YieldMax / Roundhill / NEOS / TappAlpha discovery feed — surfaces names worth
             # adding to the wheel universe. Yield, age, and AUM filters all pull real data;
             # nothing here is a static watchlist.
