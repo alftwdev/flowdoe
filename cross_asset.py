@@ -783,12 +783,15 @@ if __name__ == "__main__":
     if mode == "board":
         run_futures_board()
     elif mode == "profile":
+        # Manual-only — not part of the scheduled cron run.
+        # The deep-dive profile (VWAP/VAH/POC/CVD/Ichimoku) is available on demand
+        # but no longer fires automatically as a morning or EOD report.
         run_intraday_futures_update()
     elif mode == "ib_breakout":
         run_ib_breakout_scan()
     else:
-        # Default cron invocation: steady-cadence board (now change-gated), the gatekeeper-gated
-        # deep dive, and the IB breakout scan (self-gated to after 10:30 ET, once per symbol/day).
+        # Default cron invocation: change-gated board + IB breakout scanner.
+        # Profile deep-dive removed from scheduled runs — call `python cross_asset.py profile`
+        # manually if a session-specific deep-dive is needed.
         run_futures_board()
-        run_intraday_futures_update()
         run_ib_breakout_scan()
