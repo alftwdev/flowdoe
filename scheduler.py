@@ -248,19 +248,22 @@ def main():
                 logger.error(f"Market analysis intraday report failed: {e}")
 
         elif args.mode == "weekly_scorecard":
-            # Cross-sector accuracy proof point — public to Announcements (the "bait"), full
-            # depth also mirrored to Market Analysis for subscribers. New cron slot needed, once
-            # weekly (e.g. Friday EOD): `python3.10 /home/alftw/scripts/scheduler.py --mode weekly_scorecard`
-            try:
-                scorecard = engine.generate_ecosystem_scorecard()
-                if scorecard:
-                    if WEBHOOK_ANNOUNCEMENTS:
-                        send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
-                    if WEBHOOK_MARKET:
-                        send_essentials_embed(WEBHOOK_MARKET, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
-                    logger.info("Weekly ecosystem scorecard dispatched.")
-            except Exception as e:
-                logger.error(f"Weekly scorecard generation failed: {e}")
+            # Cron: daily at 20:30 UTC — Friday gate below ensures it only dispatches on Fridays.
+            # Add to PythonAnywhere: daily 20:30 UTC
+            #   python3.10 /home/alftw/scripts/scheduler.py --mode weekly_scorecard
+            if datetime.now().weekday() != 4:   # 4 = Friday
+                logger.info("Weekly scorecard: not Friday, skipping.")
+            else:
+                try:
+                    scorecard = engine.generate_ecosystem_scorecard()
+                    if scorecard:
+                        if WEBHOOK_ANNOUNCEMENTS:
+                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
+                        if WEBHOOK_MARKET:
+                            send_essentials_embed(WEBHOOK_MARKET, "ECOSYSTEM WEEKLY SCORECARD", scorecard, 0x00ffcc)
+                        logger.info("Weekly ecosystem scorecard dispatched.")
+                except Exception as e:
+                    logger.error(f"Weekly scorecard generation failed: {e}")
 
         elif args.mode == "eod":
             try:
@@ -734,65 +737,77 @@ def main():
 
         elif args.mode == "crypto_social":
             # ── CRYPTO SOCIAL SNAPSHOT → #crypto ─────────────────────────────
-            # Alternative.me Fear & Greed + r/CryptoCurrency hot mentions +
-            # Twelve Data spot (BTC/ETH/SOL/AVAX/LINK/DOGE). Foundation layer for
-            # crypto.py. Dispatches standalone until crypto.py is built.
+            # Fear & Greed + Reddit crypto mentions + spot prices (BTC/ETH/SOL/AVAX/LINK/DOGE)
+            # + Binance perpetual funding rates + NVDA/BTC 30-day correlation.
             try:
                 snap    = engine.generate_crypto_social_snapshot()
+                funding = engine.fetch_funding_rates()
+                corr    = engine.calculate_nvda_btc_correlation()
                 fng     = snap["fear_greed"]
                 today_l = datetime.now().strftime("%b %-d")
 
-                fng_bar = ""
                 v = fng["value"]
-                if v <= 25:
-                    fng_bar = "Extreme Fear"
-                elif v <= 45:
-                    fng_bar = "Fear"
-                elif v <= 55:
-                    fng_bar = "Neutral"
-                elif v <= 75:
-                    fng_bar = "Greed"
-                else:
-                    fng_bar = "Extreme Greed"
+                if v <= 25:      fng_bar = "Extreme Fear"
+                elif v <= 45:    fng_bar = "Fear"
+                elif v <= 55:    fng_bar = "Neutral"
+                elif v <= 75:    fng_bar = "Greed"
+                else:            fng_bar = "Extreme Greed"
 
-                payload = f"**CRYPTO SOCIAL SCAN — {today_l}**\n\n"
+                payload = f"**CRYPTO DESK — {today_l}**\n\n"
                 payload += f"**Fear & Greed:** {fng['value']}/100 — {fng_bar}\n\n"
 
                 if snap["trending"]:
-                    payload += "**Trending Assets**\n"
+                    payload += "**Spot Prices**\n"
                     for token, data in snap["trending"][:6]:
                         arrow = "▲" if data["chg_1d"] >= 0 else "▼"
-                        buzz  = " · Reddit buzz" if token in snap["reddit_counts"] else ""
+                        buzz  = " · Reddit" if token in snap["reddit_counts"] else ""
                         payload += f"┣ `{token}` ${data['price']:,.2f} {arrow}{abs(data['chg_1d']):.1f}% (1D){buzz}\n"
-                    payload = payload.rstrip("┣ \n") + "\n"
-                else:
-                    payload += "No trending crypto assets with momentum this session.\n"
+                    payload = payload.rstrip("┣ \n") + "\n\n"
+
+                if funding:
+                    payload += "**Perp Funding Rates (8h / annualized)**\n"
+                    for f in funding:
+                        sign = "+" if f["rate_8h"] >= 0 else ""
+                        payload += (
+                            f"┣ `{f['symbol']}` {sign}{f['rate_8h']:.4f}% · "
+                            f"{sign}{f['rate_ann']:.1f}%/yr — {f['sentiment']}\n"
+                        )
+                    payload = payload.rstrip("┣ \n") + f"\n┗ Next settlement: {funding[0]['next_funding']}\n\n"
+
+                if corr:
+                    arrow_n = "▲" if corr["nvda_ret"] >= 0 else "▼"
+                    arrow_b = "▲" if corr["btc_ret"]  >= 0 else "▼"
+                    payload += (
+                        f"**NVDA / BTC Correlation ({corr['lookback']}D)**\n"
+                        f"┣ Pearson r: `{corr['correlation']:+.3f}` — {corr['label']}\n"
+                        f"┗ Period returns: NVDA {arrow_n}{abs(corr['nvda_ret']):.1f}% · "
+                        f"BTC {arrow_b}{abs(corr['btc_ret']):.1f}%\n\n"
+                    )
 
                 payload += (
-                    "\n─────────────────────────\n"
-                    "Sources: Alternative.me · Reddit r/CryptoCurrency · Twelve Data\n"
+                    "─────────────────────────\n"
+                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · Twelve Data\n"
                     "Not financial advice — for informational/educational use only."
                 )
 
                 if WEBHOOK_CRYPTO:
-                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social Scan", payload, 0xf39c12)
+                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Correlation", payload, 0xf39c12)
                     logger.info("Crypto social snapshot dispatched.")
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")
 
         elif args.mode == "futures_social":
-            # ── FUTURES-ADJACENT SOCIAL SCAN → #futures-trading ──────────────
-            # StockTwits + Reddit WSB filtered to energy, metals, rates, ag names.
-            # Surfaces commodity rotations trending on social before they show up in
-            # price, as context for the ES/NQ deep-dive in cross_asset.py.
+            # ── FUTURES-ADJACENT SOCIAL SCAN + PATTERN SCAN → #futures-trading ─
+            # Segment 1: StockTwits + Reddit WSB filtered to energy/metals/rates/ag.
+            # Segment 2: Finviz TA pattern scan (bullish/bearish setups on volume).
             try:
                 snap    = engine.generate_futures_social_snapshot()
                 plays   = snap.get("plays", [])
+                patterns = engine.fetch_finviz_pattern_scan()
                 today_l = datetime.now().strftime("%b %-d")
 
-                if not plays:
-                    logger.info("Futures social: no futures-adjacent names trending this session.")
-                else:
+                # ── Segment 1: Commodity social buzz ──
+                if plays:
                     payload = f"**COMMODITY / MACRO BUZZ — {today_l}**\n\n"
                     for p in plays[:8]:
                         arrow = "▲" if p["chg_5d"] >= 0 else "▼"
@@ -801,18 +816,46 @@ def main():
                             f"┣ Buzz: {p['meter']} · {p['lean']}\n"
                             f"┗ Vol: {p['vol_ratio']:.1f}x avg\n\n"
                         )
-                    payload += (
+                    payload += "Social overlay for #futures context — not a directional call."
+                    if WEBHOOK_FUTURES:
+                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | Commodity & Macro Buzz", payload, 0xe67e22)
+                        logger.info(f"Futures social dispatched: {len(plays)} names.")
+                else:
+                    logger.info("Futures social: no futures-adjacent names trending this session.")
+
+                # ── Segment 2: Finviz TA pattern scan ──
+                bullish = patterns.get("bullish", [])
+                bearish = patterns.get("bearish", [])
+                if bullish or bearish:
+                    pat_payload = f"**S&P TECHNICAL PATTERNS — {today_l}**\n\n"
+                    if bullish:
+                        pat_payload += "**Bullish Setups**\n"
+                        seen = set()
+                        for item in bullish:
+                            if item["symbol"] not in seen:
+                                seen.add(item["symbol"])
+                                sign = "+" if item["chg"] >= 0 else ""
+                                pat_payload += f"┣ `{item['symbol']}` ${item['price']:.2f} {sign}{item['chg']:.1f}% — {item['pattern']}\n"
+                        pat_payload = pat_payload.rstrip("┣ \n") + "\n\n"
+                    if bearish:
+                        pat_payload += "**Bearish Setups**\n"
+                        seen = set()
+                        for item in bearish:
+                            if item["symbol"] not in seen:
+                                seen.add(item["symbol"])
+                                sign = "+" if item["chg"] >= 0 else ""
+                                pat_payload += f"┣ `{item['symbol']}` ${item['price']:.2f} {sign}{item['chg']:.1f}% — {item['pattern']}\n"
+                        pat_payload = pat_payload.rstrip("┣ \n") + "\n\n"
+                    pat_payload += (
                         "─────────────────────────\n"
-                        "Social overlay for #futures context — not a directional call.\n"
+                        "Source: Finviz TA Screener · >500K avg daily volume filter\n"
                         "Not financial advice — for informational/educational use only."
                     )
                     if WEBHOOK_FUTURES:
-                        send_essentials_embed(
-                            WEBHOOK_FUTURES,
-                            "FUTURES DESK | Commodity & Macro Buzz",
-                            payload, 0xe67e22
-                        )
-                        logger.info(f"Futures social dispatched: {len(plays)} names.")
+                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | S&P Pattern Scan", pat_payload, 0x3498db)
+                        logger.info(f"Pattern scan dispatched: {len(bullish)} bullish, {len(bearish)} bearish.")
+                else:
+                    logger.info("Pattern scan: no qualifying patterns returned (may be outside market hours).")
             except Exception as e:
                 logger.error(f"Futures social scan failed: {e}")
 

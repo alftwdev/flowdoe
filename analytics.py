@@ -2931,3 +2931,180 @@ class HighFidelityAnalyticsEngine:
 
         results.sort(key=lambda x: (x["meter"] != "HIGH", -abs(x["chg_5d"])))
         return {"plays": results}
+
+    # ── FINVIZ TECHNICAL PATTERN SCAN ─────────────────────────────────────────
+    # Fetches bullish and bearish TA pattern screens from Finviz CSV exports.
+    # Used as a second segment in the futures_social dispatch — adds pattern
+    # context on top of the price-action board and commodity social overlay.
+
+    _FINVIZ_PATTERNS = [
+        ("ta_p_channelup",          "Channel Up",         "bullish"),
+        ("ta_p_wedgeup",            "Wedge Up",           "bullish"),
+        ("ta_p_doublebottom",       "Double Bottom",      "bullish"),
+        ("ta_p_triangleascending",  "Ascending Triangle", "bullish"),
+        ("ta_p_headandshoulders",   "Head & Shoulders",   "bearish"),
+        ("ta_p_wedgedown",          "Wedge Down",         "bearish"),
+        ("ta_p_doubletop",          "Double Top",         "bearish"),
+    ]
+
+    def fetch_finviz_pattern_scan(self, min_avg_vol=500000) -> dict:
+        """
+        Fetches TA pattern screens from Finviz CSV export. Returns top 3 tickers
+        per bullish and bearish pattern bucket. Filtered to >500K avg daily volume
+        to avoid micro-cap noise. Returns empty lists gracefully outside market hours
+        (Finviz returns HTML login wall when closed).
+        """
+        import csv, io
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            )
+        }
+        bullish_hits: list = []
+        bearish_hits: list = []
+
+        for screen_id, label, direction in self._FINVIZ_PATTERNS:
+            try:
+                r = requests.get(
+                    f"https://finviz.com/export.ashx?v=111&s={screen_id}"
+                    f"&f=sh_avgvol_o{min_avg_vol // 1000}",
+                    headers=headers, timeout=10
+                )
+                if r.status_code != 200:
+                    continue
+                if r.text.strip()[:1] == "<" or "Ticker" not in r.text[:200]:
+                    continue  # HTML response = outside market hours or blocked
+                bucket = bullish_hits if direction == "bullish" else bearish_hits
+                for i, row in enumerate(csv.DictReader(io.StringIO(r.text))):
+                    if i >= 3:
+                        break
+                    sym = row.get("Ticker", "").strip()
+                    if not sym:
+                        continue
+                    try:
+                        chg   = float(row.get("Change", "0%").replace("%", "").strip() or 0)
+                        price = float(row.get("Price", "0").strip() or 0)
+                        if price > 0:
+                            bucket.append({"symbol": sym, "price": price, "chg": chg, "pattern": label})
+                    except (ValueError, KeyError):
+                        pass
+            except Exception as e:
+                logger.warning(f"[Pattern Scan] {screen_id} failed: {e}")
+
+        return {"bullish": bullish_hits, "bearish": bearish_hits}
+
+    # ── CRYPTO FUNDING RATES (BINANCE FAPI) ───────────────────────────────────
+    # Binance perpetual futures funding rates — free, no auth required.
+    # Funding rate fires every 8 hours (00:00, 08:00, 16:00 UTC).
+    # Positive rate → longs pay shorts → crowded long, mild bearish signal.
+    # Negative rate → shorts pay longs → crowded short, contrarian long signal.
+
+    _FUNDING_SYMBOLS = [
+        ("BTCUSDT", "BTC"),
+        ("ETHUSDT", "ETH"),
+        ("SOLUSDT", "SOL"),
+    ]
+
+    def fetch_funding_rates(self) -> list:
+        """
+        Fetches current perpetual futures funding rates from Binance FAPI.
+        Returns list of dicts: symbol, rate_8h (%), rate_annualized (%), sentiment label,
+        next_funding_utc (HH:MM). Empty list on failure.
+        """
+        results = []
+        for binance_sym, display_sym in self._FUNDING_SYMBOLS:
+            try:
+                r = requests.get(
+                    f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={binance_sym}",
+                    timeout=8
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                rate_8h  = float(data.get("lastFundingRate", 0)) * 100   # convert to %
+                rate_ann = rate_8h * 3 * 365                              # 3 payments/day × 365
+                next_ms  = int(data.get("nextFundingTime", 0))
+                from datetime import timezone
+                next_utc = datetime.fromtimestamp(next_ms / 1000, tz=timezone.utc).strftime("%H:%M UTC") if next_ms else "—"
+
+                if rate_8h > 0.05:
+                    sentiment = "Crowded Long — longs paying"
+                elif rate_8h > 0.01:
+                    sentiment = "Slight Long Bias"
+                elif rate_8h < -0.05:
+                    sentiment = "Crowded Short — shorts paying"
+                elif rate_8h < -0.01:
+                    sentiment = "Slight Short Bias"
+                else:
+                    sentiment = "Neutral"
+
+                results.append({
+                    "symbol":       display_sym,
+                    "rate_8h":      rate_8h,
+                    "rate_ann":     rate_ann,
+                    "sentiment":    sentiment,
+                    "next_funding": next_utc,
+                })
+            except Exception as e:
+                logger.warning(f"[Funding Rates] {binance_sym} failed: {e}")
+        return results
+
+    # ── NVDA / BTC CORRELATION ────────────────────────────────────────────────
+    # 30-day Pearson correlation on daily log returns.
+    # NVDA and BTC both track AI/tech risk sentiment but decouple in
+    # crypto-specific stress events (exchange collapses, regulatory shocks).
+    # High correlation (>0.6) = macro drives both; low (<0.3) = idiosyncratic.
+
+    def calculate_nvda_btc_correlation(self, lookback=30) -> dict:
+        """
+        Computes 30-day Pearson correlation between NVDA and BTC/USD daily returns.
+        Returns {"correlation": float, "label": str, "nvda_ret": float, "btc_ret": float}
+        where nvda_ret and btc_ret are the period total returns (%).
+        """
+        try:
+            nvda_ts = self._execute_query("time_series", {
+                "symbol": "NVDA", "interval": "1day", "outputsize": str(lookback + 1)
+            })
+            btc_ts = self._execute_query("time_series", {
+                "symbol": "BTC/USD", "interval": "1day", "outputsize": str(lookback + 1)
+            })
+            if not nvda_ts or not btc_ts:
+                return {}
+            nvda_closes = [float(v["close"]) for v in reversed(nvda_ts["values"])]
+            btc_closes  = [float(v["close"]) for v in reversed(btc_ts["values"])]
+            n = min(len(nvda_closes), len(btc_closes)) - 1
+            if n < 10:
+                return {}
+            import math
+            nvda_ret_series = [math.log(nvda_closes[i+1] / nvda_closes[i]) for i in range(n)]
+            btc_ret_series  = [math.log(btc_closes[i+1]  / btc_closes[i])  for i in range(n)]
+            mean_n = sum(nvda_ret_series) / n
+            mean_b = sum(btc_ret_series)  / n
+            cov  = sum((nvda_ret_series[i] - mean_n) * (btc_ret_series[i] - mean_b) for i in range(n)) / n
+            std_n = (sum((x - mean_n)**2 for x in nvda_ret_series) / n) ** 0.5
+            std_b = (sum((x - mean_b)**2 for x in btc_ret_series)  / n) ** 0.5
+            corr = cov / (std_n * std_b) if std_n > 0 and std_b > 0 else 0.0
+            corr = max(-1.0, min(1.0, corr))
+
+            if corr >= 0.7:
+                label = "Strong — macro/AI sentiment driving both"
+            elif corr >= 0.4:
+                label = "Moderate — partial co-movement"
+            elif corr >= 0.1:
+                label = "Weak — beginning to decouple"
+            else:
+                label = "Decoupled — crypto moving on its own"
+
+            nvda_total = (nvda_closes[-1] - nvda_closes[0]) / nvda_closes[0] * 100
+            btc_total  = (btc_closes[-1]  - btc_closes[0])  / btc_closes[0]  * 100
+            return {
+                "correlation": round(corr, 3),
+                "label":       label,
+                "nvda_ret":    round(nvda_total, 2),
+                "btc_ret":     round(btc_total, 2),
+                "lookback":    n,
+            }
+        except Exception as e:
+            logger.error(f"[NVDA/BTC Corr] Failed: {e}")
+            return {}
