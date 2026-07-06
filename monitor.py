@@ -828,6 +828,32 @@ def calculate_ro_risk_score(
 # Mobile-first Discord format: Title / ┣ Data / ┗ Final
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _sec_single_line(sec_shield: str) -> str:
+    """
+    Distil the full EDGAR shield string into one actionable line for the pulse report.
+    Full detail is preserved in sec_shield for logging and escalation paths; this
+    function only controls what the daily Discord line shows.
+    """
+    if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
+        # Extract the most recent N-2 or N-2/A date for the single-line signal
+        for part in sec_shield.split(" | "):
+            if "N-2" in part:
+                date_bit = part.strip().split("(")[-1].rstrip(")")
+                form_bit = "N-2/A amendment" if "N-2/A" in part else "N-2 registration"
+                return f"⚠️ {form_bit} {date_bit} — RO ACTIVE"
+    if "13D" in sec_shield or "13G" in sec_shield:
+        for part in sec_shield.split(" | "):
+            if "13D" in part or "13G" in part:
+                date_bit = part.strip().split("(")[-1].rstrip(")")
+                return f"⚠️ Large holder change {date_bit} — monitor"
+    # Routine filings only — extract most recent form type + date
+    for part in sec_shield.split(" | "):
+        clean = part.replace("📋 ", "").replace("[single source] ", "").replace("[🔴 MULTI-SOURCE EDGAR CONVICTION] ", "").strip()
+        if clean:
+            return f"{clean} — routine"
+    return "No recent EDGAR activity"
+
+
 def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          sec_shield, ro_score, ro_tier, whale_status,
                          dark_pool_desc, premium_compression_desc,
@@ -836,68 +862,45 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          income_note, s_net, alpha_drip, seasonal_caution,
                          y_dist=0.0) -> str:
     """
-    Formats a single-ticker Cornerstone Pulse Report, mobile-first layout.
+    4-line compact Cornerstone Pulse — mobile-first.
 
-    STABLE gets a condensed report — the core numbers (price/NAV/premium/RO score)
-    plus the status line, since the recommendation and verdict text are static
-    boilerplate when nothing's wrong and don't change the reader's action.
-    ELEVATED/CRITICAL/dark-pool/compression statuses get the full diagnostic
-    breakdown, since at that point every signal matters for the decision.
+    Core lines (always present):
+      Line 1: ticker + status header
+      Line 2: Price | NAV | Premium
+      Line 3: RSI | z-score
+      Line 4: EDGAR — single-line signal
+
+    Conditional lines (only when triggered, inserted before verdict):
+      Whale DISTRIBUTION, Dark Pool, VIXY spike, RO Season, Seasonal Caution
+
+    Verdict always last. Removed from output (back-pocket / DB only):
+      Net Arb Spread, DRIP Alpha, RO Risk Score, Premium Compression, Macro Correlation, Margin Deploy.
     """
-    prem_tag  = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else "(DISCOUNT)")
-    rsi_tag   = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else "(OVERSOLD)")
-    z_tag     = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
+    prem_tag = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else ("(HIGH)" if premium > 15 else "(DISCOUNT)"))
+    rsi_tag  = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else "(OVERSOLD)")
+    z_tag    = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
-    if status == "✅ STABLE":
-        # EDGAR conviction display — show each source independently for transparency
-        has_ro      = "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield
-        has_holder  = "13D" in sec_shield or "13G" in sec_shield
-        has_ncsr    = "N-CSR" in sec_shield
-        has_def14a  = "DEF 14A" in sec_shield
-        multi       = "MULTI-SOURCE" in sec_shield
+    sec_line = _sec_single_line(sec_shield)
 
-        sec_ro_line     = sec_shield if has_ro else "No N-2/RO (safe)"
-        holder_line     = "⚠️ LARGE HOLDER CHANGE — review 13D/G filing" if has_holder else "No large-holder changes (safe)"
-        ncsr_line       = f"┣ EDGAR N-CSR: {[f for f in sec_shield.split(' | ') if 'N-CSR' in f][0] if has_ncsr else ''}\n" if has_ncsr else ""
-        def14a_line     = f"┣ EDGAR DEF 14A: {[f for f in sec_shield.split(' | ') if 'DEF 14A' in f][0] if has_def14a else ''}\n" if has_def14a else ""
-        conviction_line = f"┣ ⚡ EDGAR: {sec_shield[:80]}{'...' if len(sec_shield) > 80 else ''}\n" if multi else ""
-        ro_watch_line   = f"┣ ⚠️ RO Watch: Premium at {premium:.1f}% — approaching 30% trigger\n" if premium >= PREMIUM_RO_WATCH_THRESHOLD else ""
+    # Conditional alert lines — only surface when signal is actually firing
+    whale_line     = f"┣ Whale: {whale_status} ⚠️\n" if "DISTRIBUTION" in whale_status.upper() else ""
+    dark_pool_line = f"┣ Dark Pool: {dark_pool_desc}\n" if "⚠️" in dark_pool_desc or "WARNING" in dark_pool_desc.upper() else ""
+    vixy_line      = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
+    ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
+    seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
+    ex_div_line    = "┣ Ex-Div: Scheduled dip (not RO-related)\n" if ex_div_near else ""
 
-        return (
-            f"**{ticker} — {status}**\n"
-            f"┣ SEC (N-2/RO): {sec_ro_line}\n"
-            f"┣ Holder (13D/G): {holder_line}\n"
-            f"{ncsr_line}"
-            f"{def14a_line}"
-            f"{conviction_line}"
-            f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
-            f"{ro_watch_line}"
-            f"┣ Whale Flow: {whale_status}\n"
-            f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
-            f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
-            f"┗ Dist. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
-        )
-
-    seasonal_line      = "┣ ⚠️ Seasonal Caution: Active (March/Sept historically weak)\n" if seasonal_caution else ""
-    ex_div_line        = "┣ Ex-Div Window: Active (scheduled dip — not RO-related)\n"     if ex_div_near      else ""
-    ro_season_line     = "┣ RO Filing Season: Active (mid-Feb to mid-Apr)\n"               if ro_season        else ""
-    crisis_line        = f"┣ Market Stress: 🔴 CRISIS (VIXY z {vixy_z:+.2f}σ)\n"         if crisis_day       else ""
-
-    vixy_label = "calm" if vixy_z < 0.75 else ("elevated" if vixy_z < 1.5 else "spike ⚠️")
     return (
         f"**{ticker} — {status}**\n"
-        f"┣ SEC: {sec_shield}\n"
         f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
-        f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
-        f"┣ Premium Z-Score (1Y): {z_premium:+.1f} {z_tag}\n"
-        f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
-        f"┣ RO Risk Score: {ro_score}/100 ({ro_tier})\n"
-        f"┣ Dark Pool: {dark_pool_desc}\n"
-        f"┣ Macro: {macro_interp}\n"
-        f"{ex_div_line}"
+        f"┣ Premium: {premium:.1f}% {prem_tag} | z: {z_premium:+.1f}σ {z_tag} | RSI: {rsi:.1f} {rsi_tag}\n"
+        f"┣ EDGAR: {sec_line}\n"
+        f"{whale_line}"
+        f"{dark_pool_line}"
+        f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
-        f"{crisis_line}"
+        f"{ex_div_line}"
         f"┗ {verdict}\n"
     )
 
@@ -1045,32 +1048,32 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         status       = "🚨 CRITICAL: N-2 DETECTED"
         income_note  = "Distribution/Caution phase"
-        verdict      = "Active SEC N-2/RO filing detected. NAV dilution imminent. SELL to minimum 3 shares — keeping ≥3 shares preserves CS DRIP status permanently; going to zero forces you to re-apply."
-        recommendation = "Halt DRIP immediately; sell to 3-share floor; monitor Cornerstone press releases for 'RO complete' announcement."
+        verdict      = "🔴 SELL to ≥3 shares — NAV dilution imminent. ≥3 shares preserves DRIP permanently."
+        recommendation = "Halt DRIP; sell to 3-share floor; monitor for RO completion."
     elif ro_tier == "CRITICAL":
         status       = "🚨 CRITICAL: RO RISK ELEVATED"
         income_note  = "Distribution/Caution phase"
-        verdict      = "Composite RO risk score breached critical threshold."
+        verdict      = "🔴 RO risk composite critical — halt DRIP, watch for N-2 on EDGAR."
         recommendation = "Halt DRIP; consider selling before RO announcement."
     elif is_dark_pool:
         status       = "🕵️ WARNING: DARK POOL ACTIVITY"
         income_note  = "Distribution/Caution phase"
-        verdict      = "Price decline on below-avg public volume — possible off-exchange institutional exit."
+        verdict      = "⚠️ Off-exchange exit suspected — monitor EDGAR, do not sell yet."
         recommendation = "Monitor closely. Do NOT sell yet — confirm with SEC module."
     elif is_compressed:
         status       = "⚠️ WARNING: PREMIUM COMPRESSION"
         income_note  = "Distribution/Caution phase"
-        verdict      = f"CEF premium collapsed {prem_delta:+.2f}% intra-session without matching NAV move."
+        verdict      = f"⚠️ Premium compressed {prem_delta:+.2f}% intra-session — pause DRIP, watch for N-2."
         recommendation = "Pause new DRIP reinvestment; watch for RO filing."
     elif ro_tier == "ELEVATED" or z_premium >= 1.5 or premium > 25.0:
         status       = "⚠️ HIGH PREMIUM"
         income_note  = "Distribution/Caution phase"
-        verdict      = "Premium highly extended above historical norms. RO risk elevated."
+        verdict      = "⚠️ Premium extended — pause new buys, target entry < 15% or post-ex-div dip."
         recommendation = "Pause reinvestment; build cash position."
     else:
         status       = "✅ STABLE"
         income_note  = "Accumulation phase"
-        verdict      = "Premium within historical σ bands. No active dilution signatures."
+        verdict      = "✅ DRIP active — accumulate on premium dips < 15% or ex-div window."
         recommendation = "Reinvest distributions at NAV."
 
     report_text = format_pulse_report(
@@ -1085,28 +1088,28 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         seasonal_caution=seasonal_caution, y_dist=y_dist
     )
 
-    # ── OBV + MFI: multi-session volume pressure + volume-weighted RSI
+    # ── OBV + MFI: back-pocket volume pressure signals.
+    # Only appended to the report when a divergence fires (price up but volume exiting);
+    # otherwise logged to DB for context without cluttering the daily output.
     obv_mfi = fetch_obv_mfi(session, ticker)
     if obv_mfi:
-        mfi = obv_mfi["mfi"]
+        mfi       = obv_mfi["mfi"]
         obv_trend = obv_mfi["obv_trend"]
         obv_pct   = obv_mfi["obv_pct"]
-        mfi_tag   = "🔴 OVERBOUGHT" if mfi > 70 else ("🟢 OVERSOLD" if mfi < 30 else "🟡 NEUTRAL")
-        # Divergence: price stable/up but OBV falling + MFI declining = distribution pressure
-        price_up     = price_chg >= 0
-        obv_falling  = obv_trend == "falling"
-        mfi_weak     = mfi < 45
-        divergence   = price_up and obv_falling and mfi_weak
-        obv_line = (
-            f"┣ OBV: {obv_trend} ({obv_pct:+.1f}% / 5D) | MFI(14): {mfi:.1f} {mfi_tag}"
-            + (" ⚠️ DIVERGENCE — price holding but volume exiting" if divergence else "") + "\n"
-        )
-        report_text = report_text.rstrip("\n") + "\n" + obv_line
+        price_up  = price_chg >= 0
+        divergence = price_up and (obv_trend == "falling") and (mfi < 45)
+        db.update_state(f"{ticker}_obv_trend", obv_trend)
+        db.update_state(f"{ticker}_mfi", str(round(mfi, 1)))
+        if divergence:
+            # Divergence = genuine early-warning signal — surface it
+            mfi_tag = "🔴 OVERBOUGHT" if mfi > 70 else ("🟢 OVERSOLD" if mfi < 30 else "🟡 NEUTRAL")
+            obv_line = f"┣ OBV: {obv_trend} ({obv_pct:+.1f}%/5D) | MFI: {mfi:.1f} {mfi_tag} ⚠️ DIVERGENCE\n"
+            report_text = report_text.rstrip("\n") + "\n" + obv_line
 
-    # ── Accumulation gate — one-line summary appended to every report.
+    # ── Accumulation gate — back-pocket only; stored in DB, not appended to output.
     acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200, premium=premium)
-    gate_icon = "🟢" if acc["ready"] else ("🔴" if "WAIT" in acc["status"] else "⚠️")
-    report_text += f"┗ {gate_icon} Margin: {acc['status']} | {acc['detail']}\n"
+    db.update_state(f"{ticker}_acc_status", acc["status"])
+    db.update_state(f"{ticker}_acc_detail", acc["detail"])
 
     return report_text, ro_tier, ro_score
 
