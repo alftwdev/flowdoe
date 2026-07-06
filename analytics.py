@@ -1073,6 +1073,31 @@ class HighFidelityAnalyticsEngine:
 
                 bb_zone = "🔵 LOWER BAND" if bb_pct_b < 0.3 else ("🟡 MID-BAND" if bb_pct_b < 0.6 else "🟠 UPPER-MID BAND")
 
+                # ── 1b. StochRSI — entry timing (more sensitive than RSI-14 alone) ─
+                stochrsi_k, stochrsi_tag = 50.0, "neutral"
+                try:
+                    sr = self._execute_query("stochrsi", {"symbol": symbol, "interval": "1day",
+                                                           "fast_k_period": 3, "fast_d_period": 3,
+                                                           "time_period": 14, "series_type": "close"})
+                    if sr and "values" in sr:
+                        stochrsi_k = float(sr["values"][0].get("k", 50.0))
+                        stochrsi_tag = ("🟢 OVERSOLD" if stochrsi_k < 20 else
+                                        ("🔴 OVERBOUGHT" if stochrsi_k > 80 else "🟡 neutral"))
+                except Exception:
+                    pass
+
+                # ── 1c. MACD — momentum direction check ──────────────────
+                macd_hist, macd_compressing = 0.0, True
+                try:
+                    mc = self._execute_query("macd", {"symbol": symbol, "interval": "1day",
+                                                       "fast_period": 12, "slow_period": 26, "signal_period": 9})
+                    if mc and "values" in mc and len(mc["values"]) >= 2:
+                        macd_hist  = float(mc["values"][0].get("macd_hist", 0.0))
+                        prev_hist  = float(mc["values"][1].get("macd_hist", macd_hist))
+                        macd_compressing = abs(macd_hist) < abs(prev_hist)  # momentum fading = better sell premium env
+                except Exception:
+                    pass
+
                 # ── 2. HV30 for IVR proxy ────────────────────────────────
                 hv30 = self.calculate_historical_volatility(symbol, lookback=30)
 
@@ -1219,6 +1244,10 @@ class HighFidelityAnalyticsEngine:
                     "div_growth_5y":  div_growth_5y,
                     "safety_grade":   safety_grade,
                     "score":          float(best["score"]),
+                    "stochrsi_k":     round(stochrsi_k, 1),
+                    "stochrsi_tag":   stochrsi_tag,
+                    "macd_hist":      round(macd_hist, 4),
+                    "macd_compressing": macd_compressing,
                 })
 
             except Exception as e:

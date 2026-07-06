@@ -390,12 +390,14 @@ def main():
                         lines = []
                         for c in wheel_candidates:
                             div_badge = " 💰" if c.get("div_freq") == "Monthly" else ""
-                            div_note = f" | Div {c['div_yield']:.1f}%" if c.get("div_yield") else ""
+                            div_note = f" | Div `{c['div_yield']:.1f}%`" if c.get("div_yield") else ""
                             pop_icon = "✅" if c["pop"] >= 75 else "⚠️"
+                            macd_note = "→ compressing" if c.get("macd_compressing") else ("▲ bull" if c.get("macd_hist", 0) > 0 else "▼ bear")
                             lines.append(
                                 f"{pop_icon} **{c['symbol']}**{div_badge} `STO ${c['strike']:.0f}P` exp `{c['expiration']}` ({c['dte']}d) "
                                 f"| `${c['premium']*100:.0f}/ct` | Δ`{c['delta']:.2f}` IVR`{c['ivr_proxy']:.0f}%` PoP`{c['pop']:.0f}%`\n"
-                                f"┗ BE: `${c['break_even']:.2f}` ({c['pct_downside']:.1f}% protected){div_note} | {c['trend']} | RSI `{c['rsi14']}`"
+                                f"┣ BE: `${c['break_even']:.2f}` ({c['pct_downside']:.1f}% protected){div_note} | {c['trend']} | RSI `{c['rsi14']}`\n"
+                                f"┗ StochRSI K: `{c['stochrsi_k']:.0f}` {c['stochrsi_tag']} | MACD hist: `{c['macd_hist']:+.3f}` {macd_note}"
                             )
                         wheel_payload = "\n\n".join(lines)
 

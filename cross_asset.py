@@ -98,6 +98,63 @@ def get_session_label(now_et=None):
 # =====================================================================
 # DATA FETCH
 # =====================================================================
+def fetch_pivot_points(symbol):
+    """
+    TD native pivot_points_hl endpoint — daily classical pivot levels (PP, R1/R2, S1/S2).
+    Used by the IB breakout scanner to confirm the target is not blocked by a nearby pivot,
+    and in the ES/NQ deep-dive as structural reference levels.
+    """
+    try:
+        res = requests.get(
+            f"https://api.twelvedata.com/pivot_points_hl",
+            params={"symbol": symbol, "interval": "1day", "time_period": 5, "apikey": TD_API_KEY},
+            timeout=12
+        ).json()
+        latest = res.get("values", [{}])[0]
+        return {
+            "pp":  float(latest.get("pp",  0.0)),
+            "r1":  float(latest.get("r1",  0.0)),
+            "r2":  float(latest.get("r2",  0.0)),
+            "s1":  float(latest.get("s1",  0.0)),
+            "s2":  float(latest.get("s2",  0.0)),
+        }
+    except Exception as e:
+        logger.warning(f"Pivot points fetch failed for {symbol}: {e}")
+        return None
+
+
+def fetch_ichimoku(symbol):
+    """
+    TD native ichimoku endpoint — cloud (Senkou A/B), Tenkan, Kijun, Chikou.
+    Cloud posture (price vs cloud, cloud color) is used in ES/NQ deep-dive as a dynamic
+    support/resistance overlay more responsive than static SMA200.
+    """
+    try:
+        res = requests.get(
+            f"https://api.twelvedata.com/ichimoku",
+            params={"symbol": symbol, "interval": "1day", "apikey": TD_API_KEY},
+            timeout=12
+        ).json()
+        latest = res.get("values", [{}])[0]
+        tenkan    = float(latest.get("tenkan_sen",  0.0))
+        kijun     = float(latest.get("kijun_sen",   0.0))
+        senkou_a  = float(latest.get("senkou_span_a", 0.0))
+        senkou_b  = float(latest.get("senkou_span_b", 0.0))
+        cloud_top = max(senkou_a, senkou_b)
+        cloud_bot = min(senkou_a, senkou_b)
+        return {
+            "tenkan": tenkan,
+            "kijun": kijun,
+            "cloud_top": cloud_top,
+            "cloud_bot": cloud_bot,
+            "cloud_bull": senkou_a > senkou_b,  # green cloud = bullish, red = bearish
+            "tenkan_cross_bull": tenkan > kijun,  # TK cross bullish
+        }
+    except Exception as e:
+        logger.warning(f"Ichimoku fetch failed for {symbol}: {e}")
+        return None
+
+
 def fetch_profile_time_series(symbol, outputsize=190):
     """Pulls 5-min bars covering both the prior overnight session and today's RTH."""
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize={outputsize}&apikey={TD_API_KEY}"
@@ -353,20 +410,40 @@ def run_intraday_futures_update():
 
         should_send, status_tag = evaluate_gatekeeper(f"futures_{sym}", spot, major_threshold=5.0)
 
+        # Ichimoku cloud — dynamic support/resistance zone, free extra call per symbol
+        ichi = fetch_ichimoku(sym)
+        if ichi:
+            cloud_color = "🟢 bullish" if ichi["cloud_bull"] else "🔴 bearish"
+            if spot > ichi["cloud_top"]:
+                ichi_posture = f"Above cloud ({cloud_color}) — trend confirmed"
+            elif spot < ichi["cloud_bot"]:
+                ichi_posture = f"Below cloud ({cloud_color}) — downtrend confirmed"
+            else:
+                ichi_posture = f"Inside cloud ({cloud_color}) — transition/chop zone"
+            tk_cross = "TK bullish ✅" if ichi["tenkan_cross_bull"] else "TK bearish ⚠️"
+            ichi_line = f"┣ Ichimoku: {ichi_posture} | {tk_cross} | Cloud: `${ichi['cloud_bot']:,.2f}`–`${ichi['cloud_top']:,.2f}`\n"
+        else:
+            ichi_line = ""
+
+        # Pivot levels — structural reference for value area context
+        pivots = fetch_pivot_points(sym)
+        pivot_line = ""
+        if pivots and pivots["pp"] > 0:
+            pivot_line = f"┣ Pivots: PP `${pivots['pp']:,.2f}` | R1 `${pivots['r1']:,.2f}` | S1 `${pivots['s1']:,.2f}`\n"
+
         if should_send:
             payload = (
-                f"**{session_label} Session Market Profile (Spot: ${spot:,.2f})**\n"
-                f"┣ Gatekeeper Status:  {status_tag}\n"
-                f"┣ Institutional VWAP: ${vwap:,.2f}\n"
-                f"┣ Value Area High:    ${profile['vah']:,.2f}\n"
-                f"┣ Point of Control:   ${profile['poc']:,.2f}\n"
-                f"┣ Value Area Low:     ${profile['val']:,.2f}\n"
-                f"┣ Cumulative Delta:   {cvd_now:+,.0f} | {cvd_bias}\n"
-                f"┣ Current Posture:    {posture}\n"
-                f"┣ Market Structure:   {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
-                f"┣ VIX Regime: {regime['tier']} (z {regime['vixy_z']:+.2f}σ) — {regime['posture']}\n"
-                f"┣ Unified Conviction Score: {conviction['score']}/100 — {conviction['verdict']}\n"
-                f"┗ Tactical Directive: Core setups are highly optimal when fading value boundaries (${profile['val']:,.2f} - ${profile['vah']:,.2f})."
+                f"**{session_label} Session Market Profile (Spot: `${spot:,.2f}`)**\n"
+                f"┣ Gatekeeper: {status_tag}\n"
+                f"┣ VWAP: `${vwap:,.2f}` | VAH: `${profile['vah']:,.2f}` | POC: `${profile['poc']:,.2f}` | VAL: `${profile['val']:,.2f}`\n"
+                f"┣ CVD: `{cvd_now:+,.0f}` — {cvd_bias}\n"
+                f"┣ Posture: {posture}\n"
+                f"{ichi_line}"
+                f"{pivot_line}"
+                f"┣ Structure: {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
+                f"┣ VIX Regime: {regime['tier']} (z `{regime['vixy_z']:+.2f}σ`) — {regime['posture']}\n"
+                f"┣ Conviction: `{conviction['score']}/100` — {conviction['verdict']}\n"
+                f"┗ Fade value boundaries `${profile['val']:,.2f}`–`${profile['vah']:,.2f}` for core setups"
             )
             try:
                 chart_bytes = generate_market_profile_chart(label, active_df, profile, vwap, posture.split('|')[0].strip())
@@ -493,22 +570,45 @@ def run_ib_breakout_scan():
                 continue
             target = spot + (2 * risk) if direction == "BULLISH" else spot - (2 * risk)
 
+            # Pivot check: nearest level between spot and target — acts as resistance/support
+            pivots = fetch_pivot_points(sym)
+            pivot_note = ""
+            if pivots:
+                levels = [("R2", pivots["r2"]), ("R1", pivots["r1"]), ("PP", pivots["pp"]),
+                          ("S1", pivots["s1"]), ("S2", pivots["s2"])]
+                if direction == "BULLISH":
+                    blocking = [(n, v) for n, v in levels if spot < v <= target]
+                    if blocking:
+                        nearest_name, nearest_val = min(blocking, key=lambda x: x[1])
+                        target = min(target, nearest_val)  # cap target at nearest pivot
+                        pivot_note = f"┣ Pivot Check: `{nearest_name} ${nearest_val:,.2f}` in path — target adjusted\n"
+                    else:
+                        pivot_note = f"┣ Pivot Check: Path clear to target | PP `${pivots['pp']:,.2f}`\n"
+                else:
+                    blocking = [(n, v) for n, v in levels if target <= v < spot]
+                    if blocking:
+                        nearest_name, nearest_val = max(blocking, key=lambda x: x[1])
+                        target = max(target, nearest_val)
+                        pivot_note = f"┣ Pivot Check: `{nearest_name} ${nearest_val:,.2f}` in path — target adjusted\n"
+                    else:
+                        pivot_note = f"┣ Pivot Check: Path clear to target | PP `${pivots['pp']:,.2f}`\n"
+
             state_key = f"ib_breakout_{sym}_{today}"
             if db.get_state(state_key):
                 continue  # one breakout signal per symbol per day
             db.update_state(state_key, direction)
 
+            rr = abs(target - spot) / risk if risk > 0 else 0.0
             payload = (
                 f"**{label} Initial Balance Breakout — {direction}**\n"
-                f"┣ IB Range (9:30-10:30 ET): `${ib['low']:,.2f}` – `${ib['high']:,.2f}`\n"
-                f"┣ Breakout Confirmed: Close `${spot:,.2f}` {'above' if direction == 'BULLISH' else 'below'} IB {'high' if direction == 'BULLISH' else 'low'}\n"
-                f"┣ Volume Delta Confirmation: `{buy_pct:.0f}%` buy volume on breakout bars\n"
-                f"┣ VIX Regime: {regime['tier']} (z {regime['vixy_z']:+.2f}σ)\n"
-                f"┣ Entry: `${spot:,.2f}` | Stop: `${ib_mid:,.2f}` (IB midpoint) | Target: `${target:,.2f}`\n"
-                f"┣ Risk/Reward: `1:{(abs(target - spot) / risk):.1f}`\n"
-                f"┗ Management: Shift stop to breakeven once price advances 2x initial risk — protect capital, let the rest run."
+                f"┣ IB Range (9:30–10:30 ET): `${ib['low']:,.2f}` – `${ib['high']:,.2f}`\n"
+                f"┣ Breakout: Close `${spot:,.2f}` {'above' if direction == 'BULLISH' else 'below'} IB {'high' if direction == 'BULLISH' else 'low'} | Vol Delta: `{buy_pct:.0f}%`\n"
+                f"┣ VIX Regime: {regime['tier']} (z `{regime['vixy_z']:+.2f}σ`)\n"
+                f"{pivot_note}"
+                f"┣ Entry: `${spot:,.2f}` | Stop: `${ib_mid:,.2f}` (IB mid) | Target: `${target:,.2f}`\n"
+                f"┗ R/R: `1:{rr:.1f}` | Shift stop to breakeven at 2× initial risk"
             )
-            send_essentials_embed(WEBHOOK_FUTURES, f"📐 INITIAL BALANCE BREAKOUT | {label}", payload, 0x2ecc71 if direction == "BULLISH" else 0xe74c3c)
+            send_essentials_embed(WEBHOOK_FUTURES, f"📐 IB BREAKOUT | {label}", payload, 0x2ecc71 if direction == "BULLISH" else 0xe74c3c)
             logger.info(f"IB breakout signal dispatched: {label} {direction} (buy_pct={buy_pct:.0f}%)")
         except Exception as e:
             logger.error(f"IB breakout scan failed for {sym}: {e}")

@@ -140,6 +140,41 @@ class TQQQTacticalSniper:
         self.proxy_symbol = "QQQ"
         self.base_url = "https://api.twelvedata.com"
 
+    def fetch_adx_macd(self):
+        """
+        ADX: trend strength filter — ADX < 20 = chop, entries unreliable.
+        MACD: histogram direction confirms momentum aligns with trade direction.
+        Both on QQQ daily. Returns dict or None on failure.
+        """
+        try:
+            adx_res = requests.get(
+                f"{self.base_url}/adx",
+                params={"symbol": self.proxy_symbol, "interval": "1day",
+                        "time_period": 14, "apikey": TWELVE_DATA_API_KEY},
+                timeout=12
+            ).json()
+            adx = float(adx_res.get("values", [{}])[0].get("adx", 0.0))
+
+            macd_res = requests.get(
+                f"{self.base_url}/macd",
+                params={"symbol": self.proxy_symbol, "interval": "1day",
+                        "fast_period": 12, "slow_period": 26, "signal_period": 9,
+                        "apikey": TWELVE_DATA_API_KEY},
+                timeout=12
+            ).json()
+            latest_macd = macd_res.get("values", [{}])[0]
+            hist = float(latest_macd.get("macd_hist", 0.0))
+            prev_hist = float(macd_res.get("values", [{}, {}])[1].get("macd_hist", hist))
+            return {
+                "adx": adx,
+                "macd_hist": hist,
+                "macd_expanding": abs(hist) > abs(prev_hist),  # histogram widening = momentum building
+                "macd_bull": hist > 0,
+            }
+        except Exception as e:
+            logger.warning(f"ADX/MACD fetch failed: {e}")
+            return None
+
     def fetch_daily_baseline(self):
         """QQQ daily series for SMA200/SMA50 macro posture."""
         params = {"symbol": self.proxy_symbol, "interval": "1day", "outputsize": "200", "apikey": TWELVE_DATA_API_KEY}
@@ -460,16 +495,21 @@ class TQQQTacticalSniper:
         ema21 = daily.get("ema21", 0.0)
         below_21ema = ema21 > 0 and spot < ema21
 
+        adx_data = daily.get("adx_macd", {}) or {}
+        adx = adx_data.get("adx", 25.0)  # default 25 = trending (safe fallback)
+        adx_chop = adx < 20.0  # < 20 = no trend = directional options unreliable
+
         downgrade_reason = None
         if action == "Buy to Open (BTO)":
-            if contract == "CALL" and (atr_extreme or breadth_collapsing or vix_crisis or below_21ema):
+            if contract == "CALL" and (atr_extreme or breadth_collapsing or vix_crisis or below_21ema or adx_chop):
                 downgrade_reason = (
                     "ATR_EXTREME" if atr_extreme else
                     ("BREADTH_COLLAPSE" if breadth_collapsing else
-                     ("VIX_CRISIS" if vix_crisis else "BELOW_21EMA"))
+                     ("VIX_CRISIS" if vix_crisis else
+                      ("BELOW_21EMA" if below_21ema else "ADX_CHOP")))
                 )
-            elif contract == "PUT" and atr_extreme:
-                downgrade_reason = "ATR_EXTREME"
+            elif contract == "PUT" and (atr_extreme or adx_chop):
+                downgrade_reason = "ATR_EXTREME" if atr_extreme else "ADX_CHOP"
             if downgrade_reason:
                 action = "MONITORING SETUP"
 
@@ -500,6 +540,11 @@ class TQQQTacticalSniper:
             "breadth": breadth,
             "atr_pct_tqqq": atr_pct_tqqq,
             "downgrade_reason": downgrade_reason,
+            "adx": adx,
+            "adx_chop": adx_chop,
+            "macd_hist": adx_data.get("macd_hist", 0.0),
+            "macd_expanding": adx_data.get("macd_expanding", False),
+            "macd_bull": adx_data.get("macd_bull", True),
         }
         setup = self.enrich_with_options_chain(setup)
         return setup
@@ -568,11 +613,19 @@ class TQQQTacticalSniper:
         breadth_tag = "🔴 COLLAPSING" if setup["breadth"] < BREADTH_COLLAPSE else ("🟢 STRONG" if setup["breadth"] >= BREADTH_STRONG else "🟡 MIXED")
         atr_tag = "🔴 EXTREME" if setup["atr_pct_tqqq"] >= ATR_EXTREME else ("🟡 ELEVATED" if setup["atr_pct_tqqq"] >= ATR_ELEVATED else "🟢 NORMAL")
 
+        adx_val = setup.get("adx", 0.0)
+        adx_tag = "🔴 CHOP (<20)" if adx_val < 20 else ("🟡 WEAK (20-25)" if adx_val < 25 else "🟢 TRENDING (>25)")
+        macd_hist = setup.get("macd_hist", 0.0)
+        macd_dir = "▲ expanding" if setup.get("macd_expanding") and macd_hist > 0 else \
+                   ("▼ expanding" if setup.get("macd_expanding") and macd_hist < 0 else "→ compressing")
+        macd_tag = f"{'🟢' if setup.get('macd_bull') else '🔴'} {macd_hist:+.3f} {macd_dir}"
+
         payload = (
             f"QQQ Proxy | Macro: {macro} | Intraday: {posture}\n"
-            f"┣ QQQ Spot: ${setup['qqq_spot']:,.2f} | VWAP: ${setup['qqq_vwap']:,.2f}\n"
-            f"┣ VWAP Z-Score: {setup['z_score']:+.2f}σ | Volume Surge Z: {setup['vol_z']:+.2f}σ\n"
-            f"┣ VIXY {setup['vix']:.2f} (z {setup['vix_z']:+.2f}σ, {vix_tag}) | Breadth: {setup['breadth']:.0%} ({breadth_tag}) | TQQQ ATR%: {setup['atr_pct_tqqq']:.1%} ({atr_tag})\n"
+            f"┣ QQQ Spot: `${setup['qqq_spot']:,.2f}` | VWAP: `${setup['qqq_vwap']:,.2f}`\n"
+            f"┣ VWAP Z-Score: `{setup['z_score']:+.2f}σ` | Volume Surge Z: `{setup['vol_z']:+.2f}σ`\n"
+            f"┣ ADX (14): `{adx_val:.1f}` {adx_tag} | MACD Hist: {macd_tag}\n"
+            f"┣ VIXY `{setup['vix']:.2f}` (z `{setup['vix_z']:+.2f}σ` {vix_tag}) | Breadth: `{setup['breadth']:.0%}` {breadth_tag} | ATR%: `{setup['atr_pct_tqqq']:.1%}` {atr_tag}\n"
             f"┗ {status_tag}\n\n"
             f"TQQQ @ ${setup['tqqq_spot']:.2f}\n"
             f"┣ Directive: {setup['action']} {setup['contract']}\n"
@@ -923,6 +976,8 @@ class TQQQTacticalSniper:
         intraday = self.fetch_intraday_metrics()
         if not daily or not intraday:
             return
+
+        daily["adx_macd"] = self.fetch_adx_macd()  # injected into evaluate_snipe via daily dict
 
         tqqq_daily = self.fetch_tqqq_daily_series()
         vix_price, vix_z = self.fetch_vix()

@@ -337,6 +337,37 @@ def fetch_time_series(session, symbol, outputsize=21):
         logger.error(f"[Time Series Fetch Error] {symbol}: {e}")
         return []
 
+def fetch_obv_mfi(session, symbol):
+    """
+    OBV — multi-session cumulative volume pressure. Declining OBV while price holds =
+    sustained distribution (stronger signal than any single dark-pool session).
+    MFI — volume-weighted RSI. Divergence from price = early accumulation/distribution read.
+    Returns dict or None on failure.
+    """
+    try:
+        obv_res = session.get(
+            "https://api.twelvedata.com/obv",
+            params={"symbol": symbol, "interval": "1day", "outputsize": "6", "apikey": TD_API_KEY},
+            timeout=20
+        ).json()
+        obv_vals = [float(v.get("obv", 0)) for v in obv_res.get("values", [])]
+        obv_now  = obv_vals[0] if obv_vals else 0.0
+        obv_prev = obv_vals[-1] if len(obv_vals) > 1 else obv_now
+        obv_trend = "rising" if obv_now > obv_prev else "falling"
+        obv_pct   = ((obv_now - obv_prev) / abs(obv_prev) * 100) if obv_prev != 0 else 0.0
+
+        mfi_res = session.get(
+            "https://api.twelvedata.com/mfi",
+            params={"symbol": symbol, "interval": "1day", "time_period": 14, "apikey": TD_API_KEY},
+            timeout=20
+        ).json()
+        mfi = float(mfi_res.get("values", [{"mfi": 50.0}])[0].get("mfi", 50.0))
+
+        return {"obv_now": obv_now, "obv_pct": obv_pct, "obv_trend": obv_trend, "mfi": mfi}
+    except Exception as e:
+        logger.warning(f"OBV/MFI fetch failed for {symbol}: {e}")
+        return None
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SEASONAL CAUTION FLAG
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1053,6 +1084,24 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note=income_note, s_net=s_net, alpha_drip=alpha_drip,
         seasonal_caution=seasonal_caution, y_dist=y_dist
     )
+
+    # ── OBV + MFI: multi-session volume pressure + volume-weighted RSI
+    obv_mfi = fetch_obv_mfi(session, ticker)
+    if obv_mfi:
+        mfi = obv_mfi["mfi"]
+        obv_trend = obv_mfi["obv_trend"]
+        obv_pct   = obv_mfi["obv_pct"]
+        mfi_tag   = "🔴 OVERBOUGHT" if mfi > 70 else ("🟢 OVERSOLD" if mfi < 30 else "🟡 NEUTRAL")
+        # Divergence: price stable/up but OBV falling + MFI declining = distribution pressure
+        price_up     = price_chg >= 0
+        obv_falling  = obv_trend == "falling"
+        mfi_weak     = mfi < 45
+        divergence   = price_up and obv_falling and mfi_weak
+        obv_line = (
+            f"┣ OBV: {obv_trend} ({obv_pct:+.1f}% / 5D) | MFI(14): {mfi:.1f} {mfi_tag}"
+            + (" ⚠️ DIVERGENCE — price holding but volume exiting" if divergence else "") + "\n"
+        )
+        report_text = report_text.rstrip("\n") + "\n" + obv_line
 
     # ── Accumulation gate — one-line summary appended to every report.
     acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200, premium=premium)
