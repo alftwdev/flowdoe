@@ -26,16 +26,20 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("DailyPulse")
 
-SIMPLEFIN_ACCESS_URL = os.getenv("SIMPLEFIN_ACCESS_URL", "")
-SIMPLEFIN_TOKEN      = os.getenv("SIMPLEFIN_TOKEN", "")
-TD_API_KEY           = os.getenv("TWELVE_DATA_API_KEY", "")
-PUSHOVER_API_TOKEN   = os.getenv("PUSHOVER_API_TOKEN", "")
-PUSHOVER_USER_KEY    = os.getenv("PUSHOVER_USER_KEY", "")
+SIMPLEFIN_ACCESS_URL   = os.getenv("SIMPLEFIN_ACCESS_URL", "")
+SIMPLEFIN_TOKEN        = os.getenv("SIMPLEFIN_TOKEN", "")
+TD_API_KEY             = os.getenv("TWELVE_DATA_API_KEY", "")
+PUSHOVER_API_TOKEN     = os.getenv("PUSHOVER_API_TOKEN", "")
+PUSHOVER_USER_KEY      = os.getenv("PUSHOVER_USER_KEY", "")
+# Manual override: set this in .env if SimpleFIN doesn't expose your E*TRADE margin
+# loan as a separate account. Positive value = current margin balance (stored as negative).
+# Example: ETRADE_MARGIN_BALANCE=5000.00  → shows as E*trade — Margin: $-5,000.00
+ETRADE_MARGIN_BALANCE  = os.getenv("ETRADE_MARGIN_BALANCE", "")
 
 STATE_FILE = os.path.join(BASE_DIR, ".daily_pulse_state.json")
 
 # Flag words that identify credit card / liability accounts by name
-CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "gold")
+CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "gold", "margin")
 
 # Low-balance threshold — NFCU/M1 liquid checking only (not credit cards)
 LIQUID_LOW_THRESHOLD = 2000.0
@@ -67,12 +71,16 @@ def claim_simplefin_access_url():
 # SIMPLEFIN — Account Fetch + Categorisation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_simplefin_accounts():
+def fetch_simplefin_accounts(debug=False):
     """
     Returns three lists of account dicts: (liquid, credit, brokerage).
-    Liquid  = positive-balance checking/savings accounts (cash reserves).
-    Credit  = negative-balance credit/card accounts (liabilities owed).
+    Liquid    = positive-balance checking/savings accounts (cash reserves).
+    Credit    = negative-balance OR keyword-matched credit/margin accounts.
     Brokerage = investment accounts (E*TRADE, M1 invest, etc.).
+
+    If ETRADE_MARGIN_BALANCE is set in .env and no margin account is already
+    present from SimpleFIN (i.e. SimpleFIN bundles margin into equity), a
+    synthetic credit entry is injected so it always appears in CREDIT / LIABILITIES.
     """
     if not SIMPLEFIN_ACCESS_URL or SIMPLEFIN_ACCESS_URL.startswith("#"):
         logger.warning("SIMPLEFIN_ACCESS_URL not configured")
@@ -87,6 +95,15 @@ def fetch_simplefin_accounts():
         logger.error(f"SimpleFIN fetch failed: {e}")
         return [], [], []
 
+    if debug:
+        print("\n─── RAW SIMPLEFIN ACCOUNTS ───")
+        for a in raw:
+            org  = a.get("org", {}).get("name", "Unknown")
+            name = a.get("name", "Account")
+            bal  = a.get("balance", "?")
+            print(f"  org={org!r}  name={name!r}  balance={bal}")
+        print("──────────────────────────────\n")
+
     liquid, credit, brokerage = [], [], []
     brokerage_orgs = ("e*trade", "etrade", "fidelity", "schwab", "td ameritrade",
                       "vanguard", "robinhood", "webull", "m1 finance")
@@ -100,6 +117,7 @@ def fetch_simplefin_accounts():
 
         org_lower  = org.lower()
         name_lower = name.lower()
+        # Credit takes priority: negative balance OR credit/margin keyword in name
         is_credit  = (bal < 0) or any(k in name_lower for k in CREDIT_KEYWORDS)
         is_broker  = any(k in org_lower for k in brokerage_orgs)
 
@@ -109,6 +127,23 @@ def fetch_simplefin_accounts():
             brokerage.append(entry)
         else:
             liquid.append(entry)
+
+    # ── Inject synthetic E*TRADE margin entry if not already present from SimpleFIN
+    has_margin = any("margin" in a["name"].lower() for a in credit)
+    if not has_margin and ETRADE_MARGIN_BALANCE:
+        try:
+            margin_val = -abs(float(ETRADE_MARGIN_BALANCE))
+            credit.insert(0, {
+                "org": "E*TRADE", "name": "Margin Loan",
+                "balance": margin_val, "available": margin_val,
+                "_synthetic": True,
+            })
+            logger.info(f"Injected synthetic E*TRADE margin balance: ${margin_val:,.2f}")
+        except ValueError:
+            logger.warning(f"ETRADE_MARGIN_BALANCE invalid: {ETRADE_MARGIN_BALANCE!r}")
+
+    # Sort credit by balance ascending so largest liability (margin) leads
+    credit.sort(key=lambda a: a["balance"])
 
     logger.info(f"SimpleFIN: {len(liquid)} liquid | {len(credit)} credit | {len(brokerage)} brokerage")
     return liquid, credit, brokerage
@@ -276,14 +311,17 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
         lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
     lines.append(f"┗ Total: ${total_liquid:,.2f}{_delta(total_liquid, prev_liquid)}")
 
-    # ── Section 2: Credit / Liabilities
+    # ── Section 2: Credit / Liabilities (sorted most-negative first)
     total_owed = sum(a["balance"] for a in credit)
     lines.append("")
     lines.append("CREDIT / LIABILITIES")
     if credit:
-        for a in credit:
-            lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
-        lines.append(f"┗ Total Owed: ${total_owed:,.2f}")
+        for i, a in enumerate(credit):
+            connector = "┗" if i == len(credit) - 1 and not True else "┣"
+            # Always show negative liabilities with a minus sign before the dollar sign
+            bal_str = f"$-{abs(a['balance']):,.2f}" if a["balance"] <= 0 else f"${a['balance']:,.2f}"
+            lines.append(f"┣ {_clean_name(a['org'], a['name'])}: {bal_str}")
+        lines.append(f"┗ Total Owed: $-{abs(total_owed):,.2f}")
     else:
         lines.append("┗ No credit balances")
 
@@ -355,7 +393,7 @@ def push_to_pushover(title, message, priority=0):
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_daily_pulse(force=False):
+def run_daily_pulse(force=False, debug=False):
     today_str = date.today().isoformat()
     state     = load_state()
 
@@ -363,7 +401,7 @@ def run_daily_pulse(force=False):
         logger.info("Already sent today — use --force to override")
         return
 
-    liquid, credit, brokerage = fetch_simplefin_accounts()
+    liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
     regime = fetch_market_regime()
 
     title, message, _ = format_pulse_message(liquid, credit, brokerage, {}, regime, state)
@@ -396,4 +434,8 @@ if __name__ == "__main__":
     if "--claim" in sys.argv:
         claim_simplefin_access_url()
         sys.exit(0)
-    run_daily_pulse(force="--force" in sys.argv)
+    if "--list-accounts" in sys.argv:
+        # Debug mode: print all raw SimpleFIN accounts then exit — no Pushover dispatch
+        fetch_simplefin_accounts(debug=True)
+        sys.exit(0)
+    run_daily_pulse(force="--force" in sys.argv, debug="--debug" in sys.argv)
