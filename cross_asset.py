@@ -4,7 +4,7 @@ import io
 import logging
 import requests
 import pandas as pd
-from datetime import datetime, time as dtime
+from datetime import datetime, date, timedelta, time as dtime
 import pytz
 import matplotlib
 matplotlib.use("Agg")
@@ -55,6 +55,91 @@ FUTURES_BOARD = {
 # Deep-dive market profile is only computed for the two instruments retail futures traders
 # care most about intraday: ES and NQ (via SPY/QQQ proxy — no Level 2/Rithmic feed available).
 PROFILE_ASSETS = {"SPY": "/ES", "QQQ": "/NQ"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECONOMIC CALENDAR — hardcoded 2026 high-vol events (FOMC, CPI, NFP)
+# Board flags "TODAY" or "TOMORROW" so traders know to reduce size / expect vol.
+# Update annually. Sources: Fed calendar (federalreserve.gov), BLS schedule.
+# ─────────────────────────────────────────────────────────────────────────────
+ECON_CALENDAR_2026 = {
+    # FOMC decision days (second day of two-day meeting)
+    "01-29": "FOMC Decision 📣",
+    "03-19": "FOMC Decision 📣",
+    "05-07": "FOMC Decision 📣",
+    "06-18": "FOMC Decision 📣",
+    "07-30": "FOMC Decision 📣",
+    "09-17": "FOMC Decision 📣",
+    "10-29": "FOMC Decision 📣",
+    "12-10": "FOMC Decision 📣",
+    # NFP (first Friday each month — adjusted for 2026 calendar)
+    "01-09": "Jobs Report / NFP 📊",
+    "02-06": "Jobs Report / NFP 📊",
+    "03-06": "Jobs Report / NFP 📊",
+    "04-03": "Jobs Report / NFP 📊",
+    "05-01": "Jobs Report / NFP 📊",
+    "06-05": "Jobs Report / NFP 📊",
+    "07-02": "Jobs Report / NFP 📊",  # Jul 3 holiday — moved
+    "08-07": "Jobs Report / NFP 📊",
+    "09-04": "Jobs Report / NFP 📊",
+    "10-02": "Jobs Report / NFP 📊",
+    "11-06": "Jobs Report / NFP 📊",
+    "12-04": "Jobs Report / NFP 📊",
+    # CPI (BLS release, typically second or third Tuesday/Wednesday mid-month)
+    "01-14": "CPI Release 📊",
+    "02-11": "CPI Release 📊",
+    "03-11": "CPI Release 📊",
+    "04-14": "CPI Release 📊",
+    "05-13": "CPI Release 📊",
+    "06-11": "CPI Release 📊",
+    "07-14": "CPI Release 📊",
+    "08-12": "CPI Release 📊",
+    "09-11": "CPI Release 📊",
+    "10-14": "CPI Release 📊",
+    "11-12": "CPI Release 📊",
+    "12-11": "CPI Release 📊",
+}
+
+
+def get_economic_calendar_alert():
+    """
+    Returns a one-line alert string if today or tomorrow has a scheduled high-vol event,
+    None otherwise. Futures traders use this to pre-size positions before the print.
+    """
+    today_key    = date.today().strftime("%m-%d")
+    tomorrow_key = (date.today() + timedelta(days=1)).strftime("%m-%d")
+    if today_key in ECON_CALENDAR_2026:
+        return f"TODAY: {ECON_CALENDAR_2026[today_key]} — reduce size, expect vol"
+    if tomorrow_key in ECON_CALENDAR_2026:
+        return f"TOMORROW: {ECON_CALENDAR_2026[tomorrow_key]} — prep overnight position"
+    return None
+
+
+def fetch_daily_levels(symbols):
+    """
+    Fetches PDH / PDL / PDC (previous-day high, low, close) for a list of ETF symbols
+    using 1-day bars. Called once per board run for SPY and QQQ so the board can show
+    whether price is above/below yesterday's range — the most common level futures traders
+    reference at the open and during RTH.
+    """
+    levels = {}
+    for sym in symbols:
+        try:
+            r = requests.get(
+                "https://api.twelvedata.com/time_series",
+                params={"symbol": sym, "interval": "1day", "outputsize": 3, "apikey": TD_API_KEY},
+                timeout=12,
+            ).json()
+            vals = r.get("values", [])
+            if len(vals) >= 2:
+                prev = vals[1]  # index 0 = today (partial), index 1 = yesterday (complete)
+                levels[sym] = {
+                    "pdh": float(prev["high"]),
+                    "pdl": float(prev["low"]),
+                    "pdc": float(prev["close"]),
+                }
+        except Exception as e:
+            logger.warning(f"Daily levels fetch failed for {sym}: {e}")
+    return levels
 
 # =====================================================================
 # 3-STRIKE DYNAMIC GATEKEEPER (single source of truth for the futures channel)
@@ -283,25 +368,97 @@ def generate_market_profile_chart(label, df, profile, vwap, posture):
     return buf.read()
 
 # =====================================================================
-# FUTURES BOARD — always-fires "no major update" Pulse Report (mirrors Finviz-style table)
+# FUTURES BOARD — condensed pulse with directional context
 # =====================================================================
-def build_board_payload(board, session_label):
-    rows = []
+
+# Index futures shown first (most relevant to equity traders sizing positions),
+# commodities second as macro context for the session.
+INDEX_LABELS     = {"S&P 500", "Nasdaq 100", "Dow", "Russell 2000"}
+COMMODITY_LABELS = {"Crude Oil", "Gold", "Natural Gas"}
+
+
+def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, daily_levels=None):
+    """
+    Compact futures board: price + % change + PDH/PDL context for index futures.
+    Divergence and VIX tier appended as actionable signal lines.
+    No verbose proxy labels — the futures label (/ES, /NQ etc.) is identifier enough.
+    """
+    daily_levels = daily_levels or {}
+    index_rows, commodity_rows = [], []
+
     for label, q in board.items():
-        arrow = "🟢▲" if q["percent_change"] > 0 else ("🔴▼" if q["percent_change"] < 0 else "⚪")
-        # "(proxy)" alone isn't clear enough — a reader sees "S&P 500 /ES (proxy): 744.85" right
-        # next to a real index trading at ~7500 and assumes the number is wrong, not that it's
-        # SPY's own share price (~1/10th the index). Naming the actual ETF removes that ambiguity.
-        tag = "" if q["mode"] == "LIVE" else f" (ETF proxy: {q['proxy_symbol']} share price, not the index level)"
-        rows.append(
-            f"┣ {label} `{q['label']}`{tag}: `{q['last']:,.2f}` | {arrow} `{q['change']:+.2f}` (`{q['percent_change']:+.2f}%`)"
-        )
-    body = "\n".join(rows)
+        pct = q["percent_change"]
+        arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "—")
+        color = "🟢" if pct > 0 else ("🔴" if pct < 0 else "⚪")
+
+        # PDH/PDL context for index proxies only — adds "Above PDH" / "Below PDL" / "Inside range"
+        ctx = ""
+        sym = q["proxy_symbol"]
+        if sym in daily_levels and label in INDEX_LABELS:
+            pdh = daily_levels[sym]["pdh"]
+            pdl = daily_levels[sym]["pdl"]
+            spot = q["last"]
+            if spot > pdh:
+                ctx = f" | Above PDH {pdh:,.2f} ✅"
+            elif spot < pdl:
+                ctx = f" | Below PDL {pdl:,.2f} 🔴"
+            else:
+                ctx = f" | Inside range ({pdl:,.2f}–{pdh:,.2f})"
+
+        row = f"┣ {q['label']}: {q['last']:,.2f} {color}{arrow} {pct:+.1f}%{ctx}"
+        (index_rows if label in INDEX_LABELS else commodity_rows).append(row)
+
+    # ── ES vs NQ divergence (the single most-watched intermarket relationship in E-mini)
+    es_q  = board.get("S&P 500")
+    nq_q  = board.get("Nasdaq 100")
+    ym_q  = board.get("Dow")
+    rty_q = board.get("Russell 2000")
+    divergence_line = ""
+    if es_q and nq_q:
+        div = es_q["percent_change"] - nq_q["percent_change"]
+        if abs(div) >= 0.5:
+            if div > 0:
+                divergence_line = f"┣ Divergence: /ES {es_q['percent_change']:+.1f}% vs /NQ {nq_q['percent_change']:+.1f}% — tech lagging, selective ⚠️\n"
+            else:
+                divergence_line = f"┣ Divergence: /NQ {nq_q['percent_change']:+.1f}% vs /ES {es_q['percent_change']:+.1f}% — QQQ leading, rotation ⚠️\n"
+
+    # ── VIX regime (drives position sizing)
+    vix_line = ""
+    if vix_regime:
+        z    = vix_regime.get("vixy_z", 0.0)
+        tier = vix_regime.get("tier", "NORMAL")
+        if tier == "NORMAL":
+            vix_line = f"┣ VIX: calm ({z:+.1f}σ) — full size OK\n"
+        elif tier == "ELEVATED":
+            vix_line = f"┣ VIX: elevated ({z:+.1f}σ) — reduce size 50% ⚠️\n"
+        else:
+            vix_line = f"┣ VIX: SPIKE ({z:+.1f}σ) — defensive posture 🔴\n"
+
+    # ── Economic calendar alert
+    econ_line = f"┣ 📅 {econ_alert}\n" if econ_alert else ""
+
+    # ── Session bias from index breadth
+    index_pcts = [q["percent_change"] for q in [es_q, nq_q, ym_q, rty_q] if q]
+    bulls = sum(1 for p in index_pcts if p > 0)
+    if bulls == len(index_pcts):
+        bias = "All indices green — broad risk-on"
+    elif bulls == 0:
+        bias = "All indices red — broad risk-off"
+    elif bulls >= 3:
+        bias = "Broad strength — watch lagging index for rotation"
+    elif bulls <= 1:
+        bias = "Broad weakness — only isolated green pockets"
+    else:
+        bias = "Mixed — wait for /ES value area confirmation"
+
+    rows_text = "\n".join(index_rows + commodity_rows)
     return (
-        f"⚡ **GLOBAL FUTURES BOARD | {session_label} SESSION**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{body}\n"
-        f"┗ Status: No structural regime shift — boundaries holding. Next deep-dive fires on a confirmed value-area break."
+        f"⚡ FUTURES BOARD | {session_label}\n"
+        f"{rows_text}\n"
+        f"{vix_line}"
+        f"{divergence_line}"
+        f"{econ_line}"
+        f"┗ Bias: {bias}"
     )
 
 BOARD_MIN_CHANGE_PCT = 0.05   # composite % move across the board required to re-dispatch
@@ -310,12 +467,10 @@ BOARD_HEARTBEAT_HOURS = 4     # dispatch anyway after this long even if nothing 
 
 def run_futures_board():
     """
-    Was always-fire regardless of whether the underlying quotes had moved at all — confirmed live,
-    three consecutive RTH dispatches showed byte-identical SPY/QQQ/Dow/IWM prices for hours while
-    only Gold ticked a cent. That's a frozen/cached read on those proxies, and re-posting it
-    verbatim every cron tick is pure noise with zero "so what." Now gated: only re-dispatch on a
-    real composite move, or after BOARD_HEARTBEAT_HOURS with no move (confirms the board is alive,
-    not stuck) — same 3-strike philosophy used everywhere else in the ecosystem.
+    Change-gated futures board with directional context.
+    Only re-dispatches on a real composite move or after BOARD_HEARTBEAT_HOURS of silence.
+    Augments the bare price table with: PDH/PDL context, ES/NQ divergence, VIX tier,
+    economic calendar alert, and session bias verdict.
     """
     if not WEBHOOK_FUTURES:
         return
@@ -323,9 +478,12 @@ def run_futures_board():
     if not board:
         return
 
-    last_board = db.get_state("futures_board_last_quotes", {})
+    last_board        = db.get_state("futures_board_last_quotes", {})
     last_dispatch_iso = db.get_state("futures_board_last_dispatch", "")
-    composite_change = sum(abs(q["percent_change"] - last_board.get(label, {}).get("percent_change", 0.0)) for label, q in board.items())
+    composite_change  = sum(
+        abs(q["percent_change"] - last_board.get(label, {}).get("percent_change", 0.0))
+        for label, q in board.items()
+    )
 
     heartbeat_due = True
     if last_dispatch_iso:
@@ -339,8 +497,15 @@ def run_futures_board():
         logger.info(f"Futures board unchanged (composite Δ {composite_change:.3f}%) — suppressing repeat dispatch.")
         return
 
+    # Enrich board with context signals (one-time fetch per board run)
     session_label = get_session_label()
-    send_essentials_embed(WEBHOOK_FUTURES, "ESSENTIALS FUTURES BOARD", build_board_payload(board, session_label), 0x00FFFF)
+    vix_regime    = engine.classify_vix_regime()
+    econ_alert    = get_economic_calendar_alert()
+    daily_levels  = fetch_daily_levels(["SPY", "QQQ", "DIA", "IWM"])
+
+    payload = build_board_payload(board, session_label, vix_regime=vix_regime,
+                                  econ_alert=econ_alert, daily_levels=daily_levels)
+    send_essentials_embed(WEBHOOK_FUTURES, "FUTURES BOARD", payload, 0x00FFFF)
     db.update_state("futures_board_last_quotes", board)
     db.update_state("futures_board_last_dispatch", datetime.now().isoformat())
     logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due})")
