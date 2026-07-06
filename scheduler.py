@@ -77,7 +77,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "darkpool", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -718,47 +718,40 @@ def main():
                 payload = "Institutional Extended-Hours Liquidity Sweep\n\n" + "\n".join(triggered_assets) + "\n\nContext: Abnormal post-market volatility usually signals an earnings release or breaking structural news."
                 send_essentials_embed(WEBHOOK_MARKET, "POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0xe74c3c)
 
-        elif args.mode == "darkpool":
-            broad_universe = "SPY,QQQ,IWM,AAPL,NVDA,MSFT,META,TSLA,AMD,AMZN,NFLX,BA,DIS,JPM,V,WMT,COST,AVGO,SMCI,COIN"
-            trending_symbols = []
-            
+        elif args.mode == "options_flow":
+            # ── OPTIONS SETUP SCANNER ─────────────────────────────────────────
+            # Screens the dynamic universe for high-conviction directional setups.
+            # Sources: RVOL, RSI, MACD, ATR (strike zone), short interest, 52W range,
+            # social sentiment (StockTwits/WSB). No fake dark pool — every signal is
+            # derived from real publicly available equity data.
+            # Run once per session around 10:00-10:30 ET after the open settles.
             try:
-                batch_quotes = requests.get(f"https://api.twelvedata.com/quote?symbol={broad_universe}&apikey={TWELVE_DATA_API_KEY}", timeout=10).json()
-                for sym, data in batch_quotes.items():
-                    if "percent_change" in data:
-                        pct_chg = abs(float(data["percent_change"]))
-                        if pct_chg >= 1.2:
-                            trending_symbols.append(sym)
+                setups = engine.generate_options_setup_scan()
+                if not setups:
+                    logger.info("Options flow scan: no qualifying setups this session.")
+                else:
+                    today_label = datetime.now().strftime("%b %-d")
+                    header = f"OPTIONS SETUP SCANNER — {today_label}\n"
+                    for s in setups:
+                        direction_icon = "🟢 CALL" if s["direction"] == "CALL" else "🔴 PUT"
+                        squeeze_line = f"┣ Short squeeze risk: {s['short_pct']:.1f}% of float short\n" if s["short_pct"] > 5.0 else ""
+                        social_line  = f"┣ Social: {s['social_meter']} buzz — {s['social_lean']}\n" if s.get("social_meter") else ""
+                        payload = (
+                            f"{s['symbol']} — {direction_icon} BIAS\n"
+                            f"┣ Spot: ${s['spot']:,.2f} | RVOL: {s['rvol']:.1f}x | RSI: {s['rsi']:.0f}\n"
+                            f"┣ MACD: {s['macd_tag']} | ATR(14): ${s['atr']:.2f}\n"
+                            f"┣ Strike zone: ${s['strike_lo']:,.0f}–${s['strike_hi']:,.0f} | DTE: 21–30\n"
+                            f"┣ 52W range: {s['range_pct']:.0f}% ({s['range_tag']})\n"
+                            f"{squeeze_line}"
+                            f"{social_line}"
+                            f"┗ {s['verdict']}"
+                        )
+                        color = 0x2ecc71 if s["direction"] == "CALL" else 0xe74c3c
+                        if WEBHOOK_OPTIONS:
+                            send_essentials_embed(WEBHOOK_OPTIONS, f"OPTIONS SETUP: {s['symbol']}", payload, color)
+                    logger.info(f"Options flow scan dispatched: {len(setups)} setup(s).")
             except Exception as e:
-                logger.error(f"Failed to fetch Dark Pool universe sieve: {e}")
-                return
-
-            if not trending_symbols:
-                return
-
-            for sym in trending_symbols:
-                block_data = engine.detect_institutional_block_proxy(sym)
-                if not block_data: continue
-                
-                alert_id = f"dp_proxy_{sym}"
-                state_str = f"DP_{block_data['direction']}_RVOL_{round(block_data['rvol'], 1)}"
-                
-                if engine.db.track_and_limit_alerts(
-                    alert_id=alert_id, current_state=state_str, current_trigger=block_data['spot'],
-                    max_broadcasts=2, threshold_pct=0.002 
-                ):
-                    payload = (
-                        f"Institutional Footprint: Block Trade Proxy Detected\n"
-                        f"┣ Asset: `{sym}` | Spot Execution: `${block_data['spot']:,.2f}`\n"
-                        f"┣ Abnormal Candle Volume: `{int(block_data['current_vol']):,}` shares\n"
-                        f"┣ Trailing Benchmark Average: `{int(block_data['baseline_vol']):,}` shares\n"
-                        f"┗ Volume Multiplier Velocity: `{block_data['rvol']:.1f}x` spike above baseline\n\n"
-                        f"Ecosystem Context: A hidden institutional transaction or dark pool order allocation has just cleared.\n"
-                        f"VWAP Positioning: {block_data['direction']} (VWAP: `${block_data['vwap']:,.2f}`)"
-                    )
-                    # Assign dynamic color depending on execution bias direction
-                    dp_color = 0x2ecc71 if "BULLISH" in block_data['direction'].upper() else 0xe74c3c
-                    send_essentials_embed(WEBHOOK_OPTIONS, f"DARK POOL RADAR: {sym}", payload, dp_color)
+                logger.error(f"Options flow scan failed: {e}")
 
         elif args.mode == "trending_plays":
             # ── SOCIAL SENTIMENT TRENDING OPTIONS PLAYS ─────────────────────

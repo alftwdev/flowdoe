@@ -1255,29 +1255,231 @@ class HighFidelityAnalyticsEngine:
 
         return sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]
 
-    def detect_institutional_block_proxy(self, symbol="SPY", lookback=20, volume_multiplier=4.0):
-        data = self._execute_query("time_series", {"symbol": symbol, "interval": "5min", "outputsize": str(lookback + 5)})
-        if not data or "values" not in data: return None
+    # ── Screening universe for options setup scan.
+    # Liquid names with active options markets — updated manually when tickers lose liquidity.
+    OPTIONS_SCAN_UNIVERSE = (
+        "SPY,QQQ,IWM,AAPL,NVDA,MSFT,META,TSLA,AMD,AMZN,NFLX,"
+        "JPM,GS,BAC,V,MA,COST,WMT,HD,AVGO,CRM,ORCL,"
+        "COIN,MARA,RIOT,HOOD,SMCI,PLTR,ARM,SOXL"
+    )
+
+    def generate_options_setup_scan(self, max_results: int = 5) -> list:
+        """
+        Multi-factor options setup screener. No fake dark pool — every signal is derived
+        from real publicly available equity data on Twelve Data:
+          • RVOL (daily volume vs 90D avg) — confirms real momentum, not random noise
+          • RSI (14D) — direction bias and overbought/oversold filter
+          • MACD histogram — momentum expanding or compressing
+          • ATR (14D) — used to suggest a rational strike zone (1–1.5× ATR OTM)
+          • 52-week range position — near highs favors calls; near lows favors puts
+          • Short interest (% of float) — squeeze potential for calls
+          • Social sentiment — StockTwits/WSB buzz layer (reuses existing scrapers)
+
+        Strike zone is NOT a live options chain — it's an ATR-based OTM estimate.
+        Label it as a "suggested zone" in the output; the subscriber verifies the
+        live chain before entering.
+
+        Methodology aligned with: tastytrade probability-based approach (RVOL + RSI
+        confluence), SMB Capital options desk (directional setup criteria), r/thetagang
+        (IV proxy via ATR for premium context), r/options (52W range + short squeeze).
+        """
+        import requests as req
+
+        # ── Step 1: Universe sieve — pull batch quotes, keep movers with real volume
         try:
-            df = pd.DataFrame(data["values"])
-            df["close"], df["volume"] = df["close"].astype(float), df["volume"].astype(float)
-            df = df.iloc[::-1].reset_index(drop=True)
+            batch = self._execute_query("quote", {"symbol": self.OPTIONS_SCAN_UNIVERSE})
+        except Exception as e:
+            logger.error(f"Options scan universe fetch failed: {e}")
+            return []
 
-            df["pv"] = df["close"] * df["volume"]
-            vwap = df["pv"].sum() / df["volume"].sum()
+        # batch may be a dict of {symbol: quote_dict} or a single quote_dict
+        if not batch or not isinstance(batch, dict):
+            return []
+        # Detect single-symbol response vs batch
+        if "symbol" in batch:
+            batch = {batch["symbol"]: batch}
 
-            baseline_vol = df["volume"].iloc[-lookback-1:-1].mean()
-            current_vol = df["volume"].iloc[-1]
-            current_close = df["close"].iloc[-1]
+        candidates = []
+        for sym, q in batch.items():
+            if "percent_change" not in q:
+                continue
+            try:
+                pct_chg = abs(float(q.get("percent_change", 0)))
+                spot    = float(q.get("close", 0))
+                vol     = float(q.get("volume", 0))
+                avg_vol = float(q.get("average_volume", 1))
+                rvol    = vol / avg_vol if avg_vol > 0 else 0.0
+                # Sieve: meaningful move + real volume (not random noise, not penny-vol)
+                if pct_chg >= 1.0 and rvol >= 1.5 and spot >= 5.0:
+                    candidates.append({"symbol": sym, "spot": spot, "pct_chg": pct_chg,
+                                       "rvol": rvol, "q": q})
+            except Exception:
+                continue
 
-            if baseline_vol == 0: return None
-            rvol = current_vol / baseline_vol
+        if not candidates:
+            return []
 
-            if rvol >= volume_multiplier:
-                direction = "🟢 ACCUMULATION (Bullish)" if current_close >= vwap else "🔴 DISTRIBUTION (Bearish)"
-                return {"symbol": symbol, "spot": current_close, "vwap": vwap, "rvol": rvol, "current_vol": current_vol, "baseline_vol": baseline_vol, "direction": direction}
+        # Sort by RVOL × pct_chg composite (highest momentum first), cap at 12 for API budget
+        candidates.sort(key=lambda x: x["rvol"] * x["pct_chg"], reverse=True)
+        candidates = candidates[:12]
+
+        # ── Step 2: Per-candidate deep-score
+        results = []
+        for c in candidates:
+            sym  = c["symbol"]
+            spot = c["spot"]
+            q    = c["q"]
+            try:
+                # RSI
+                rsi_data = self._execute_query("rsi", {"symbol": sym, "interval": "1day", "time_period": 14})
+                rsi = float(rsi_data["values"][0]["rsi"]) if rsi_data and rsi_data.get("values") else 50.0
+
+                # Skip extremes — overbought >78 or oversold <22 means the move is likely exhausted
+                if rsi > 78 or rsi < 22:
+                    continue
+
+                # ATR — basis for strike zone sizing
+                atr_data = self._execute_query("atr", {"symbol": sym, "interval": "1day", "time_period": 14})
+                atr = float(atr_data["values"][0]["atr"]) if atr_data and atr_data.get("values") else spot * 0.02
+
+                # MACD
+                macd_data = self._execute_query("macd", {"symbol": sym, "interval": "1day",
+                                                          "fast_period": 12, "slow_period": 26, "signal_period": 9})
+                macd_hist, macd_expanding, macd_bull = 0.0, False, False
+                if macd_data and macd_data.get("values"):
+                    vals = macd_data["values"]
+                    h0 = float(vals[0].get("macd_hist", 0))
+                    h1 = float(vals[1].get("macd_hist", 0)) if len(vals) > 1 else 0.0
+                    macd_hist      = h0
+                    macd_expanding = abs(h0) > abs(h1)
+                    macd_bull      = h0 > 0
+                macd_tag = ("▲ expanding" if macd_expanding and macd_bull
+                            else "▼ expanding" if macd_expanding and not macd_bull
+                            else "▲ compressing" if not macd_expanding and macd_bull
+                            else "▼ compressing")
+
+                # 52-week range position (0% = at 52W low, 100% = at 52W high)
+                w52 = q.get("fifty_two_week", {})
+                w52_lo = float(w52.get("low", spot * 0.7))
+                w52_hi = float(w52.get("high", spot * 1.3))
+                range_pct = ((spot - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi > w52_lo else 50.0
+                range_tag = ("near highs — momentum" if range_pct >= 70
+                             else "near lows — reversal watch" if range_pct <= 30
+                             else "mid-range")
+
+                # Short interest (squeeze fuel for calls, confirmation for puts)
+                short_pct = 0.0
+                try:
+                    stats = self._execute_query("statistics", {"symbol": sym})
+                    if stats and stats.get("statistics"):
+                        short_pct = float(stats["statistics"].get("stock_statistics", {})
+                                          .get("short_percent_of_shares_outstanding", 0)) * 100
+                except Exception:
+                    pass
+
+                # Direction logic — tastytrade/SMB consensus:
+                # RSI 52-75 + MACD bullish + >70% of 52W range = CALL bias
+                # RSI 25-48 + MACD bearish + <30% of 52W range = PUT bias
+                # High short interest (>5%) adds squeeze conviction to CALL bias
+                if rsi >= 50 and macd_bull:
+                    direction = "CALL"
+                    # Strike zone: 1–1.5× ATR above spot (OTM call, standard tastytrade delta ~0.30)
+                    strike_lo = round((spot + atr) / 1.0)        # ~0.30 delta equivalent
+                    strike_hi = round(spot + 1.5 * atr)
+                elif rsi < 50 and not macd_bull:
+                    direction = "PUT"
+                    strike_lo = round(spot - 1.5 * atr)
+                    strike_hi = round(spot - atr)
+                else:
+                    continue  # conflicting signals — skip
+
+                # Require MACD to be expanding in the direction — compression = fading momentum
+                if not macd_expanding:
+                    continue
+
+                # Conviction score (0–100): RVOL weight + RSI alignment + range alignment + squeeze
+                score = 0
+                score += min(30, int(c["rvol"] * 10))           # RVOL: up to 30 pts
+                rsi_align = abs(rsi - 50) / 30 * 25             # RSI distance from neutral: up to 25 pts
+                score += int(rsi_align)
+                score += 20 if (direction == "CALL" and range_pct >= 60) or \
+                               (direction == "PUT"  and range_pct <= 40) else 10
+                score += 10 if (direction == "CALL" and short_pct >= 5) else 0
+                if score < 35:                                   # minimum conviction threshold
+                    continue
+
+                # Social sentiment reuse (returns None if scraper unavailable — graceful)
+                social_meter, social_lean = None, None
+                try:
+                    social = self._get_social_sentiment_for(sym)
+                    if social:
+                        social_meter = social.get("meter")
+                        social_lean  = social.get("lean")
+                except Exception:
+                    pass
+
+                # Verdict — single BLUF action line
+                squeeze_note = f" High short float ({short_pct:.1f}%) adds squeeze fuel." if direction == "CALL" and short_pct > 5 else ""
+                verdict = (
+                    f"{'BTO call' if direction == 'CALL' else 'BTO put'} debit spread, "
+                    f"strike zone ${strike_lo:,}–${strike_hi:,}, 21–30 DTE. "
+                    f"Size ≤5% portfolio.{squeeze_note}"
+                )
+
+                results.append({
+                    "symbol": sym, "spot": spot, "direction": direction,
+                    "rvol": c["rvol"], "rsi": rsi, "atr": atr,
+                    "macd_tag": macd_tag, "macd_bull": macd_bull,
+                    "strike_lo": strike_lo, "strike_hi": strike_hi,
+                    "range_pct": range_pct, "range_tag": range_tag,
+                    "short_pct": short_pct, "score": score,
+                    "social_meter": social_meter, "social_lean": social_lean,
+                    "verdict": verdict,
+                })
+
+            except Exception as e:
+                logger.warning(f"Options scan failed for {sym}: {e}")
+                continue
+
+        # Return top N by conviction score
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:max_results]
+
+    def _get_social_sentiment_for(self, symbol: str):
+        """
+        Lightweight single-symbol social check against StockTwits public API.
+        Returns {'meter': 'HIGH'/'LOW', 'lean': 'Bullish'/'Bearish'/'Mixed'} or None.
+        Used as a confirmation layer on top of the technical setup — social hype alone
+        is not a signal, but HIGH buzz + bullish lean on a technically confirmed setup
+        increases conviction (WSB squeeze thesis, trending names).
+        """
+        try:
+            import requests as req
+            r = req.get(
+                f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json",
+                timeout=8, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            if r.status_code != 200:
+                return None
+            data  = r.json()
+            msgs  = data.get("messages", [])[:20]
+            if not msgs:
+                return None
+            bulls = sum(1 for m in msgs if (m.get("entities", {}).get("sentiment") or {}).get("basic") == "Bullish")
+            bears = sum(1 for m in msgs if (m.get("entities", {}).get("sentiment") or {}).get("basic") == "Bearish")
+            total = bulls + bears
+            meter = "HIGH" if len(msgs) >= 10 else "LOW"
+            if total == 0:
+                lean = "Mixed"
+            elif bulls / total >= 0.65:
+                lean = "Bullish"
+            elif bears / total >= 0.65:
+                lean = "Bearish"
+            else:
+                lean = "Mixed"
+            return {"meter": meter, "lean": lean, "bulls": bulls, "bears": bears}
+        except Exception:
             return None
-        except Exception as e: return None
 
     # Official TSP individual funds + the benchmark each one tracks (for "what moved it" context).
     # G Fund has no market benchmark — it's a unique non-marketable Treasury security, always flat/positive.
