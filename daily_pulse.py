@@ -203,92 +203,124 @@ def save_state(state):
 # FORMAT — ┣/┗ Pulse Message
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _delta_str(current, previous):
-    if previous is None or previous == 0:
+# Noisy account names from bank feeds → cleaner display labels.
+# Keys are substrings (lowercased) found in the raw account name.
+ACCOUNT_NAME_MAP = {
+    "active duty checking": "Checking",
+    "flagship rewards":     "Flagship Visa",
+    "visa signature":       "Visa",
+    "platinum card":        "Amex Platinum",
+    "gold card":            "Amex Gold",
+    "individual brokerage": "Brokerage",
+}
+
+def _clean_name(org, name):
+    """
+    Strip trailing (XXXX) account number suffix and apply ACCOUNT_NAME_MAP
+    to replace noisy bank-assigned account names with clean display labels.
+    """
+    import re
+    name = re.sub(r"\s*\(?\w{4}\)?\s*$", "", name).strip()
+    name_lower = name.lower()
+    for fragment, replacement in ACCOUNT_NAME_MAP.items():
+        if fragment in name_lower:
+            name = replacement
+            break
+    org_short = org.split()[0] if org and org != "Unknown" else ""
+    return f"{org_short} — {name}" if org_short else name
+
+
+def _delta(current, prev):
+    """Signed dollar delta string, or empty string if no prior value."""
+    if prev is None:
         return ""
-    delta = current - previous
-    arrow = "↑" if delta >= 0 else "↓"
-    return f" {arrow} ${abs(delta):,.2f} vs yesterday"
+    d = current - prev
+    arrow = "↑" if d >= 0 else "↓"
+    return f" ({arrow}${abs(d):,.0f})"
+
+
+def _brokerage_deltas(current, state):
+    """
+    Returns delta strings for 1D / 3M / 6M / 1Y using dated snapshots
+    stored in state['snapshots']. Falls back to 'N/A' until enough history
+    accumulates (snapshots are written once per day, so 1Y takes 365 runs).
+    """
+    today      = date.today()
+    snapshots  = state.get("snapshots", {})
+    horizons   = {"1D": 1, "3M": 90, "6M": 180, "1Y": 365}
+    parts      = []
+    for label, days in horizons.items():
+        target = (today - __import__("datetime").timedelta(days=days)).isoformat()
+        # Find the closest snapshot on or before the target date
+        past_dates = sorted(k for k in snapshots if k <= target)
+        if past_dates:
+            past_val = snapshots[past_dates[-1]]
+            d = current - past_val
+            arrow = "↑" if d >= 0 else "↓"
+            parts.append(f"{label}: {arrow}${abs(d):,.0f}")
+        else:
+            parts.append(f"{label}: —")
+    return " | ".join(parts)
+
 
 def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
-    today    = date.today().strftime("%b %d, %Y")
+    today     = date.today().strftime("%b %d, %Y")
     spy_price, bull, vixy_z, vixy_label = regime
-    lines    = []
-    priority = 0
+    lines     = []
 
-    # ── Section 1: Cash Reserves
+    # ── Section 1: Cash Reserves (liquid checking/savings only)
     total_liquid = sum(a["balance"] for a in liquid)
     prev_liquid  = state.get("total_liquid")
-    liquid_low   = total_liquid < LIQUID_LOW_THRESHOLD and liquid
-
     lines.append("CASH RESERVES")
     for a in liquid:
-        tag  = f"({a['org'].split()[0]})" if len(liquid) > 1 else ""
-        lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
-    lines.append(f"┗ Total Liquid: ${total_liquid:,.2f}{_delta_str(total_liquid, prev_liquid)}")
-
-    if liquid_low:
-        priority = 1
-        lines.append(f"⚠️  LOW CASH — below ${LIQUID_LOW_THRESHOLD:,.0f} buffer target")
+        lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
+    lines.append(f"┗ Total: ${total_liquid:,.2f}{_delta(total_liquid, prev_liquid)}")
 
     # ── Section 2: Credit / Liabilities
-    total_owed = sum(a["balance"] for a in credit)  # negative values
+    total_owed = sum(a["balance"] for a in credit)
     lines.append("")
     lines.append("CREDIT / LIABILITIES")
     if credit:
         for a in credit:
-            lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
+            lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
         lines.append(f"┗ Total Owed: ${total_owed:,.2f}")
     else:
-        lines.append("┗ No credit balances on record")
+        lines.append("┗ No credit balances")
 
-    # ── Section 3: Brokerage
-    total_brokerage = sum(a["balance"] for a in brokerage if a["balance"] > 0)
-    prev_brokerage  = state.get("total_brokerage")
+    # ── Section 3: Brokerage (skip zero-balance accounts)
+    active_brokers = [a for a in brokerage if a["balance"] != 0]
+    total_brokerage = sum(a["balance"] for a in active_brokers if a["balance"] > 0)
     lines.append("")
     lines.append("BROKERAGE")
-    for a in brokerage:
-        if a["balance"] != 0:
-            lines.append(f"┣ {_short_name(a['name'])}: ${a['balance']:,.2f}")
-    lines.append(f"┗ Total Portfolio: ${total_brokerage:,.2f}{_delta_str(total_brokerage, prev_brokerage)}")
+    for a in active_brokers:
+        deltas = _brokerage_deltas(a["balance"], state) if "etrade" in a["org"].lower() or "e*trade" in a["org"].lower() else ""
+        lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
+        if deltas:
+            lines.append(f"┃  {deltas}")
+    lines.append(f"┗ Total Portfolio: ${total_brokerage:,.2f}{_delta(total_brokerage, state.get('total_brokerage'))}")
 
     # ── Section 4: Net Worth Snapshot
-    net_worth      = total_liquid + total_owed + total_brokerage
-    prev_net_worth = state.get("net_worth")
+    net_worth = total_liquid + total_owed + total_brokerage
     lines.append("")
     lines.append("NET WORTH SNAPSHOT")
-    lines.append(f"┣ Liquid Cash: ${total_liquid:,.2f}")
-    lines.append(f"┣ Credit Owed: ${total_owed:,.2f}")
-    lines.append(f"┣ Portfolio:   ${total_brokerage:,.2f}")
-    lines.append(f"┗ Net Worth:   ${net_worth:,.2f}{_delta_str(net_worth, prev_net_worth)}")
+    lines.append(f"┣ Liquid:    ${total_liquid:,.2f}")
+    lines.append(f"┣ Owed:      ${total_owed:,.2f}")
+    lines.append(f"┣ Portfolio: ${total_brokerage:,.2f}")
+    lines.append(f"┗ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
 
-    # ── Section 5: Cornerstone CEFs
-    lines.append("")
-    lines.append("CORNERSTONE CEFs")
-    for ticker, d in cef.items():
-        rsi_tag  = "neutral" if 40 <= d["rsi"] <= 60 else ("overbought" if d["rsi"] > 70 else "oversold")
-        prem_tag = "⚠️ elevated" if d["premium"] > 15 else "neutral"
-        lines.append(
-            f"┣ {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | "
-            f"Premium {d['premium']:+.1f}% ({prem_tag}) | RSI {d['rsi']:.0f} ({rsi_tag})"
-        )
-    # DRIP gate
-    any_elevated = any(d["premium"] > 15 for d in cef.values())
-    drip_status  = "🔴 WAIT — Premium >15% to NAV (DRIP paused)" if any_elevated else "🟢 Accumulate — premium within range"
-    lines.append(f"┗ DRIP Gate: {drip_status}")
-
-    # ── Section 6: Market Regime
+    # ── Section 5: Market Regime
     lines.append("")
     lines.append("MARKET REGIME")
-    regime_str = "Bull (above 200 SMA)" if bull else ("Bear (below 200 SMA)" if bull is False else "Unknown")
+    regime_str = "Bull — above 200 SMA" if bull else ("Bear — below 200 SMA" if bull is False else "Unknown")
     lines.append(f"┣ SPY: ${spy_price:,.2f} — {regime_str}")
-    lines.append(f"┣ VIXY z: {vixy_z:+.1f}σ ({vixy_label}) — fear gauge vs 20D avg")
-    deploy = "🟢 GO — conditions met" if (bull and vixy_z < 1.5) else ("🔴 HOLD — bear regime or elevated fear" if not bull else "⚠️ CAUTION — fear elevated")
+    lines.append(f"┣ VIXY z: {vixy_z:+.1f}σ ({vixy_label})")
+    deploy = ("🟢 GO — conditions met" if (bull and vixy_z < 1.5)
+              else ("🔴 HOLD — bear regime" if not bull else "⚠️ CAUTION — fear elevated"))
     lines.append(f"┗ Margin Deploy: {deploy}")
 
-    title   = f"⚠️ Low Cash Alert — {today}" if liquid_low else f"💼 Daily Pulse — {today}"
+    title   = f"💼 Daily Pulse — {today}"
     message = "\n".join(lines)
-    return title, message, priority
+    return title, message, 0
 
 
 def _short_name(name):
@@ -332,21 +364,30 @@ def run_daily_pulse(force=False):
         return
 
     liquid, credit, brokerage = fetch_simplefin_accounts()
-    cef    = fetch_cef_snapshot()
     regime = fetch_market_regime()
 
-    title, message, priority = format_pulse_message(liquid, credit, brokerage, cef, regime, state)
-    success = push_to_pushover(title, message, priority)
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, {}, regime, state)
+    success = push_to_pushover(title, message, priority=0)
 
     if success:
         total_liquid    = sum(a["balance"] for a in liquid)
-        total_brokerage = sum(a["balance"] for a in brokerage if a["balance"] > 0)
+        active_brokers  = [a for a in brokerage if a["balance"] != 0]
+        total_brokerage = sum(a["balance"] for a in active_brokers if a["balance"] > 0)
         net_worth       = total_liquid + sum(a["balance"] for a in credit) + total_brokerage
+
+        # Store dated snapshot for brokerage delta history (1D/3M/6M/1Y)
+        snapshots = state.get("snapshots", {})
+        snapshots[today_str] = total_brokerage
+        # Prune snapshots older than 400 days to keep state file lean
+        cutoff = (date.today() - __import__("datetime").timedelta(days=400)).isoformat()
+        snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
+
         state.update({
             "last_run_date":   today_str,
             "total_liquid":    total_liquid,
             "total_brokerage": total_brokerage,
             "net_worth":       net_worth,
+            "snapshots":       snapshots,
         })
         save_state(state)
 
