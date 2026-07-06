@@ -832,23 +832,21 @@ def _sec_single_line(sec_shield: str) -> str:
     """
     Distil the full EDGAR shield string into one actionable line for the pulse report.
     Full detail is preserved in sec_shield for logging and escalation paths; this
-    function only controls what the daily Discord line shows.
+    function only controls what the daily Discord line shows. Dates are omitted —
+    they belong in the back-pocket log, not the daily status line.
     """
     if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
-        # Extract the most recent N-2 or N-2/A date for the single-line signal
-        for part in sec_shield.split(" | "):
-            if "N-2" in part:
-                date_bit = part.strip().split("(")[-1].rstrip(")")
-                form_bit = "N-2/A amendment" if "N-2/A" in part else "N-2 registration"
-                return f"⚠️ {form_bit} {date_bit} — RO ACTIVE"
+        form_bit = "N-2/A amendment" if "N-2/A" in sec_shield else "N-2 registration"
+        return f"⚠️ {form_bit} — RO ACTIVE"
     if "13D" in sec_shield or "13G" in sec_shield:
-        for part in sec_shield.split(" | "):
-            if "13D" in part or "13G" in part:
-                date_bit = part.strip().split("(")[-1].rstrip(")")
-                return f"⚠️ Large holder change {date_bit} — monitor"
-    # Routine filings only — extract most recent form type + date
+        return "⚠️ Large holder change detected — monitor"
+    # Routine filings (N-CSR, DEF 14A) — show form type only, no date
     for part in sec_shield.split(" | "):
-        clean = part.replace("📋 ", "").replace("[single source] ", "").replace("[🔴 MULTI-SOURCE EDGAR CONVICTION] ", "").strip()
+        clean = (part.replace("📋 ", "")
+                    .replace("[single source] ", "")
+                    .replace("[🔴 MULTI-SOURCE EDGAR CONVICTION] ", "")
+                    .split("(")[0]   # strip trailing (date)
+                    .strip())
         if clean:
             return f"{clean} — routine"
     return "No recent EDGAR activity"
@@ -891,9 +889,11 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     ex_div_line    = "┣ Ex-Div: Scheduled dip (not RO-related)\n" if ex_div_near else ""
 
     return (
-        f"**{ticker} — {status}**\n"
+        f"{ticker} — {status}\n"
         f"┣ Price: ${price:.2f} | NAV: ${nav:.2f}\n"
-        f"┣ Premium: {premium:.1f}% {prem_tag} | z: {z_premium:+.1f}σ {z_tag} | RSI: {rsi:.1f} {rsi_tag}\n"
+        f"┣ Premium: {premium:.1f}% {prem_tag}\n"
+        f"┣ z: {z_premium:+.1f}σ {z_tag}\n"
+        f"┣ RSI: {rsi:.1f} {rsi_tag}\n"
         f"┣ EDGAR: {sec_line}\n"
         f"{whale_line}"
         f"{dark_pool_line}"
@@ -1337,7 +1337,7 @@ def send_daily_pulse(is_test=False):
         logger.error(f"Cornerstone ledger sweep failed: {e}")
 
     full_report, worst_tier = compute_cornerstone_reports()
-    title = "☕️ Cornerstone Flowstate — 0800 HST" + (" 🧪 TEST" if is_test else "")
+    title = "☕️ Cornerstone Flowstate" + (" 🧪 TEST" if is_test else "")
     color = 0xe74c3c if worst_tier == "CRITICAL" else (0xf1c40f if worst_tier == "ELEVATED" else 0x2ecc71)
     dispatch_cornerstone_alert(title, full_report, color)
     db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
