@@ -82,6 +82,7 @@ def main():
     parser.add_argument("--contracts", type=int, default=1, help="wheel_position mode: number of contracts")
     parser.add_argument("--position-id", type=int, dest="position_id", help="wheel_position mode: id to close")
     parser.add_argument("--status", type=str, default="CLOSED", choices=["CLOSED", "ASSIGNED", "EXPIRED", "ROLLED"], help="wheel_position mode: close status")
+    parser.add_argument("--cost-basis", type=float, dest="cost_basis", help="wheel_position open: per-share cost basis (defaults to strike)")
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -455,9 +456,15 @@ def main():
                                         f"┣ 💰 If Assigned: `${f['div_amount']:.4f}`/share/mo ({f['div_yield']:.1f}% annual) — keep earning while selling CCs\n"
                                         f"┣ Combined Return: Premium `{premium_yield:.2f}%` + Div `{monthly_div_yield:.2f}%` = `{combined_monthly:.2f}%`/mo\n"
                                     )
-                            ivr_payload += (
+                            iv_hv = f.get("iv_hv_ratio")
+                        iv_context = (
+                            f"┣ IV/HV Ratio: `{iv_hv:.2f}x` HV30 — selling premium at a `{(iv_hv - 1) * 100:.0f}%` statistical premium to realized vol\n"
+                            if iv_hv and iv_hv > 1.0 else ""
+                        )
+                        ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | IVR Proxy: `{f['ivr_proxy']:.0f}%`\n"
+                                f"{iv_context}"
                                 f"{setup_line}"
                                 f"{div_line}"
                                 f"{assigned_line}"
@@ -527,9 +534,11 @@ def main():
                 else:
                     pos_id = engine.db.open_wheel_position(
                         args.symbol.upper(), args.position_type, args.strike,
-                        args.expiration, args.premium, args.contracts
+                        args.expiration, args.premium, args.contracts,
+                        cost_basis=args.cost_basis
                     )
-                    logger.info(f"Opened wheel position #{pos_id}: {args.symbol.upper()} {args.position_type} ${args.strike} exp {args.expiration}")
+                    cb_note = f" | cost basis ${args.cost_basis:.2f}" if args.cost_basis else ""
+                    logger.info(f"Opened wheel position #{pos_id}: {args.symbol.upper()} {args.position_type} ${args.strike} exp {args.expiration}{cb_note}")
             elif args.action == "close":
                 if not args.position_id:
                     logger.error("wheel_position close requires --position-id")

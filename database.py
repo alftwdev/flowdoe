@@ -82,6 +82,17 @@ class EcosystemDatabase:
                     )
                 """)
                 conn.commit()
+
+                # Lot-engine columns — added after initial release; migrate gracefully.
+                for col_sql in [
+                    "ALTER TABLE wheel_positions ADD COLUMN cost_basis REAL DEFAULT 0",
+                    "ALTER TABLE wheel_positions ADD COLUMN accumulated_premiums REAL DEFAULT 0",
+                ]:
+                    try:
+                        cursor.execute(col_sql)
+                        conn.commit()
+                    except sqlite3.OperationalError:
+                        pass  # column already exists
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to initialize tables: {e}")
 
@@ -132,20 +143,41 @@ class EcosystemDatabase:
             logger.warning(f"Database lock in alert manager: {e}")
             return False
 
-    def open_wheel_position(self, symbol, position_type, strike, expiration, premium_collected, contracts=1):
-        """Logs a newly opened CSP or CC position. premium_collected is per-contract, in dollars (mid*100)."""
+    def open_wheel_position(self, symbol, position_type, strike, expiration, premium_collected, contracts=1, cost_basis=None):
+        """
+        Logs a newly opened CSP or CC position.
+        premium_collected: per-contract total in dollars (mid * 100).
+        cost_basis: per-share cost basis — defaults to strike (what you pay if assigned on a CSP).
+        """
+        cb = cost_basis if cost_basis is not None else strike
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    INSERT INTO wheel_positions (symbol, position_type, strike, expiration, premium_collected, contracts)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (symbol, position_type, strike, expiration, premium_collected, contracts))
+                    INSERT INTO wheel_positions
+                        (symbol, position_type, strike, expiration, premium_collected, contracts, cost_basis)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (symbol, position_type, strike, expiration, premium_collected, contracts, cb))
                 conn.commit()
                 return cursor.lastrowid
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to open wheel position: {e}")
             return None
+
+    def add_position_premium(self, position_id, premium_amount):
+        """
+        Accumulate additional premium against an open position (e.g. a CC sold on an assigned lot).
+        Adds to accumulated_premiums so net_cost calculations reflect the full premium reduction.
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE wheel_positions SET accumulated_premiums = accumulated_premiums + ? WHERE id = ? AND status = 'OPEN'",
+                    (premium_amount, position_id)
+                )
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.error(f"Failed to accumulate premium for position {position_id}: {e}")
 
     def close_wheel_position(self, position_id, status="CLOSED", close_note=""):
         """Closes a position (CLOSED/ASSIGNED/EXPIRED/ROLLED) and adds its premium to the margin-paydown ledger."""
@@ -174,13 +206,41 @@ class EcosystemDatabase:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, symbol, position_type, strike, expiration, premium_collected, contracts, last_alert_dte
+                    SELECT id, symbol, position_type, strike, expiration,
+                           premium_collected, contracts, last_alert_dte,
+                           cost_basis, accumulated_premiums
                     FROM wheel_positions WHERE status = 'OPEN'
                 """)
                 cols = [c[0] for c in cursor.description]
                 return [dict(zip(cols, row)) for row in cursor.fetchall()]
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to fetch open wheel positions: {e}")
+            return []
+
+    def get_wheel_outcome_distribution(self, lookback_days=90):
+        """
+        Outcome breakdown for closed positions in the lookback window.
+        Returns list of {outcome, count, total_premium} dicts, ordered by count desc.
+        EXPIRED = full premium kept. ASSIGNED = took shares. ROLLED = extended. CLOSED = BTC'd.
+        """
+        try:
+            cutoff = (datetime.now() - timedelta(days=lookback_days)).isoformat()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT status,
+                           COUNT(*) as count,
+                           SUM(premium_collected * contracts) as total_premium
+                    FROM wheel_positions
+                    WHERE status != 'OPEN'
+                      AND closed_date >= ?
+                    GROUP BY status
+                    ORDER BY count DESC
+                """, (cutoff,))
+                rows = cursor.fetchall()
+                return [{"outcome": r[0], "count": r[1], "total_premium": r[2] or 0.0} for r in rows]
+        except sqlite3.OperationalError as e:
+            logger.error(f"Failed to fetch wheel outcome distribution: {e}")
             return []
 
     def mark_wheel_position_alerted(self, position_id, dte):
