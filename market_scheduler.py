@@ -37,7 +37,15 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PYTHON  = "python3.10"
+
+# sys.executable — the exact interpreter running this script, virtualenv and all.
+# Hardcoding "python3.10" resolves to the system Python on PythonAnywhere, which
+# has none of our packages. Every child would crash with ImportError, silently.
+PYTHON = sys.executable
+
+# Child stderr goes here so failures are visible without flooding the scheduler log.
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # How many minutes either side of the target time a job can fire.
 # 60-second loop + 2-minute window means worst-case slip is 3 minutes.
@@ -99,12 +107,14 @@ def build_cmd(script: str, args: list) -> list:
 def fire(task_key: str, cmd: list):
     """Launch the task as a detached subprocess — fire and forget."""
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=BASE_DIR,
-        )
+        log_path = os.path.join(LOGS_DIR, f"{task_key}.log")
+        with open(log_path, "a") as log_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                cwd=BASE_DIR,
+            )
         logger.info(f"Fired [{task_key}] PID={proc.pid} → {' '.join(cmd[1:])}")
     except Exception as e:
         logger.error(f"Failed to fire [{task_key}]: {e}")
@@ -139,7 +149,11 @@ def run():
             cmd = build_cmd(script, args)
             fire(task_key, cmd)
 
-        time.sleep(60)
+        # Sleep to the next wall-clock minute boundary rather than a flat 60s.
+        # Flat sleep accumulates drift from loop execution time — over a trading day
+        # that can push a tick past the ±2-minute fire window and silently skip a task.
+        now_ts = time.time()
+        time.sleep(60 - (now_ts % 60))
 
 if __name__ == "__main__":
     try:
