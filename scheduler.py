@@ -24,14 +24,13 @@ WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")        # Primary Directiona
 WEBHOOK_INCOME = os.getenv("WEBHOOK_DIVIDEND_CCETFS")       # Dedicated Income Audience Channel
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
 WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO") 
-WEBHOOK_TSP = os.getenv("WEBHOOK_FED")
-WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
+WEBHOOK_FED = os.getenv("WEBHOOK_FED")      # reserved for fed.py (not yet built)
 WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS") 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 def dispatch_conviction_sync(engine, snap, report_label):
     """
-    The reverse feed: every sector channel (futures/crypto/forex/TQQQ) already pushes a
+    The reverse feed: every sector channel (futures/crypto/TQQQ) already pushes a
     cross-asset signal INTO Market Analysis. This closes the loop — Market Analysis pushes a
     condensed version of its synthesized conviction back OUT to each child channel, so the whole
     ecosystem starts the day reading from the same master view, not just feeding a one-way sink.
@@ -57,10 +56,6 @@ def dispatch_conviction_sync(engine, snap, report_label):
         WEBHOOK_CRYPTO: (
             f"{header}┣ Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap.get("fng") else header
         ) + f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}",
-        WEBHOOK_FOREX: (
-            f"{header}┣ Synthetic Dollar Index {snap['synthetic_dxy']:+.2f}%\n"
-            f"┣ Risk Regime: {snap['risk_regime']} | USD/JPY {snap.get('usdjpy_chg', 0):+.2f}% | Gold {snap.get('gold_chg', 0):+.2f}%\n{footer}"
-        ),
         WEBHOOK_OPTIONS: (
             f"{header}┣ Gamma: {snap['gex']['market_state']} | Flip ${snap['gex']['flip_strike']:,.2f}\n"
             f"┣ VIXY z {snap['vixy_z']:+.2f}σ\n{footer}"
@@ -77,7 +72,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "tsp", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -330,27 +325,6 @@ def main():
                     logger.error(f"EOD Accuracy Calculation Error: {e}")
 
             logger.info("End-of-day tape audit successfully compiled and dispatched.")
-
-        elif args.mode == "tsp":
-            tsp_payload, fund_series = engine.generate_tsp_eod_report()
-            if tsp_payload and WEBHOOK_TSP:
-                try:
-                    if fund_series:
-                        chart_bytes = generate_line_comparison_chart(
-                            fund_series, "TSP Individual Funds | 90-Day Relative Performance (Rebased to 100)"
-                        )
-                        send_essentials_embed_with_chart(
-                            WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector",
-                            tsp_payload, chart_bytes, color=0x3498db
-                        )
-                    else:
-                        send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
-                except Exception as e:
-                    logger.error(f"TSP chart dispatch failed, falling back to text-only: {e}")
-                    send_essentials_embed(WEBHOOK_TSP, "Government & Military Wealth Matrix: TSP Tactical Vector", tsp_payload, 0x3498db)
-                logger.info("TSP End-of-Day report dispatched with official tsp.gov data.")
-            else:
-                logger.info("TSP report skipped — already reported today's official close, or data unavailable.")
 
         elif args.mode == "income":
             logger.info("Executing Income Channel: Wheel Candidates + New CC ETF Screener...")

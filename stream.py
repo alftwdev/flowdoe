@@ -24,7 +24,6 @@ db = EcosystemDatabase()
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_TRADE_SIGNALS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_MARKET_ANALYSIS = os.getenv("WEBHOOK_MARKET_ANALYSIS")
-WEBHOOK_FOREX = os.getenv("WEBHOOK_FOREX")
 WEBHOOK_CRYPTO = os.getenv("WEBHOOK_CRYPTO")
 
 try:
@@ -46,17 +45,11 @@ class RealTimeTickAgent:
         self.btc_window = []
 
     def evaluate_proximity_metrics(self, symbol, price):
-        if symbol not in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]: return
-        if symbol in ["SPY", "QQQ"]:
-            upper = float(db.get_state(f"{symbol}_expected_upper", 0.0))
-            lower = float(db.get_state(f"{symbol}_expected_lower", 0.0))
-            target_webhook = WEBHOOK_TRADE_SIGNALS
-            precision_pct = 0.0015
-        else:
-            upper = float(db.get_state(f"{symbol}_upper_noise", 0.0))
-            lower = float(db.get_state(f"{symbol}_lower_noise", 0.0))
-            target_webhook = WEBHOOK_FOREX
-            precision_pct = 0.0005
+        if symbol not in ["SPY", "QQQ"]: return
+        upper = float(db.get_state(f"{symbol}_expected_upper", 0.0))
+        lower = float(db.get_state(f"{symbol}_expected_lower", 0.0))
+        target_webhook = WEBHOOK_TRADE_SIGNALS
+        precision_pct = 0.0015
 
         if upper == 0 or lower == 0 or not target_webhook: return
 
@@ -108,7 +101,7 @@ class RealTimeTickAgent:
             price = float(data.get("price", 0.0))
             if not symbol or price == 0: return
 
-            if symbol in ["SPY", "QQQ", "XAU/USD", "EUR/USD", "GBP/USD", "USD/JPY"]:
+            if symbol in ["SPY", "QQQ"]:
                 self.evaluate_proximity_metrics(symbol, price)
             elif symbol == "BTC/USD":
                 self.process_crypto_volatility(price)

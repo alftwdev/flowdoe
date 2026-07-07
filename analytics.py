@@ -441,98 +441,6 @@ class HighFidelityAnalyticsEngine:
             f"┗ Posture: {posture}"
         )
 
-    FX_UNIVERSE = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF"]
-    # Approximate ICE Dollar Index composition, renormalized without SEK (no liquid quote available
-    # on Twelve Data for USD/SEK at retail tier). Sign convention: +weight means pair rising = USD rising.
-    FX_DOLLAR_INDEX_WEIGHTS = {
-        "EUR/USD": -0.601, "USD/JPY": 0.142, "GBP/USD": -0.124, "USD/CAD": 0.095, "USD/CHF": 0.038,
-    }
-    # Streamed pairs whose ATR-based "expected daily range" bounds drive stream.py's perimeter alerts.
-    FX_STREAMED_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY"]
-
-    def get_forex_session_label(self, now_utc=None):
-        """
-        Forex has no single RTH — it's Sydney -> Tokyo -> London -> New York in a 24/5 relay.
-        London/New York overlap (12:00-16:00 UTC) is the highest-liquidity window; that's the
-        window worth flagging loudest since spreads tighten and breakouts are most reliable there.
-        """
-        now_utc = now_utc or datetime.utcnow()
-        if now_utc.weekday() == 5 or (now_utc.weekday() == 6 and now_utc.hour < 21) or (now_utc.weekday() == 4 and now_utc.hour >= 21):
-            return "MARKET CLOSED (Weekend)"
-        h = now_utc.hour
-        sydney = h >= 21 or h < 6
-        tokyo = 0 <= h < 9
-        london = 7 <= h < 16
-        new_york = 12 <= h < 21
-        if london and new_york:
-            return "🔥 LONDON/NY OVERLAP (Peak Liquidity)"
-        if tokyo and sydney:
-            return "ASIA SESSION (Sydney/Tokyo)"
-        if london:
-            return "LONDON SESSION"
-        if new_york:
-            return "NEW YORK SESSION"
-        if tokyo:
-            return "TOKYO SESSION"
-        if sydney:
-            return "SYDNEY SESSION (Thin Liquidity)"
-        return "TRANSITION WINDOW"
-
-    def calculate_synthetic_dollar_index(self, quotes):
-        """Own weighted-basket Dollar Index derived from the tracked majors — no reliance on a
-        third-party DXY ticker (Twelve Data doesn't carry one reliably at this tier)."""
-        score = 0.0
-        for pair, weight in self.FX_DOLLAR_INDEX_WEIGHTS.items():
-            q = quotes.get(pair, {})
-            if "percent_change" in q:
-                score += float(q["percent_change"]) * weight
-        return score
-
-    def calculate_fx_pivot_points(self, symbol):
-        """Classic floor pivots from the prior completed session — S/R levels for range/breakout calls."""
-        df = self.fetch_crypto_ohlc(symbol, outputsize=3)
-        if df is None or len(df) < 2:
-            return None
-        prev = df.iloc[-2]
-        pivot = (prev["high"] + prev["low"] + prev["close"]) / 3
-        rng = prev["high"] - prev["low"]
-        return {
-            "pivot": pivot, "r1": 2 * pivot - prev["low"], "s1": 2 * pivot - prev["high"],
-            "r2": pivot + rng, "s2": pivot - rng,
-        }
-
-    def calculate_fx_trend_confluence(self, symbol):
-        """Multi-timeframe (1h/4h/1day) Supertrend alignment — a directional confidence score,
-        not a single noisy timeframe call. +/-3 = full agreement across all three horizons."""
-        from essentials_tools import get_trend_alignment
-        score, tags = 0, []
-        for tf in ("1h", "4h", "1day"):
-            _, is_bullish = get_trend_alignment(symbol, self.api_key, interval=tf)
-            score += 1 if is_bullish else -1
-            tags.append(f"{tf}:{'🟢' if is_bullish else '🔴'}")
-        if score >= 2:
-            tag = "🟢🟢 STRONG BULLISH CONFLUENCE"
-        elif score <= -2:
-            tag = "🔴🔴 STRONG BEARISH CONFLUENCE"
-        else:
-            tag = "🟡 MIXED / CHOPPY"
-        return tag, " ".join(tags)
-
-    def update_fx_volatility_bounds(self, symbol):
-        """ATR(14)-based expected daily range, feeding stream.py's real-time perimeter alerts —
-        forex has no options chain for an implied expected move, so ATR is the honest substitute."""
-        df = self.fetch_crypto_ohlc(symbol, outputsize=20)
-        if df is None or len(df) < 15:
-            return None
-        high_low = df["high"] - df["low"]
-        high_cp = (df["high"] - df["close"].shift()).abs()
-        low_cp = (df["low"] - df["close"].shift()).abs()
-        atr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1).rolling(14).mean().iloc[-1]
-        last_close = df["close"].iloc[-1]
-        self.db.update_state(f"{symbol}_upper_noise", last_close + atr)
-        self.db.update_state(f"{symbol}_lower_noise", last_close - atr)
-        return float(atr)
-
     def assess_risk_sentiment_regime(self, quotes):
         """USD/JPY direction (carry-trade unwind barometer) + Gold direction = a quick risk-on/off
         read. JPY strengthening fast (USD/JPY falling) while gold rallies is the classic risk-off
@@ -548,35 +456,6 @@ class HighFidelityAnalyticsEngine:
         if usdjpy_chg >= 0.3 and gold_chg <= -0.3:
             return "🟢 RISK-ON", "Yen weakening + Gold offered — capital rotating back into carry/risk assets.", usdjpy_chg, gold_chg
         return "🟡 MIXED", "No clear carry-trade signature today.", usdjpy_chg, gold_chg
-
-    def generate_forex_matrix_payload(self):
-        fx_universe = self.FX_UNIVERSE
-        quotes = self._fetch_twelve_data_quotes(fx_universe)
-        if not quotes: return None
-
-        table_rows, composite_trigger = [], 0.0
-        for symbol in fx_universe:
-            s_data = quotes.get(symbol, {})
-            if "close" in s_data:
-                price = float(s_data.get("close", 0.0))
-                pct_change = float(s_data.get("percent_change", 0.0))
-                composite_trigger += abs(pct_change)
-                table_rows.append(f"{symbol:<9} {price:<9.4f} {pct_change:+.2f}%")
-
-        if not table_rows: return None
-        if not self.db.track_and_limit_alerts("matrix_forex_state", f"FX_VAR_{round(composite_trigger, 2)}", composite_trigger, max_broadcasts=3, threshold_pct=0.05):
-            return None
-
-        matrix_body = "\n".join(table_rows)
-        session = self.get_forex_session_label()
-        synthetic_dxy = self.calculate_synthetic_dollar_index(quotes)
-        dxy_arrow = "🟢▲" if synthetic_dxy > 0 else ("🔴▼" if synthetic_dxy < 0 else "⚪")
-
-        return (
-            f"**Session: {session}**\n"
-            f"**Synthetic Dollar Index (own basket calc): {dxy_arrow} {synthetic_dxy:+.2f}%**\n\n"
-            f"**1-Day Cross-Sectional Relative Performance**\n```js\nPair      Price     Daily Change\n────────────────────────────────\n{matrix_body}\n```"
-        )
 
     CRYPTO_UNIVERSE = ["BTC/USD", "ETH/USD", "SOL/USD", "ADA/USD", "XRP/USD", "LINK/USD", "HBAR/USD"]
 
@@ -1492,52 +1371,6 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             return None
 
-    # Official TSP individual funds + the benchmark each one tracks (for "what moved it" context).
-    # G Fund has no market benchmark — it's a unique non-marketable Treasury security, always flat/positive.
-    TSP_INDIVIDUAL_FUNDS = ["G Fund", "F Fund", "C Fund", "S Fund", "I Fund"]
-    TSP_BENCHMARK_PROXY = {
-        "C Fund": "SPY",   # S&P 500
-        "S Fund": "VXF",   # Dow Jones US Completion TSM proxy
-        "I Fund": "EFA",   # MSCI EAFE proxy
-        "F Fund": "AGG",   # Bloomberg US Aggregate Bond proxy
-    }
-    TSP_CSV_URL = "https://www.tsp.gov/data/fund-price-history.csv"
-    TSP_CACHE_PATH = os.path.join(BASE_DIR, "tsp_fund_prices.csv")
-
-    def fetch_tsp_share_prices(self, force_refresh=False):
-        """
-        Official daily TSP fund NAVs (G/F/C/S/I + all L funds) straight from tsp.gov — no API key.
-        tsp.gov fronts this file with CloudFront bot-protection that 403s without a same-site Referer;
-        a plain browser UA + Referer header is sufficient (no auth needed, it's public data).
-        Cached to disk and refreshed at most once per day to stay light on PythonAnywhere CPU quota.
-        """
-        cache_key = "tsp_csv_last_fetch_date"
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        if not force_refresh and os.path.exists(self.TSP_CACHE_PATH) and self.db.get_state(cache_key) == today_str:
-            return pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"]).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://www.tsp.gov/share-price-history/",
-            }
-            resp = requests.get(self.TSP_CSV_URL, headers=headers, timeout=20)
-            resp.raise_for_status()
-            # Sanity check before overwriting a previously-good cache — a truncated/garbage
-            # response (network hiccup, unexpected redirect, etc.) must not destroy the last
-            # known-good NAV data that reports already depend on.
-            if not resp.text or len(resp.text) < 200 or "Date" not in resp.text:
-                raise ValueError(f"TSP CSV response looks invalid ({len(resp.text or '')} chars) — refusing to overwrite cache")
-            with open(self.TSP_CACHE_PATH, "w") as f:
-                f.write(resp.text)
-            self.db.update_state(cache_key, today_str)
-            df = pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"])
-            return df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
-        except Exception as e:
-            logger.error(f"TSP share price fetch failed: {e}")
-            if os.path.exists(self.TSP_CACHE_PATH):
-                return pd.read_csv(self.TSP_CACHE_PATH, parse_dates=["Date"]).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
-            return None
-
     def calculate_rsi(self, series, period=14):
         delta = series.diff()
         gain = delta.clip(lower=0).rolling(period).mean()
@@ -1545,90 +1378,6 @@ class HighFidelityAnalyticsEngine:
         rs = gain / loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
         return float(rsi.iloc[-1]) if not rsi.empty and not pd.isna(rsi.iloc[-1]) else 50.0
-
-    def generate_tsp_eod_report(self):
-        """
-        Real official TSP NAV move (most recent confirmed close) for every individual fund, plus:
-        - RSI(14) and 50/200-day SMA trend per fund — daily-bar indicators are actually valid here
-          since TSP funds price once a day (no point running intraday technicals on a NAV).
-        - Drawdown from 52-week high, for rebalancing/interfund-transfer context.
-        - A live same-day market read (SPY/AGG/EFA) so members know what's *likely* coming when
-          tonight's official NAV posts (~7PM ET), without presenting unconfirmed numbers as official.
-        Returns (payload_text, chart_bytes_or_None) and de-dupes per-calendar-day via the DB.
-        """
-        df = self.fetch_tsp_share_prices()
-        if df is None or df.empty or len(df) < 60:
-            return None, None
-
-        latest_date = df["Date"].iloc[-1].strftime("%Y-%m-%d")
-        last_reported = self.db.get_state("tsp_eod_last_reported_date")
-        if last_reported == latest_date:
-            return None, None  # Already reported this official close — avoid duplicate dispatch
-
-        fund_rows = []
-        chart_series = {}
-        for fund in self.TSP_INDIVIDUAL_FUNDS:
-            if fund not in df.columns:
-                continue
-            series = df[fund].dropna()
-            if len(series) < 60:
-                continue
-            chart_series[fund] = series
-
-            today_p, prev_p = series.iloc[-1], series.iloc[-2]
-            pct_change = ((today_p - prev_p) / prev_p) * 100
-
-            sma50 = series.rolling(50).mean().iloc[-1]
-            sma200 = series.rolling(200).mean().iloc[-1] if len(series) >= 200 else None
-            trend = "—"
-            if sma200 is not None:
-                trend = "🟢 Golden Cross (50>200)" if sma50 > sma200 else "🔴 Death Cross (50<200)"
-
-            rsi = self.calculate_rsi(series)
-            rsi_tag = "Overbought" if rsi >= 70 else ("Oversold" if rsi <= 30 else "Neutral")
-
-            high_52w = series.tail(252).max()
-            drawdown = ((today_p - high_52w) / high_52w) * 100
-
-            arrow = "🟢▲" if pct_change > 0 else ("🔴▼" if pct_change < 0 else "⚪")
-            fund_rows.append(
-                f"┣ **{fund}**: `${today_p:,.4f}` {arrow} `{pct_change:+.2f}%` | RSI {rsi:.0f} ({rsi_tag}) | "
-                f"{trend} | {drawdown:+.1f}% off 52w high"
-            )
-
-        if not fund_rows:
-            return None, None
-
-        # Live same-day market read — framed explicitly as a forward indicator, not official NAV.
-        live_lines = []
-        try:
-            proxy_quotes = self._fetch_twelve_data_quotes(list(self.TSP_BENCHMARK_PROXY.values()))
-            for fund, proxy in self.TSP_BENCHMARK_PROXY.items():
-                q = proxy_quotes.get(proxy, {})
-                if "percent_change" in q:
-                    pc = float(q["percent_change"])
-                    live_lines.append(f"┣ {fund} benchmark ({proxy}) is trading `{pc:+.2f}%` today → tonight's NAV should track this.")
-        except Exception as e:
-            logger.error(f"TSP live benchmark read failed: {e}")
-
-        live_block = ("\n\n**Live Market Read (unconfirmed until tonight's official post ~7PM ET):**\n" + "\n".join(live_lines)) if live_lines else ""
-
-        payload = (
-            f"⚡ **TSP END-OF-DAY ALLOCATION REPORT | Official Close: {latest_date}**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n".join(fund_rows) +
-            f"\n┗ Final Actionable Posture: Favor funds showing Golden Cross + sub-70 RSI for new interfund transfers; "
-            f"funds deep off their 52w high with a Death Cross warrant a defensive (G/F) tilt."
-            + live_block
-        )
-
-        self.db.update_state("tsp_eod_last_reported_date", latest_date)
-        return payload, chart_series
-
-    def compile_tsp_allocation_matrix(self):
-        """Lightweight intraday companion to the EOD report — same real official data, no chart."""
-        payload, _ = self.generate_tsp_eod_report()
-        return payload
 
     def calculate_clean_yield(self, ticker: str, latest_dividend: float, current_price: float) -> float:
         if current_price <= 0: return 0.0
@@ -2029,11 +1778,10 @@ class HighFidelityAnalyticsEngine:
         snap["fng"] = self.fetch_fear_greed_index()
 
         try:
-            fx_quotes = self._fetch_twelve_data_quotes(self.FX_UNIVERSE)
-            snap["synthetic_dxy"] = self.calculate_synthetic_dollar_index(fx_quotes)
+            fx_quotes = self._fetch_twelve_data_quotes(["USD/JPY"])
             snap["risk_regime"], snap["risk_explanation"], snap["usdjpy_chg"], snap["gold_chg"] = self.assess_risk_sentiment_regime(fx_quotes)
         except Exception:
-            snap["synthetic_dxy"], snap["risk_regime"], snap["risk_explanation"] = 0.0, "🟡 MIXED", "Forex data unavailable."
+            snap["risk_regime"], snap["risk_explanation"] = "🟡 MIXED", "Forex data unavailable."
 
         # Overnight futures desk's market profile, already computed by cross_asset.py.
         snap["futures_session"] = self.db.get_state("SPY_session", "UNKNOWN")
