@@ -2279,12 +2279,15 @@ class HighFidelityAnalyticsEngine:
 
     def get_wheel_position_summary(self):
         """
-        For each open wheel position: fetch live spot, compute net_cost_if_assigned and OTM cushion.
-        net_cost_if_assigned = cost_basis - (total_premiums_per_share)
+        For each open wheel position: fetch live spot, compute net_cost_if_assigned, OTM cushion,
+        DTE, and annualized ROC on current premium vs collateral.
+
+        net_cost = cost_basis - (total_premiums_per_share) - (open_fees / (contracts * 100))
           where total_premiums_per_share = (premium_collected + accumulated_premiums) / (contracts * 100)
-        cushion_pct = (spot - strike) / strike * 100  (positive = OTM, put is safe)
-        Returns list of dicts — empty list if no open positions or spot fetch fails.
+        cushion_pct = (spot - strike) / strike * 100  (positive = OTM, safe zone for CSP)
+        annualized_roc = (net_premium_dollars / collateral) * (365 / days_held)
         """
+        from datetime import date as date_cls
         positions = self.db.get_open_wheel_positions()
         if not positions:
             return []
@@ -2295,64 +2298,103 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             quotes = {}
 
+        today = date_cls.today()
         results = []
         for pos in positions:
-            symbol = pos["symbol"]
-            spot = float(quotes.get(symbol, {}).get("close", 0.0))
-            strike = float(pos["strike"])
-            contracts = int(pos["contracts"])
-            cost_basis = float(pos.get("cost_basis") or strike)
-            prem_collected = float(pos["premium_collected"])
-            accum_premiums = float(pos.get("accumulated_premiums") or 0.0)
+            symbol      = pos["symbol"]
+            spot        = float(quotes.get(symbol, {}).get("close", 0.0))
+            strike      = float(pos["strike"])
+            contracts   = int(pos["contracts"])
+            cost_basis  = float(pos.get("cost_basis") or strike)
+            prem        = float(pos["premium_collected"])
+            accum       = float(pos.get("accumulated_premiums") or 0.0)
+            open_fees   = float(pos.get("open_fees") or 0.0)
+            roll_group  = pos.get("roll_group_id")
 
-            total_prem_per_share = (prem_collected + accum_premiums) / 100.0
-            net_cost = round(cost_basis - total_prem_per_share, 2)
+            # Net cost: reduce cost basis by every dollar of premium received per share
+            total_prem_dollars   = prem + accum
+            fees_per_share       = open_fees / (contracts * 100) if contracts > 0 else 0.0
+            total_prem_per_share = total_prem_dollars / 100.0
+            net_cost             = round(cost_basis - total_prem_per_share - fees_per_share, 2)
+
             cushion_pct = round((spot - strike) / strike * 100, 1) if strike > 0 and spot > 0 else None
 
+            # DTE from expiration string
+            try:
+                exp_date = date_cls.fromisoformat(pos["expiration"])
+                dte = (exp_date - today).days
+            except Exception:
+                dte = None
+
+            # Annualized ROC on net premium vs collateral
+            collateral = strike * contracts * 100
+            net_prem_dollars = total_prem_dollars - open_fees
+            if collateral > 0 and dte is not None:
+                try:
+                    opened = date_cls.fromisoformat(pos["opened_date"][:10])
+                    days_held = (today - opened).days or 1
+                    annualized_roc = round((net_prem_dollars / collateral) * (365 / days_held) * 100, 1)
+                except Exception:
+                    annualized_roc = None
+            else:
+                annualized_roc = None
+
             results.append({
-                "symbol": symbol,
-                "position_type": pos["position_type"],
-                "strike": strike,
-                "expiration": pos["expiration"],
-                "contracts": contracts,
-                "cost_basis": cost_basis,
-                "net_cost": net_cost,
-                "spot": spot,
-                "cushion_pct": cushion_pct,
+                "symbol":               symbol,
+                "position_type":        pos["position_type"],
+                "strike":               strike,
+                "expiration":           pos["expiration"],
+                "contracts":            contracts,
+                "cost_basis":           cost_basis,
+                "net_cost":             net_cost,
+                "spot":                 spot,
+                "cushion_pct":          cushion_pct,
+                "dte":                  dte,
+                "annualized_roc":       annualized_roc,
                 "total_premium_per_share": round(total_prem_per_share, 2),
+                "roll_group_id":        roll_group,
             })
         return results
 
     def generate_wheel_outcome_distribution(self, lookback_days=90):
         """
         Formats closed-position outcome breakdown for scorecard display.
-        Premium retention rate = EXPIRED premium / total closed premium (full keep = 100%).
+        Uses retained_premium (actual dollars kept after buyback cost and fees) rather than
+        gross premium_collected, so early closes at 50% profit don't inflate the ledger.
+        Surfaces avg annualized ROC per outcome group where calculable.
         """
         rows = self.db.get_wheel_outcome_distribution(lookback_days=lookback_days)
         if not rows:
             return None
 
-        total_count = sum(r["count"] for r in rows)
-        total_prem  = sum(r["total_premium"] for r in rows)
-        expired_prem = next((r["total_premium"] for r in rows if r["outcome"] == "EXPIRED"), 0.0)
-        retention_pct = round(expired_prem / total_prem * 100, 1) if total_prem > 0 else 0.0
+        total_count    = sum(r["count"] for r in rows)
+        total_retained = sum(r["retained_premium"] for r in rows)
+        total_gross    = sum(r["total_premium"] for r in rows)
+
+        # Retention rate = retained / gross — how much of what we sold we actually kept
+        retention_pct = round(total_retained / total_gross * 100, 1) if total_gross > 0 else 0.0
 
         label_map = {
-            "EXPIRED": "expired worthless (full premium kept)",
-            "ASSIGNED": "assigned (now selling CCs against the position)",
-            "ROLLED":   "rolled for credit (extended)",
+            "EXPIRED":  "expired worthless — full premium kept",
+            "ASSIGNED": "assigned — now selling CCs against position",
+            "ROLLED":   "rolled for credit — position extended",
             "CLOSED":   "closed early (buy-to-close)",
         }
         lines = []
         for r in rows:
-            label = label_map.get(r["outcome"], r["outcome"].lower())
-            lines.append(f"┣ {r['count']}x {label} — `${r['total_premium']:,.0f}` premium")
+            label    = label_map.get(r["outcome"], r["outcome"].lower())
+            roc_str  = (f" | `{r['avg_annualized_roc']*100:.1f}%` ann. ROC"
+                        if r.get("avg_annualized_roc") else "")
+            lines.append(
+                f"┣ {r['count']}x {label} — `${r['retained_premium']:,.0f}` kept{roc_str}"
+            )
 
         return {
-            "total": total_count,
-            "retention_pct": retention_pct,
-            "lines": lines,
-            "total_premium": total_prem,
+            "total":          total_count,
+            "retention_pct":  retention_pct,
+            "lines":          lines,
+            "total_retained": total_retained,
+            "total_gross":    total_gross,
         }
 
     def generate_ecosystem_scorecard(self):
@@ -2397,8 +2439,8 @@ class HighFidelityAnalyticsEngine:
                 income_block += (
                     f"\n🎯 **WHEEL RESULTS (last 90 days — {dist['total']} closed trades)**\n"
                     + "\n".join(dist["lines"]) + "\n"
-                    f"┗ Premium retention rate: `{dist['retention_pct']}%` "
-                    f"(${dist['total_premium']:,.0f} total collected)\n"
+                    f"┗ Net retention: `{dist['retention_pct']}%` of gross — "
+                    f"`${dist['total_retained']:,.0f}` kept of `${dist['total_gross']:,.0f}` sold\n"
                 )
         except Exception:
             pass
@@ -2410,12 +2452,15 @@ class HighFidelityAnalyticsEngine:
                 income_block += f"\n📋 **OPEN WHEEL POSITIONS ({len(pos_summary)} active)**\n"
                 for p in pos_summary:
                     cushion_str = f"`{p['cushion_pct']:+.1f}%` OTM" if p["cushion_pct"] is not None else "—"
-                    spot_str = f"${p['spot']:,.2f}" if p["spot"] else "—"
+                    spot_str    = f"${p['spot']:,.2f}" if p["spot"] else "—"
+                    dte_str     = f"`{p['dte']}` DTE" if p["dte"] is not None else "—"
+                    roc_str     = f" | Ann. ROC `{p['annualized_roc']:.1f}%`" if p.get("annualized_roc") else ""
+                    roll_str    = " 🔗" if p.get("roll_group_id") else ""
                     income_block += (
-                        f"┣ `{p['symbol']}` {p['position_type']} `${p['strike']:.2f}` exp `{p['expiration']}`\n"
-                        f"┣ Net cost if assigned: `${p['net_cost']:.2f}` | Spot: {spot_str} | Cushion: {cushion_str}\n"
+                        f"┣ `{p['symbol']}` {p['position_type']} `${p['strike']:.2f}` exp `{p['expiration']}` — {dte_str}{roll_str}\n"
+                        f"┣ Net cost: `${p['net_cost']:.2f}` | Spot: {spot_str} | Cushion: {cushion_str}{roc_str}\n"
                     )
-                income_block = income_block.rstrip("\n") + "\n┗ Net cost = strike minus all premiums collected — the real breakeven.\n"
+                income_block = income_block.rstrip("\n") + "\n┗ Net cost = strike minus all premiums — true breakeven. 🔗 = part of a roll chain.\n"
         except Exception:
             pass
 

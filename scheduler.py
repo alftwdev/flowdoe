@@ -83,6 +83,10 @@ def main():
     parser.add_argument("--position-id", type=int, dest="position_id", help="wheel_position mode: id to close")
     parser.add_argument("--status", type=str, default="CLOSED", choices=["CLOSED", "ASSIGNED", "EXPIRED", "ROLLED"], help="wheel_position mode: close status")
     parser.add_argument("--cost-basis", type=float, dest="cost_basis", help="wheel_position open: per-share cost basis (defaults to strike)")
+    parser.add_argument("--open-fees", type=float, dest="open_fees", default=0.0, help="wheel_position open: total commission paid to open, in dollars (e.g. 1.30)")
+    parser.add_argument("--close-fees", type=float, dest="close_fees", default=0.0, help="wheel_position close: total commission paid to close, in dollars")
+    parser.add_argument("--close-price", type=float, dest="close_price", help="wheel_position close --status CLOSED: per-share BTC price (e.g. 0.45 if you bought back at $0.45)")
+    parser.add_argument("--roll-group", type=str, dest="roll_group_id", help="wheel_position open: shared UUID to link all legs of a roll chain (generate once with: python -c \"import uuid; print(uuid.uuid4())\")")
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -563,17 +567,28 @@ def main():
                     pos_id = engine.db.open_wheel_position(
                         args.symbol.upper(), args.position_type, args.strike,
                         args.expiration, args.premium, args.contracts,
-                        cost_basis=args.cost_basis
+                        cost_basis=args.cost_basis,
+                        open_fees=args.open_fees or 0.0,
+                        roll_group_id=args.roll_group_id,
                     )
-                    cb_note = f" | cost basis ${args.cost_basis:.2f}" if args.cost_basis else ""
-                    logger.info(f"Opened wheel position #{pos_id}: {args.symbol.upper()} {args.position_type} ${args.strike} exp {args.expiration}{cb_note}")
+                    cb_note   = f" | cost basis ${args.cost_basis:.2f}" if args.cost_basis else ""
+                    fee_note  = f" | fees ${args.open_fees:.2f}" if args.open_fees else ""
+                    roll_note = f" | roll group {args.roll_group_id}" if args.roll_group_id else ""
+                    logger.info(f"Opened wheel position #{pos_id}: {args.symbol.upper()} {args.position_type} "
+                                f"${args.strike} exp {args.expiration}{cb_note}{fee_note}{roll_note}")
             elif args.action == "close":
                 if not args.position_id:
                     logger.error("wheel_position close requires --position-id")
                 else:
-                    ok = engine.db.close_wheel_position(args.position_id, status=args.status)
+                    ok = engine.db.close_wheel_position(
+                        args.position_id,
+                        status=args.status,
+                        close_price_per_share=args.close_price,
+                        close_fees=args.close_fees or 0.0,
+                    )
                     if ok:
-                        logger.info(f"Closed wheel position #{args.position_id} as {args.status}. "
+                        cp_note = f" | BTC at ${args.close_price:.2f}/share" if args.close_price else ""
+                        logger.info(f"Closed wheel position #{args.position_id} as {args.status}{cp_note}. "
                                     f"Total premium ledger now: ${engine.db.get_total_premium_collected():,.2f}")
                     else:
                         logger.error(f"Could not close position #{args.position_id} — not found or not OPEN.")

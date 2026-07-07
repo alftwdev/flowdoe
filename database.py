@@ -83,10 +83,16 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
 
-                # Lot-engine columns — added after initial release; migrate gracefully.
+                # Graceful column migrations — try each; OperationalError means already exists.
                 for col_sql in [
+                    # Lot-engine (session 1)
                     "ALTER TABLE wheel_positions ADD COLUMN cost_basis REAL DEFAULT 0",
                     "ALTER TABLE wheel_positions ADD COLUMN accumulated_premiums REAL DEFAULT 0",
+                    # Wheelhouse upgrade (session 2): accurate retained premium + cycle tracking
+                    "ALTER TABLE wheel_positions ADD COLUMN open_fees REAL DEFAULT 0",
+                    "ALTER TABLE wheel_positions ADD COLUMN close_fees REAL DEFAULT 0",
+                    "ALTER TABLE wheel_positions ADD COLUMN close_price_per_share REAL",
+                    "ALTER TABLE wheel_positions ADD COLUMN roll_group_id TEXT",
                 ]:
                     try:
                         cursor.execute(col_sql)
@@ -143,11 +149,14 @@ class EcosystemDatabase:
             logger.warning(f"Database lock in alert manager: {e}")
             return False
 
-    def open_wheel_position(self, symbol, position_type, strike, expiration, premium_collected, contracts=1, cost_basis=None):
+    def open_wheel_position(self, symbol, position_type, strike, expiration, premium_collected,
+                             contracts=1, cost_basis=None, open_fees=0.0, roll_group_id=None):
         """
         Logs a newly opened CSP or CC position.
         premium_collected: per-contract total in dollars (mid * 100).
         cost_basis: per-share cost basis — defaults to strike (what you pay if assigned on a CSP).
+        open_fees: commission paid to open, in dollars total (e.g. 2 contracts × $0.65 = $1.30).
+        roll_group_id: shared UUID string linking all legs of a roll chain together.
         """
         cb = cost_basis if cost_basis is not None else strike
         try:
@@ -155,9 +164,11 @@ class EcosystemDatabase:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO wheel_positions
-                        (symbol, position_type, strike, expiration, premium_collected, contracts, cost_basis)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (symbol, position_type, strike, expiration, premium_collected, contracts, cb))
+                        (symbol, position_type, strike, expiration, premium_collected,
+                         contracts, cost_basis, open_fees, roll_group_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (symbol, position_type, strike, expiration, premium_collected,
+                      contracts, cb, open_fees or 0.0, roll_group_id))
                 conn.commit()
                 return cursor.lastrowid
         except sqlite3.OperationalError as e:
@@ -179,23 +190,52 @@ class EcosystemDatabase:
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to accumulate premium for position {position_id}: {e}")
 
-    def close_wheel_position(self, position_id, status="CLOSED", close_note=""):
-        """Closes a position (CLOSED/ASSIGNED/EXPIRED/ROLLED) and adds its premium to the margin-paydown ledger."""
+    def close_wheel_position(self, position_id, status="CLOSED", close_note="",
+                              close_price_per_share=None, close_fees=0.0):
+        """
+        Closes a position (CLOSED/ASSIGNED/EXPIRED/ROLLED) and adds actual retained premium
+        to the margin-paydown ledger.
+
+        Retained premium calculation:
+          EXPIRED  → full premium_collected (no buyback, kept everything)
+          ROLLED   → full premium_collected (credit received, continuation)
+          ASSIGNED → full premium_collected (assignment at agreed strike, no BTC cost)
+          CLOSED   → premium_collected - (close_price_per_share * contracts * 100) - close_fees
+                     i.e. what you actually kept after buying it back early
+
+        close_price_per_share: the per-share price you paid to BTC (e.g. $0.45 if sold at $0.90 and
+                               closed at 50% profit). Only needed for CLOSED status.
+        close_fees: total commission paid to close, in dollars.
+        """
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT premium_collected, contracts FROM wheel_positions WHERE id = ? AND status = 'OPEN'", (position_id,))
+                cursor.execute(
+                    "SELECT premium_collected, contracts, open_fees FROM wheel_positions WHERE id = ? AND status = 'OPEN'",
+                    (position_id,)
+                )
                 row = cursor.fetchone()
                 if row is None:
                     return False
-                premium_total = float(row[0]) * int(row[1])
+                prem_collected = float(row[0])
+                contracts      = int(row[1])
+                open_fees_val  = float(row[2] or 0.0)
+
+                if status == "CLOSED" and close_price_per_share is not None:
+                    buyback_cost = float(close_price_per_share) * contracts * 100
+                    retained = prem_collected - buyback_cost - (close_fees or 0.0) - open_fees_val
+                else:
+                    # EXPIRED / ROLLED / ASSIGNED — no buyback, full premium minus fees
+                    retained = prem_collected - (close_fees or 0.0) - open_fees_val
+
                 cursor.execute("""
                     UPDATE wheel_positions
-                    SET status = ?, closed_date = CURRENT_TIMESTAMP, close_note = ?
+                    SET status = ?, closed_date = CURRENT_TIMESTAMP, close_note = ?,
+                        close_price_per_share = ?, close_fees = ?
                     WHERE id = ?
-                """, (status, close_note, position_id))
+                """, (status, close_note, close_price_per_share, close_fees or 0.0, position_id))
                 conn.commit()
-            self._add_to_premium_ledger(premium_total)
+            self._add_to_premium_ledger(max(retained, 0.0))
             return True
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to close wheel position: {e}")
@@ -208,8 +248,10 @@ class EcosystemDatabase:
                 cursor.execute("""
                     SELECT id, symbol, position_type, strike, expiration,
                            premium_collected, contracts, last_alert_dte,
-                           cost_basis, accumulated_premiums
+                           cost_basis, accumulated_premiums,
+                           open_fees, roll_group_id
                     FROM wheel_positions WHERE status = 'OPEN'
+                    ORDER BY opened_date ASC
                 """)
                 cols = [c[0] for c in cursor.description]
                 return [dict(zip(cols, row)) for row in cursor.fetchall()]
@@ -220,8 +262,9 @@ class EcosystemDatabase:
     def get_wheel_outcome_distribution(self, lookback_days=90):
         """
         Outcome breakdown for closed positions in the lookback window.
-        Returns list of {outcome, count, total_premium} dicts, ordered by count desc.
-        EXPIRED = full premium kept. ASSIGNED = took shares. ROLLED = extended. CLOSED = BTC'd.
+        retained_premium uses actual close_price_per_share for CLOSED positions so early
+        buy-to-close at 50% profit isn't counted as full premium in the ledger.
+        Also returns annualized_roc_avg per outcome group for scorecard context.
         """
         try:
             cutoff = (datetime.now() - timedelta(days=lookback_days)).isoformat()
@@ -230,7 +273,30 @@ class EcosystemDatabase:
                 cursor.execute("""
                     SELECT status,
                            COUNT(*) as count,
-                           SUM(premium_collected * contracts) as total_premium
+                           SUM(premium_collected * contracts) as gross_premium,
+                           SUM(
+                               CASE
+                                   WHEN status = 'CLOSED' AND close_price_per_share IS NOT NULL
+                                       THEN (premium_collected
+                                             - (close_price_per_share * contracts * 100)
+                                             - COALESCE(close_fees, 0)
+                                             - COALESCE(open_fees, 0))
+                                   ELSE (premium_collected
+                                         - COALESCE(close_fees, 0)
+                                         - COALESCE(open_fees, 0))
+                               END
+                           ) as retained_premium,
+                           AVG(
+                               CASE
+                                   WHEN strike > 0 AND julianday(COALESCE(closed_date, expiration)) > julianday(opened_date)
+                                       THEN (
+                                           (premium_collected - COALESCE(open_fees,0) - COALESCE(close_fees,0))
+                                           / (strike * contracts * 100)
+                                       ) * 365.0
+                                         / (julianday(COALESCE(closed_date, expiration)) - julianday(opened_date))
+                                   ELSE NULL
+                               END
+                           ) as avg_annualized_roc
                     FROM wheel_positions
                     WHERE status != 'OPEN'
                       AND closed_date >= ?
@@ -238,7 +304,16 @@ class EcosystemDatabase:
                     ORDER BY count DESC
                 """, (cutoff,))
                 rows = cursor.fetchall()
-                return [{"outcome": r[0], "count": r[1], "total_premium": r[2] or 0.0} for r in rows]
+                return [
+                    {
+                        "outcome":           r[0],
+                        "count":             r[1],
+                        "total_premium":     r[2] or 0.0,   # gross (for reference)
+                        "retained_premium":  r[3] or 0.0,   # what actually hit the ledger
+                        "avg_annualized_roc": r[4],         # None if insufficient data
+                    }
+                    for r in rows
+                ]
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to fetch wheel outcome distribution: {e}")
             return []
