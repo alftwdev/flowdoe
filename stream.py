@@ -114,7 +114,7 @@ class RealTimeTickAgent:
     def on_open(self, ws):
         logger.info("Websocket pipeline connected.")
         self._connected = True
-        self._backoff = 30.0  # reset on confirmed connection, not on clean return
+        self._connected_at = time.time()
         ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIXY,XAU/USD,BTC/USD"}}))
 
     def on_error(self, ws, error):
@@ -126,7 +126,8 @@ class RealTimeTickAgent:
 
     def execution_loop(self):
         self._connected = False
-        self._backoff = 30.0  # start conservative — Twelve Data may rate-limit rapid reconnects
+        self._connected_at = 0.0
+        self._backoff = 30.0
         while True:
             try:
                 ws = websocket.WebSocketApp(
@@ -139,13 +140,18 @@ class RealTimeTickAgent:
                 ws.run_forever(ping_interval=60, ping_timeout=15)
             except Exception as e:
                 logger.error(f"WS exception: {e}")
-            # Always sleep before reconnecting — whether clean disconnect or exception.
-            # Resets to 30s after a confirmed on_open; stays elevated if we never connected.
-            delay = 30.0 if self._connected else self._backoff
-            logger.info(f"Reconnecting in {delay:.0f}s...")
-            time.sleep(delay)
+            # A connection is only "stable" if it lasted ≥ 60s. TD cycles connections at
+            # equity close, producing rapid connect/drop loops. Resetting backoff on any
+            # on_open (even an 8-second session) prevented escalation and hammered TD.
+            # Now: short-lived connections keep escalating; only a real session resets.
+            stable = self._connected and (time.time() - self._connected_at) >= 60
+            if stable:
+                self._backoff = 30.0
+            else:
+                self._backoff = min(self._backoff * 2, 300.0)
+            logger.info(f"Reconnecting in {self._backoff:.0f}s...{'(stable reset)' if stable else ''}")
+            time.sleep(self._backoff)
             self._connected = False
-            self._backoff = min(self._backoff * 2, 300.0)
 
 # =====================================================================
 # DAEMON ORCHESTRATOR
