@@ -774,19 +774,7 @@ class TQQQTacticalSniper:
             f"┗ Status: {condition} — await Z ≥ ±1.8σ with vol surge for entry"
         )
 
-        state_key = f"OUTLOOK_{bias}_{round(z * 2) / 2}"
-        if db.track_and_limit_alerts(
-            "tqqq_market_outlook", state_key, spot,
-            max_broadcasts=1, threshold_pct=0.015
-        ):
-            if WEBHOOK_TRADE_SIGNALS:
-                send_essentials_embed(
-                    WEBHOOK_TRADE_SIGNALS,
-                    "TQQQ Flowstate",
-                    outlook,
-                    0x95a5a6
-                )
-                logger.info("Market outlook snapshot dispatched (no active setup).")
+        logger.debug(f"TQQQ Flowstate (no active setup): {condition}, z={z:+.2f}σ — suppressed, no dispatch.")
 
     def dispatch_regime_vital_sign(self, daily, breadth, vix_price, vix_z):
         """
@@ -830,8 +818,7 @@ class TQQQTacticalSniper:
                 f"┣ QQQ `${spot:,.2f}` vs SMA200 `${sma200:,.2f}` ({above_pct:+.1f}%) | Breadth: `{breadth:.0%}` {breadth_state}\n"
                 f"┗ VIXY `{vix_price:.2f}` {vixy_note}"
             )
-            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ Regime Gate", payload, color)
-            logger.info(f"TQQQ regime gate dispatched to trade-signals: {state_key}")
+            logger.info(f"TQQQ regime gate: {state_key} — suppressed from trade-signals.")
 
     def check_insurance_put_renewal(self):
         """
@@ -849,8 +836,7 @@ class TQQQTacticalSniper:
                     "┣ No active insurance put on record.\n"
                     "┗ Log one with: `python tqqq.py --log-put --strike X --expiration YYYY-MM-DD --premium X`"
                 )
-                if WEBHOOK_TRADE_SIGNALS:
-                    send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "🛡️ TQQQ INSURANCE PUT | NONE ACTIVE", payload, 0xe74c3c)
+                logger.info("Insurance put: none on record — suppressed from trade-signals.")
             return
 
         exp_date = datetime.strptime(put["expiration"], "%Y-%m-%d").date()
