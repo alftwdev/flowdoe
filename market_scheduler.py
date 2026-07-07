@@ -1,0 +1,152 @@
+"""
+market_scheduler.py — Always-on time-aware dispatcher.
+
+Replaces the entire pre-market / market-hours / EOD cron cluster with a single
+always-on process. Wakes every 60 seconds, checks current UTC time against a
+schedule table, fires each mode as a non-blocking subprocess, and deduplicates
+via the DB so no mode fires twice in the same calendar day even across restarts.
+
+Keep in PythonAnywhere cron (these are once-daily and too lightweight to justify
+an always-on slot):
+  09:39 UTC  audit.py          — DB maintenance / vacuum
+  06:00 UTC  daily_pulse.py    — morning health check
+
+Everything else is handled here.
+
+Cron slots freed (remove these from PythonAnywhere after deploying):
+  morning, gex, macro (×2), trending_plays, futures_social, wheel_signals,
+  crypto_social, cross_asset (×2), options_flow (×3), market_intraday,
+  income, iv_crush, post_market, eod, weekly_scorecard
+"""
+
+import os
+import sys
+import time
+import logging
+import subprocess
+from datetime import datetime, timezone
+
+from database import EcosystemDatabase
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logger = logging.getLogger("MarketScheduler")
+if not logger.handlers:
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(ch)
+logger.setLevel(logging.INFO)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PYTHON  = "python3.10"
+
+# How many minutes either side of the target time a job can fire.
+# 60-second loop + 2-minute window means worst-case slip is 3 minutes.
+FIRE_WINDOW_MINUTES = 2
+
+# ── Schedule table ────────────────────────────────────────────────────────────
+# Each entry: (utc_hour, utc_minute, task_key, script, extra_args, weekdays_only)
+#
+# script is either:
+#   "scheduler"   → python3.10 scheduler.py --mode <extra_args[0]>
+#   "cross_asset" → python3.10 cross_asset.py [extra_args[0] if any]
+#
+# weekdays_only=True skips Sat/Sun.
+# weekly_scorecard is weekdays_only=True but also internally gated to Friday
+# by the script itself — the scheduler just fires it daily; the script skips Mon-Thu.
+
+SCHEDULE = [
+    # UTC    key                    script          args                   wkdays
+    (12, 45, "morning",             "scheduler",    ["--mode", "morning"],         True),
+    (13, 15, "gex",                 "scheduler",    ["--mode", "gex"],             True),
+    (13, 28, "macro_am",            "scheduler",    ["--mode", "macro"],           True),
+    (13, 35, "trending_plays",      "scheduler",    ["--mode", "trending_plays"],  True),
+    (13, 40, "futures_social",      "scheduler",    ["--mode", "futures_social"],  True),
+    (13, 45, "wheel_signals",       "scheduler",    ["--mode", "wheel_signals"],   True),
+    (13, 50, "crypto_social",       "scheduler",    ["--mode", "crypto_social"],   True),
+    (14,  0, "cross_asset_am",      "cross_asset",  [],                            True),
+    (15, 30, "options_flow_open",   "scheduler",    ["--mode", "options_flow"],    True),
+    (17, 30, "market_intraday",     "scheduler",    ["--mode", "market_intraday"], True),
+    (18,  0, "options_flow_close",  "scheduler",    ["--mode", "options_flow"],    True),
+    (18,  5, "income",              "scheduler",    ["--mode", "income"],          True),
+    (18, 15, "iv_crush",            "scheduler",    ["--mode", "iv_crush"],        True),
+    (18, 45, "cross_asset_pm",      "cross_asset",  [],                            True),
+    (20,  0, "options_flow_eod",    "scheduler",    ["--mode", "options_flow"],    True),
+    (20, 14, "post_market",         "scheduler",    ["--mode", "post_market"],     True),
+    (20, 16, "eod",                 "scheduler",    ["--mode", "eod"],             True),
+    (20, 30, "macro_pm",            "scheduler",    ["--mode", "macro"],           True),
+    (20, 30, "weekly_scorecard",    "scheduler",    ["--mode", "weekly_scorecard"],True),
+]
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _db_key(task_key: str, date_str: str) -> str:
+    return f"mktsch_fired_{task_key}_{date_str}"
+
+def already_fired(db: EcosystemDatabase, task_key: str, date_str: str) -> bool:
+    return bool(db.get_state(_db_key(task_key, date_str)))
+
+def mark_fired(db: EcosystemDatabase, task_key: str, date_str: str):
+    db.update_state(_db_key(task_key, date_str), True)
+
+def build_cmd(script: str, args: list) -> list:
+    if script == "scheduler":
+        return [PYTHON, os.path.join(BASE_DIR, "scheduler.py")] + args
+    if script == "cross_asset":
+        cmd = [PYTHON, os.path.join(BASE_DIR, "cross_asset.py")]
+        return cmd + args if args else cmd
+    raise ValueError(f"Unknown script type: {script}")
+
+def fire(task_key: str, cmd: list):
+    """Launch the task as a detached subprocess — fire and forget."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=BASE_DIR,
+        )
+        logger.info(f"Fired [{task_key}] PID={proc.pid} → {' '.join(cmd[1:])}")
+    except Exception as e:
+        logger.error(f"Failed to fire [{task_key}]: {e}")
+
+def in_window(now_h: int, now_m: int, target_h: int, target_m: int) -> bool:
+    now_total    = now_h    * 60 + now_m
+    target_total = target_h * 60 + target_m
+    return abs(now_total - target_total) <= FIRE_WINDOW_MINUTES
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def run():
+    db = EcosystemDatabase()
+    logger.info("Market Scheduler online. Loop interval: 60s.")
+
+    while True:
+        now_utc  = datetime.now(timezone.utc)
+        weekday  = now_utc.weekday()          # 0=Mon … 6=Sun
+        is_wkday = weekday < 5
+        date_str = now_utc.strftime("%Y-%m-%d")
+        h, m     = now_utc.hour, now_utc.minute
+
+        for (t_h, t_m, task_key, script, args, wkdays_only) in SCHEDULE:
+            if wkdays_only and not is_wkday:
+                continue
+            if not in_window(h, m, t_h, t_m):
+                continue
+            if already_fired(db, task_key, date_str):
+                continue
+
+            mark_fired(db, task_key, date_str)
+            cmd = build_cmd(script, args)
+            fire(task_key, cmd)
+
+        time.sleep(60)
+
+if __name__ == "__main__":
+    try:
+        run()
+    except KeyboardInterrupt:
+        logger.info("Scheduler stopped by operator.")
+        sys.exit(0)
+    except Exception as e:
+        logger.critical(f"Scheduler crashed: {e}")
+        sys.exit(1)
