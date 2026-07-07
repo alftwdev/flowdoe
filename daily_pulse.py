@@ -364,7 +364,17 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
     lines.append(f"┣ Portfolio: ${total_brokerage:,.2f}")
     lines.append(f"┗ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
 
-    # ── Section 5: Market Regime
+    # ── Section 5: CLM / CRF Cornerstone
+    if cef:
+        lines.append("")
+        lines.append("CORNERSTONE (CLM / CRF)")
+        for ticker, d in cef.items():
+            if d["price"] > 0:
+                prem_str = f"{d['premium']:+.1f}% premium" if d["premium"] >= 0 else f"{d['premium']:.1f}% discount"
+                lines.append(f"┣ {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | {prem_str} | RSI {d['rsi']:.1f}")
+        lines.append("┗ DRIP at NAV only — premium > 15% = accumulation caution zone")
+
+    # ── Section 6: Market Regime
     lines.append("")
     lines.append("MARKET REGIME")
     regime_str = "Bull — above 200 SMA" if bull else ("Bear — below 200 SMA" if bull is False else "Unknown")
@@ -420,9 +430,19 @@ def run_daily_pulse(force=False, debug=False):
         return
 
     liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
+    cef    = fetch_cef_snapshot()
     regime = fetch_market_regime()
 
-    title, message, _ = format_pulse_message(liquid, credit, brokerage, {}, regime, state)
+    # ── Low balance check — fires independently, never gates the daily pulse
+    total_liquid = sum(a["balance"] for a in liquid)
+    if total_liquid < LIQUID_LOW_THRESHOLD:
+        push_to_pushover(
+            f"⚠️ Low Balance — {date.today().strftime('%b %d, %Y')}",
+            f"Liquid cash is ${total_liquid:,.2f} — below the ${LIQUID_LOW_THRESHOLD:,.0f} buffer.\n\nReplenish before next billing cycle.",
+            priority=1,
+        )
+
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, cef, regime, state)
     success = push_to_pushover(title, message, priority=0)
 
     if success:
