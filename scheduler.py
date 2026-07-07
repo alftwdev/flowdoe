@@ -273,6 +273,13 @@ def main():
             except Exception as e:
                 logger.error(f"Forex ledger sweep failed: {e}")
 
+            try:
+                graded = engine.sweep_and_grade_pending("cornerstone", min_age_days=3)
+                if graded:
+                    logger.info(f"Cornerstone ledger: graded {graded} pending RO risk call(s).")
+            except Exception as e:
+                logger.error(f"Cornerstone ledger sweep failed: {e}")
+
             # ── MARKET ANALYSIS: Single Unified EOD Recap + reverse-feed conviction sync ──
             # Folds SPY/QQQ tape audits and the VIX CVR reversal signal directly into the one
             # recap below — four separate end-of-day embeds collapsed into one report.
@@ -418,6 +425,21 @@ def main():
                         if WEBHOOK_INCOME:
                             send_essentials_embed(WEBHOOK_INCOME, "NEW INCOME ETF RADAR | Trending CC ETF Discovery", new_payload, 0x9b59b6)
                             logger.info(f"New income ETF screener dispatched: {len(new_etfs)} candidates.")
+
+                        # Cache top result for weekly scorecard income spotlight
+                        try:
+                            top_etf = new_etfs[0]
+                            engine.db.update_state("cc_etf_spotlight_latest", {
+                                "symbol": top_etf["symbol"],
+                                "family": top_etf["family"],
+                                "ann_yield": top_etf["ann_yield"],
+                                "freq": top_etf["freq"],
+                                "spot": top_etf["spot"],
+                                "next_ex_date": top_etf["next_ex_date"],
+                                "aum": top_etf["aum"],
+                            })
+                        except Exception as e:
+                            logger.warning(f"CC ETF spotlight cache write failed: {e}")
             except Exception as e:
                 logger.error(f"New income ETF screener segment failed: {e}")
 
@@ -471,6 +493,26 @@ def main():
                         if WEBHOOK_INCOME:
                             send_essentials_embed(WEBHOOK_INCOME, "IV RANK ALERT | Tier 2 Wheel Screener", ivr_payload, 0xe67e22)
                             logger.info(f"Tier 2 IV Rank alert dispatched: {len(flagged)} symbol(s) > 35% IVR.")
+
+                        # Cache top candidate for weekly scorecard income spotlight
+                        try:
+                            top = flagged[0]
+                            csp = top.get("csp_setup") or {}
+                            engine.db.update_state("wheel_spotlight_latest", {
+                                "symbol": top["symbol"],
+                                "ivr_proxy": top["ivr_proxy"],
+                                "spot": top["spot"],
+                                "csp_setup": {
+                                    "strike": csp.get("strike"),
+                                    "dte": csp.get("dte"),
+                                    "premium": csp.get("premium"),
+                                    "expiration": csp.get("expiration"),
+                                },
+                                "div_yield": top.get("div_yield"),
+                                "div_freq": top.get("div_freq"),
+                            })
+                        except Exception as e:
+                            logger.warning(f"Wheel spotlight cache write failed: {e}")
             except Exception as e:
                 logger.error(f"Tier 2 IV Rank screener failed: {e}")
 

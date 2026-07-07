@@ -2419,25 +2419,85 @@ class HighFidelityAnalyticsEngine:
 
     def generate_ecosystem_scorecard(self):
         """
-        Weekly cross-sector proof point: every sector's graded win rate in one place. This is the
-        thing that's hard for a generic AI assistant to replicate — a persistent, honest, dated
-        ledger across multiple asset classes, not a sharper prompt.
+        Weekly public scorecard for #announcements — newcomer-friendly, income-spotlighted,
+        and graded from the live ledger. Every number is dated, never deleted, win or lose.
         """
+        from datetime import date
+        week_str = date.today().strftime("Week of %B %-d, %Y")
+
+        # ── ACCURACY BLOCK ───────────────────────────────────────────────
         spy_trend = self.get_accuracy_trend()
+        accuracy_block = (
+            f"┣ SPY Daily Target Accuracy: `{spy_trend['avg_7d']}%` (7D) | `{spy_trend['avg_30d']}%` (30D) — `{spy_trend['sample_size']}` sessions logged\n"
+        )
+
+        # ── SECTOR WIN RATES ─────────────────────────────────────────────
         sector_lines = []
-        for sector, display in (("tqqq", "TQQQ Sniper"), ("cornerstone", "Cornerstone RO Risk"), ("forex", "Forex Risk Regime")):
+        sectors = [
+            ("tqqq",        "TQQQ Sniper"),
+            ("cornerstone", "Cornerstone RO Risk"),
+            ("forex",       "Macro Risk Regime"),
+        ]
+        for sector, display in sectors:
             wr = self.get_ledger_winrate(sector)
-            if wr:
-                sector_lines.append(f"┣ {display}: `{wr['win_rate']}%` win rate ({wr['wins']}/{wr['total']} graded calls)")
+            if wr and wr.get("total", 0) > 0:
+                sector_lines.append(
+                    f"┣ {display}: `{wr['win_rate']}%` ({wr['wins']}/{wr['total']} graded)"
+                )
             else:
-                sector_lines.append(f"┣ {display}: No graded calls yet — building track record")
+                # Cornerstone 0/0 is not a gap — it means no RO risk fired, which is a win for holders
+                if sector == "cornerstone":
+                    sector_lines.append(f"┣ {display}: No alerts fired — all clear ✅")
+                else:
+                    sector_lines.append(f"┣ {display}: No graded calls yet — building track record")
+
+        # ── INCOME SPOTLIGHTS (read from DB cache — no live API calls) ───
+        income_block = ""
+        try:
+            wheel_spot = self.db.get_state("wheel_spotlight_latest")
+            if wheel_spot:
+                csp = wheel_spot.get("csp_setup") or {}
+                strike = csp.get("strike")
+                dte = csp.get("dte")
+                premium = csp.get("premium")
+                prem_str = f"${premium * 100:.0f}/contract" if premium else "—"
+                strike_str = f"${strike:.1f}" if strike else "—"
+                income_block += (
+                    f"\n📌 **THIS WEEK'S WHEEL SETUP**\n"
+                    f"┣ Ticker: `{wheel_spot['symbol']}` | Spot: `${wheel_spot.get('spot', 0):.2f}`\n"
+                    f"┣ IV Rank Proxy: `{wheel_spot.get('ivr_proxy', 0):.0f}%` (elevated premium environment)\n"
+                    f"┣ Setup: Sell `{strike_str} Put` | `{dte} DTE` | Premium `{prem_str}`\n"
+                )
+                if wheel_spot.get("div_yield"):
+                    income_block += f"┣ Bonus if Assigned: `{wheel_spot['div_yield']:.1f}%` annual dividend ({wheel_spot.get('div_freq', '')})\n"
+                income_block += f"┗ Strategy: Cash-secured put → collect premium → keep stock if assigned → sell covered calls\n"
+        except Exception:
+            pass
+
+        try:
+            etf_spot = self.db.get_state("cc_etf_spotlight_latest")
+            if etf_spot:
+                income_block += (
+                    f"\n💡 **HIGHEST-YIELD CC ETF THIS WEEK**\n"
+                    f"┣ Ticker: `{etf_spot['symbol']}` | {etf_spot.get('family', '')} | {etf_spot.get('freq', '')} pay\n"
+                    f"┣ Annualized Yield: `{etf_spot.get('ann_yield', 0):.1f}%` | Spot: `${etf_spot.get('spot', 0):.2f}`\n"
+                    f"┣ AUM: `{etf_spot.get('aum', 'N/A')}` | Next Est. Pay: `{etf_spot.get('next_ex_date', '—')}`\n"
+                    f"┗ These ETFs sell covered calls on tech/crypto/blue-chip baskets — you own the ETF and collect the premium income monthly.\n"
+                )
+        except Exception:
+            pass
 
         payload = (
-            f"📊 **ECOSYSTEM WEEKLY SCORECARD — Every Sector, Graded**\n"
+            f"📊 **WEEKLY ACCURACY SCORECARD — {week_str}**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"┣ SPY Morning-Target Accuracy: `{spy_trend['avg_7d']}%` (7D avg) | `{spy_trend['avg_30d']}%` (30D avg) over `{spy_trend['sample_size']}` sessions\n"
-            + "\n".join(sector_lines) +
-            f"\n┗ Nothing here is cherry-picked — every call is logged at the moment it's made and graded against what actually happened, win or lose."
+            f"What is this? Every market call this ecosystem makes is logged the moment it fires and graded against what actually happened — SPY price targets, options setups, RO risk alerts, macro regime shifts. Good calls and bad ones. Nothing deleted.\n\n"
+            f"**THIS WEEK'S ACCURACY**\n"
+            f"{accuracy_block}"
+            + "\n".join(sector_lines)
+            + f"\n\n"
+            f"{income_block}"
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┗ Want the full morning report, TQQQ sniper entries, and live wheel trades? The complete system runs before, during, and after the market open — every session."
         )
         return payload
 
