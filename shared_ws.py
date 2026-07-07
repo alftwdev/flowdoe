@@ -37,6 +37,7 @@ class TDWebSocketManager:
         self._ws = None
         self._lock = threading.Lock()
         self._connected = False
+        self._connected_at = 0.0
 
     def register_callback(self, fn):
         """
@@ -89,13 +90,30 @@ class TDWebSocketManager:
             except Exception as e:
                 logger.error(f"WS callback error for {symbol}: {e}")
 
+    def _close_existing(self):
+        """
+        Attempt a clean disconnect before replacing the ws instance.
+        The TD SDK spawns internal threads on connect() — skipping this leaks them.
+        Enough reconnect storms (equity close cycling) exhaust the OS thread limit
+        and produce 'can't start new thread' from the SDK's own logger.
+        """
+        if self._ws is not None:
+            try:
+                self._ws.disconnect()
+            except Exception:
+                pass
+            self._ws = None
+        self._connected = False
+
     def connect(self):
+        self._close_existing()
         try:
             from twelvedata import TDClient
             td = TDClient(apikey=self.api_key)
             self._ws = td.websocket(symbols=WS_SYMBOLS, on_event=self._on_event)
             self._ws.connect()
             self._connected = True
+            self._connected_at = time.time()
             logger.info(f"WebSocket connected — subscribed: {WS_SYMBOLS}")
         except Exception as e:
             logger.error(f"WebSocket connect failed: {e}")
@@ -113,7 +131,12 @@ class TDWebSocketManager:
                 self._connected = False
 
     def _run_forever(self):
-        """Auto-reconnecting loop — runs in the background daemon thread."""
+        """
+        Auto-reconnecting loop — runs in the background daemon thread.
+        Backoff only resets after a connection stable for >= 60s.
+        Short-lived drops (TD cycling at equity close) escalate: 30→60→120→300s.
+        """
+        backoff = 30.0
         while True:
             try:
                 self.connect()
@@ -121,8 +144,13 @@ class TDWebSocketManager:
                     self.keep_alive()
             except Exception as e:
                 logger.error(f"WS run loop error: {e}")
-            logger.info("WebSocket disconnected — reconnecting in 15s")
-            time.sleep(15)
+            stable = self._connected_at > 0 and (time.time() - self._connected_at) >= 60
+            if stable:
+                backoff = 30.0
+            else:
+                backoff = min(backoff * 2, 300.0)
+            logger.info(f"WebSocket disconnected — reconnecting in {backoff:.0f}s")
+            time.sleep(backoff)
 
     def start_background(self) -> threading.Thread:
         """
@@ -139,7 +167,7 @@ class TDWebSocketManager:
 # Module-level singleton — both monitor.py and tqqq.py share one instance.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_manager: TDWebSocketManager | None = None
+_manager = None  # TDWebSocketManager singleton
 _manager_lock = threading.Lock()
 
 
