@@ -70,6 +70,94 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"FRED failure for {series_id}: {e}")
             return 0.0
 
+    def fetch_real_vix(self):
+        """
+        FRED VIXCLS — the actual CBOE VIX daily close, updated ~4:30 PM ET.
+        Cleaner than VIXY for the morning pulse (VIXY is a leveraged ETF proxy).
+        Returns float or None on failure.
+        """
+        try:
+            val = self._fetch_fred_metric("VIXCLS")
+            return round(val, 2) if val > 0 else None
+        except Exception:
+            return None
+
+    def fetch_yield_curve(self):
+        """
+        FRED DGS10 + DGS2 — 10-year and 2-year constant-maturity Treasury yields (daily, H.15).
+        Yield curve inversion (spread < 0) is the most reliable macro recession leading indicator.
+        Returns dict with t10, t2, spread, inverted, label — or None on failure.
+        """
+        try:
+            t10 = self._fetch_fred_metric("DGS10")
+            t2  = self._fetch_fred_metric("DGS2")
+            if t10 == 0.0 or t2 == 0.0:
+                return None
+            spread = round(t10 - t2, 3)
+            if spread <= -0.5:
+                label = "🔴 DEEPLY INVERTED — recession signal"
+            elif spread < 0:
+                label = "🟡 INVERTED — contraction watch"
+            elif spread < 0.5:
+                label = "⚪ FLAT — uncertainty zone"
+            else:
+                label = "🟢 NORMAL — expansion posture"
+            return {"t10": round(t10, 3), "t2": round(t2, 3), "spread": spread,
+                    "inverted": spread < 0, "label": label}
+        except Exception:
+            return None
+
+    def fetch_fred_macro_snapshot(self):
+        """
+        Key monthly FRED series cached to DB daily — avoids redundant FRED calls across
+        cron runs. Returns dict: fedfunds, cpi_yoy (derived from 12-month change), unrate.
+        Writes to DB so fed.py and macro dispatch can read without re-fetching.
+        """
+        cache_key = "fred_macro_snapshot"
+        cached_date_key = "fred_macro_snapshot_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if self.db.get_state(cached_date_key) == today_str:
+            return self.db.get_state(cache_key) or {}
+        try:
+            fedfunds = self._fetch_fred_metric("FEDFUNDS")
+            unrate   = self._fetch_fred_metric("UNRATE")
+            # CPI YoY: fetch 13 months, compute 12-month percent change
+            url = (f"https://api.stlouisfed.org/fred/series/observations"
+                   f"?series_id=CPIAUCSL&api_key={self.fred_api_key}"
+                   f"&file_type=json&sort_order=desc&limit=13")
+            cpi_data = requests.get(url, timeout=12).json().get("observations", [])
+            cpi_yoy = None
+            if len(cpi_data) >= 13:
+                latest = float(cpi_data[0]["value"])
+                year_ago = float(cpi_data[12]["value"])
+                cpi_yoy = round((latest - year_ago) / year_ago * 100, 2) if year_ago > 0 else None
+            snap = {"fedfunds": round(fedfunds, 2), "cpi_yoy": cpi_yoy, "unrate": round(unrate, 1)}
+            self.db.update_state(cache_key, snap)
+            self.db.update_state(cached_date_key, today_str)
+            return snap
+        except Exception as e:
+            logger.error(f"FRED macro snapshot failed: {e}")
+            return self.db.get_state(cache_key) or {}
+
+    def fetch_yahoo_dividend_yield(self, symbol):
+        """
+        Yahoo Finance quoteSummary fallback — used when Twelve Data dividend history is sparse
+        for newer CC ETFs (XDTE, QDTE, etc.). Returns annualized yield as a float (e.g. 15.3)
+        or None on failure. No new dependency — uses requests already imported.
+        """
+        try:
+            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+                   f"?interval=1d&range=1d")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            data = requests.get(url, headers=headers, timeout=10).json()
+            meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+            yield_val = meta.get("dividendYield")  # already fractional (0.15 = 15%)
+            if yield_val and yield_val > 0:
+                return round(float(yield_val) * 100, 1)
+            return None
+        except Exception:
+            return None
+
     def _fetch_twelve_data_quotes(self, symbols_list):
         if not self.api_key: return {}
         params = {"symbol": ",".join(sorted(symbols_list))}
@@ -816,11 +904,19 @@ class HighFidelityAnalyticsEngine:
 
                 div_history = self._fetch_dividend_history(sym, span="1Y")
                 next_ex_date, div_amount, interval_days = self._project_next_ex_date(div_history, today)
-                if div_amount <= 0 or not interval_days:
-                    continue
 
-                freq_mult = 365.0 / interval_days
-                ann_yield = (div_amount * freq_mult) / spot * 100
+                if div_amount <= 0 or not interval_days:
+                    # TD dividend history sparse (common for ETFs < 1 year old that passed the
+                    # trading-day age gate) — try Yahoo Finance quoteSummary as a fallback.
+                    yahoo_yield = self.fetch_yahoo_dividend_yield(sym)
+                    if yahoo_yield and yahoo_yield > min_yield_pct:
+                        ann_yield = yahoo_yield
+                        freq_mult = None  # not derived from TD interval
+                    else:
+                        continue
+                else:
+                    freq_mult = 365.0 / interval_days
+                    ann_yield = (div_amount * freq_mult) / spot * 100
 
                 if ann_yield <= min_yield_pct:
                     continue
@@ -1893,14 +1989,25 @@ class HighFidelityAnalyticsEngine:
              'No clean edge — size down, trade the range, wait for a confirming break of overnight VAH/VAL.')
         )
 
+        yc = self.fetch_yield_curve()
+        real_vix = self.fetch_real_vix()
+        if yc:
+            macro_line = (
+                f"┣ Macro: Yield Curve (10Y-2Y) `{yc['spread']:+.3f}%` {yc['label']} | {snap['risk_regime']} ({snap['risk_explanation']})\n"
+            )
+        else:
+            macro_line = f"┣ Macro: {snap['risk_regime']} ({snap['risk_explanation']})\n"
+
+        vix_suffix = f" | VIX `{real_vix:.1f}`" if real_vix else ""
+
         payload = (
             f"🌅 **MARKET ANALYSIS | MORNING BRIEF — Pre-Open Conviction**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"┣ Overnight Futures ({snap['futures_session']}): SPY POC `${snap['futures_poc']:,.2f}` | VAH `${snap['futures_vah']:,.2f}` | VAL `${snap['futures_val']:,.2f}`\n"
             f"{moves_line}"
             f"┣ Gamma Regime: {snap['gex']['market_state']} | Flip `${snap['gex']['flip_strike']:,.2f}` | P/C OI: `{snap['gex']['pc_oi_ratio']:.2f}` ({snap['gex']['pc_tag']})\n"
-            f"┣ Volatility: VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ) | Nasdaq-100 Breadth: `{snap['breadth']:.0%}`\n"
-            f"┣ Macro: Synthetic Dollar Index `{snap['synthetic_dxy']:+.2f}%` | {snap['risk_regime']} ({snap['risk_explanation']})\n"
+            f"┣ Volatility: VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ){vix_suffix} | Nasdaq-100 Breadth: `{snap['breadth']:.0%}`\n"
+            f"{macro_line}"
             f"┣ Credit Stress (HY Spread): `{snap['credit_spread']:.2f}%` | Net Liquidity: `${snap['net_liquidity']['net_liquidity']/1e9:,.0f}B` ({snap['net_liquidity']['trend']})\n"
             f"┣ VRP (SPY): IV `{snap['vrp']['iv']:.1f}%` vs RV `{snap['vrp']['hv30']:.1f}%` = `{snap['vrp']['vrp']:+.1f}` — {snap['vrp']['regime']}\n"
             f"{crypto_line}"
@@ -1926,12 +2033,15 @@ class HighFidelityAnalyticsEngine:
                 f"(SPY {move_since:+.2f} since open read)."
             )
 
+        yc = self.fetch_yield_curve()
+        yc_str = f" | Yield Curve `{yc['spread']:+.3f}%` {'🔴' if yc['inverted'] else '🟢'}" if yc else ""
+
         payload = (
             f"☀️ **MARKET ANALYSIS | INTRADAY PULSE**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"┣ SPY `${snap['gex']['current_spot']:,.2f}` | Gamma: {snap['gex']['market_state']} (Flip `${snap['gex']['flip_strike']:,.2f}`)\n"
             f"┣ VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ) | Breadth: `{snap['breadth']:.0%}`\n"
-            f"┣ Macro: {snap['risk_regime']} | Synthetic Dollar Index `{snap['synthetic_dxy']:+.2f}%`\n"
+            f"┣ Macro: {snap['risk_regime']}{yc_str}\n"
             f"┣ Current Read: {snap['conviction_bias']} (score {snap['conviction_score']:+d}/4)\n"
             f"┗ {tracking_line}\n\n"
             f"Adjustment Directive: {'Trail stops, let winners run — regime confirmed.' if morning_call and morning_call['bias'] == snap['conviction_bias'] and snap['conviction_score'] != 0 else 'Tighten risk — conditions have shifted since the open, reassess before adding exposure.'}"

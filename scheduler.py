@@ -174,6 +174,34 @@ def main():
                 except Exception as e:
                     logger.error(f"BTC/SPY correlation sync failed: {e}")
 
+            # ── FRED: Yield Curve + Macro Snapshot ──────────────────────────
+            try:
+                yc = engine.fetch_yield_curve()
+                fred_snap = engine.fetch_fred_macro_snapshot()
+                real_vix = engine.fetch_real_vix()
+                if (yc or fred_snap) and WEBHOOK_MARKET:
+                    yc_line = (
+                        f"┣ Yield Curve (10Y-2Y): `{yc['spread']:+.3f}%` — {yc['label']}\n"
+                        f"┣ 10Y: `{yc['t10']:.3f}%` | 2Y: `{yc['t2']:.3f}%`\n"
+                        if yc else ""
+                    )
+                    vix_line = f"┣ VIX (FRED VIXCLS): `{real_vix:.2f}`\n" if real_vix else ""
+                    macro_lines = ""
+                    if fred_snap:
+                        cpi = fred_snap.get("cpi_yoy")
+                        macro_lines = (
+                            f"┣ Fed Funds Rate: `{fred_snap.get('fedfunds', 'N/A'):.2f}%`\n"
+                            f"┣ CPI YoY: `{cpi:.2f}%`\n" if cpi else ""
+                        ) + f"┗ Unemployment Rate: `{fred_snap.get('unrate', 'N/A'):.1f}%`\n"
+                    fred_payload = (
+                        f"┣ **FRED Macro Overlay — Real Data**\n"
+                        f"{yc_line}{vix_line}{macro_lines}"
+                    )
+                    send_essentials_embed(WEBHOOK_MARKET, "Treasury & Macro Conditions (FRED)", fred_payload, 0x2980b9)
+                    logger.info("Dispatched FRED yield curve + macro snapshot")
+            except Exception as e:
+                logger.error(f"FRED macro dispatch failed: {e}")
+
             logger.info("Macro matrix compilation and dispatch completed.")
 
         elif args.mode == "morning":
