@@ -112,10 +112,17 @@ class RealTimeTickAgent:
         except Exception: pass
 
     def on_open(self, ws):
-        logger.info("Websocket pipeline connected.")
+        # BTC/USD and XAU/USD trade 24/7 — always subscribe.
+        # SPY/QQQ/VIXY are equity symbols: TD rejects them off-hours, burning
+        # reconnects and eventually hitting the 429 rate limit. Only add them
+        # during RTH (13:00–21:00 UTC).
+        from datetime import timezone as _tz
+        rth = 13 <= time.gmtime().tm_hour < 21
+        symbols = "BTC/USD,XAU/USD,VIXY,SPY,QQQ" if rth else "BTC/USD,XAU/USD"
+        logger.info(f"Websocket pipeline connected. Subscribing: {symbols}")
         self._connected = True
         self._connected_at = time.time()
-        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": "SPY,QQQ,VIXY,XAU/USD,BTC/USD"}}))
+        ws.send(json.dumps({"action": "subscribe", "params": {"symbols": symbols}}))
 
     def on_error(self, ws, error):
         logger.error(f"WS error: {error}")
