@@ -1457,7 +1457,7 @@ def run_monitor():
                     _sec_session = requests.Session()
                     for _ticker in ("CLM", "CRF"):
                         result = check_sec_edgar(_sec_session, _ticker)
-                        if result and "No N2/RO detected" not in result:
+                        if result and any(sig in result for sig in ("N-2", "13D", "13G")):
                             logger.warning(f"[Off-hours SEC] {_ticker}: {result}")
                             dispatch_cornerstone_alert(
                                 f"⚠️ Off-hours EDGAR filing detected — {_ticker}",
