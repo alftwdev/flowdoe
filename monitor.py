@@ -1454,7 +1454,17 @@ def run_monitor():
                 # ── Off-hours: SEC/EDGAR only — N-2 and SC 13D/G filings drop 24/7
                 # Skip the expensive Twelve Data REST calls (no prices to act on)
                 try:
-                    check_sec_edgar()
+                    _sec_session = requests.Session()
+                    for _ticker in ("CLM", "CRF"):
+                        result = check_sec_edgar(_sec_session, _ticker)
+                        if result and "No N2/RO detected" not in result:
+                            logger.warning(f"[Off-hours SEC] {_ticker}: {result}")
+                            dispatch_cornerstone_alert(
+                                f"⚠️ Off-hours EDGAR filing detected — {_ticker}",
+                                f"┣ Ticker: {_ticker}\n┗ Signal: {result}",
+                                color=0xe74c3c,
+                                attach_chart=False,
+                            )
                 except Exception as e:
                     logger.warning(f"[Off-hours SEC] check_sec_edgar error: {e}")
 
