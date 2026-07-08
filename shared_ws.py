@@ -13,7 +13,7 @@ import os
 import threading
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -136,9 +136,20 @@ class TDWebSocketManager:
         Auto-reconnecting loop — runs in the background daemon thread.
         Backoff only resets after a connection stable for >= 60s.
         Short-lived drops (TD cycling at equity close) escalate: 30→60→120→300s.
+
+        RTH gate: Twelve Data drops equity WebSocket connections immediately
+        outside market hours (no live stream to serve). Attempting to connect
+        off-hours produces a tight 2-second connect/drop storm from the SDK's
+        own internal retry loop. Sleep 60s and re-check rather than hammering.
         """
         backoff = 30.0
         while True:
+            now_h = datetime.now(timezone.utc).hour
+            if not (13 <= now_h < 21):
+                logger.info(f"WS deferred — outside RTH (UTC {now_h:02d}h). Checking again in 60s.")
+                time.sleep(60)
+                continue
+
             try:
                 self.connect()
                 if self._connected:
