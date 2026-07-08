@@ -370,7 +370,7 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
         lines.append("CORNERSTONE (CLM / CRF)")
         for ticker, d in cef.items():
             if d["price"] > 0:
-                prem_str = f"{d['premium']:+.1f}% premium" if d["premium"] >= 0 else f"{d['premium']:.1f}% discount"
+                prem_str = f"{d['premium']:+.1f}% premium" if d["premium"] >= 0 else f"{abs(d['premium']):.1f}% discount"
                 lines.append(f"┣ {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | {prem_str} | RSI {d['rsi']:.1f}")
         lines.append("┗ DRIP at NAV only — premium > 15% = accumulation caution zone")
 
