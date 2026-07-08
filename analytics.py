@@ -877,15 +877,33 @@ class HighFidelityAnalyticsEngine:
         return flagged
 
     NEW_INCOME_ETF_UNIVERSE = {
-        # symbol: (family, pay_freq) — confirmed-real tickers only, verified against issuer/ETF
-        # database listings rather than guessed, since fabricated tickers broke this channel before.
-        "MSTY": ("YieldMax", "Monthly"), "NVDY": ("YieldMax", "Monthly"),
-        "TSLY": ("YieldMax", "Monthly"), "CONY": ("YieldMax", "Monthly"),
-        "GOOY": ("YieldMax", "Monthly"), "AMDY": ("YieldMax", "Monthly"),
-        "YMAX": ("YieldMax", "Monthly"),
-        "XDTE": ("Roundhill", "Weekly"), "QDTE": ("Roundhill", "Weekly"), "RDTE": ("Roundhill", "Weekly"),
-        "QQQI": ("NEOS", "Monthly"), "SPYI": ("NEOS", "Monthly"), "BTCI": ("NEOS", "Monthly"),
-        "MAGY": ("TappAlpha", "Monthly"),
+        # symbol: (family, pay_freq)
+        # Verified July 2026 against issuer websites + SEC filings.
+        # MAGY was previously mislabeled as TappAlpha — it is Roundhill
+        # (Roundhill Magnificent Seven Covered Call ETF, launched Apr 23 2025).
+        # TappAlpha's products (TDAQ/TSPY/TSYX/TDAX) are excluded: TDAQ is a
+        # Tier 2 long hold; the rest are too new to pass the 126-day age filter.
+
+        # YieldMax — synthetic covered call, weekly income
+        "MSTY": ("YieldMax", "Weekly"),   # MicroStrategy (MSTR)
+        "NVDY": ("YieldMax", "Weekly"),   # NVIDIA
+        "TSLY": ("YieldMax", "Weekly"),   # Tesla
+        "CONY": ("YieldMax", "Weekly"),   # Coinbase
+        "GOOY": ("YieldMax", "Weekly"),   # Alphabet (Google)
+        "AMDY": ("YieldMax", "Weekly"),   # AMD
+        "YMAG": ("YieldMax", "Monthly"),  # Mag 7 fund of option income ETFs
+        "YMAX": ("YieldMax", "Weekly"),   # Diversified fund of YieldMax ETFs
+
+        # Roundhill — 0DTE/covered call income, weekly
+        "XDTE": ("Roundhill", "Weekly"),  # S&P 500 0DTE
+        "QDTE": ("Roundhill", "Weekly"),  # Nasdaq 100 0DTE
+        "RDTE": ("Roundhill", "Weekly"),  # Russell 2000 0DTE
+        "MAGY": ("Roundhill", "Weekly"),  # Magnificent Seven CC ETF
+
+        # NEOS — tax-efficient covered call, monthly
+        "QQQI": ("NEOS", "Monthly"),      # Nasdaq 100
+        "SPYI": ("NEOS", "Monthly"),      # S&P 500
+        "BTCI": ("NEOS", "Monthly"),      # Bitcoin
     }
 
     def generate_new_income_etf_screener(self, min_yield_pct=10.0, min_trading_days=126):
