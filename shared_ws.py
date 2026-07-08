@@ -143,12 +143,16 @@ class TDWebSocketManager:
         own internal retry loop. Sleep 60s and re-check rather than hammering.
         """
         backoff = 30.0
+        _last_deferred_h = -1  # track last logged hour to avoid per-minute log spam
         while True:
             now_h = datetime.now(timezone.utc).hour
             if not (13 <= now_h < 21):
-                logger.info(f"WS deferred — outside RTH (UTC {now_h:02d}h). Checking again in 60s.")
+                if now_h != _last_deferred_h:
+                    logger.info(f"WS deferred — outside RTH. Waiting for 13:00 UTC (now {now_h:02d}h).")
+                    _last_deferred_h = now_h
                 time.sleep(60)
                 continue
+            _last_deferred_h = -1  # reset so re-entry after RTH logs cleanly
 
             try:
                 self.connect()

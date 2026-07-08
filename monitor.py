@@ -279,7 +279,9 @@ def check_sec_edgar(session, ticker):
         return f"[{conviction}] " + " | ".join(flags)
 
     except Exception as e:
-        logger.error(f"[SEC Fetch Error] {e}")
+        # DNS failures and timeouts are transient — EDGAR is public but PythonAnywhere
+        # occasionally has resolution hiccups. Warning not error: already handled gracefully.
+        logger.warning(f"[SEC] EDGAR fetch unavailable ({ticker}): {type(e).__name__}")
         return "No N2/RO detected"
 
 # ─────────────────────────────────────────────────────────────────────────────
