@@ -24,7 +24,7 @@ import sys
 import smtplib
 import logging
 from email.message import EmailMessage
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytz
 from dotenv import load_dotenv
 from database import EcosystemDatabase
@@ -1399,7 +1399,7 @@ def _make_ws_callback():
         if symbol not in ("CLM", "CRF", "VIXY"):
             return
         now = time.monotonic()
-        if now - _last_ws_check[0] < 60.0:
+        if now - _last_ws_check[0] < 300.0:
             return
         _last_ws_check[0] = now
         logger.info(f"[WS] {symbol} price update ${price:.4f} — triggering immediate escalation check")
@@ -1461,7 +1461,12 @@ def run_monitor():
         except Exception as e:
             logger.critical(f"FATAL LOOP EXCEPTION: {e}")
 
-        time.sleep(300)  # 5-minute tick — WS handles intraday real-time between ticks
+        # Extend sleep during off-hours (21:00–13:00 UTC) — markets are closed,
+        # no N-2 filings drop overnight, and WS is not streaming equity prices.
+        # RTH window (13:00–21:00 UTC): keep 300s to match WS callback debounce.
+        now_utc_h = datetime.now(timezone.utc).hour
+        sleep_secs = 300 if 13 <= now_utc_h < 21 else 1800
+        time.sleep(sleep_secs)
 
 if __name__ == "__main__":
     run_monitor()

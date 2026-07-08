@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import pytz
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from scipy.stats import norm
 from scipy.optimize import brentq
@@ -1079,4 +1079,8 @@ if __name__ == "__main__":
             sniper.execute_sniper_sweep()
         except Exception as e:
             logger.error(f"Daemon error: {e}")
-        time.sleep(900)
+        # TQQQ doesn't trade off-hours — extend sleep to 30min outside RTH.
+        # RTH: 13:30–20:00 UTC (use 13:00–21:00 for buffer). Off-hours: 1800s.
+        now_utc_h = datetime.now(timezone.utc).hour
+        sleep_secs = 900 if 13 <= now_utc_h < 21 else 1800
+        time.sleep(sleep_secs)
