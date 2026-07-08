@@ -465,7 +465,7 @@ def main():
                         "tier2_iv_rank_screener", state_str,
                         sum(f['ivr_proxy'] for f in flagged), max_broadcasts=3, threshold_pct=0.05
                     ):
-                        ivr_payload = "Tier 2 Wheel Underlyings — Elevated IV Rank Detected\n\n"
+                        ivr_payload = "Wheel Scanner — Elevated IV Rank Detected\n\n"
                         for f in flagged:
                             setup_line = ""
                             csp = f.get("csp_setup")
@@ -501,9 +501,9 @@ def main():
                                 f"{assigned_line}"
                                 f"┗ Spread Check: `{f['spread_pct']:.1f}%` of mid | Earnings Window: Clear\n\n"
                             )
-                        ivr_payload += "Directive: Premium-selling environment is favorable — screen for CSP entries on these names."
+                        ivr_payload += "Directive: IV elevated above realized vol — favorable CSP entry. Size to collateral you can hold if assigned."
                         if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "IV RANK ALERT | Tier 2 Wheel Screener", ivr_payload, 0xe67e22)
+                            send_essentials_embed(WEBHOOK_INCOME, "IV RANK ALERT | Wheel Strategy Scanner", ivr_payload, 0xe67e22)
                             logger.info(f"Tier 2 IV Rank alert dispatched: {len(flagged)} symbol(s) > 35% IVR.")
 
                         # Cache top candidate for weekly scorecard income spotlight

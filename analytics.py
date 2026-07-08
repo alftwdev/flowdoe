@@ -724,21 +724,41 @@ class HighFidelityAnalyticsEngine:
         # Sort by soonest ex-date, then yield descending
         return sorted(results, key=lambda x: (x["days_away"], -x["ann_yield"]))
 
+    # ── Wheel Strategy Universe ───────────────────────────────────────────────
+    # Methodology: SMB Capital / Options with Ryan / Andy Tanner / Invest with Henry
+    # Core criteria: liquid options, quality underlying, survives assignment,
+    # ideally pays a dividend (double-income if assigned: divs + CC premium).
+    #
+    # Tiers:
+    #   CORE    — blue-chip, always optionable, assignment = long-term hold
+    #   INCOME  — dividend payers; assignment triggers CC + dividend income
+    #   GROWTH  — higher IV, higher premium, shorter holding tolerance
+    #   SECTOR  — broad ETFs for diversified wheel deployment
+    WHEEL_UNIVERSE = [
+        # CORE — mega-cap, deep liquidity, assignment is never a bad outcome
+        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+        # INCOME — dividend growers; CSP into dividend capture, CC on top if assigned
+        "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+        # GROWTH — elevated IV = richer premium; size smaller, manage more actively
+        "TSLA", "COIN", "SOFI", "PLTR",
+        # SECTOR ETFs — low single-stock risk, good for larger collateral deployment
+        "SPY", "QQQ", "IWM", "GLD", "XLE",
+    ]
+
     def generate_tier2_iv_rank_alerts(self, universe=None, ivr_threshold=35.0):
         """
-        Module 1 — IV Rank Screener for Tier 2 wheel underlyings (MAIN/MLPI/GPIQ/KQQQ — TDAQ
-        also covered by default since it's still official Tier 2 per claude.md, even though it's
-        not currently a personal priority holding).
-        IVR proxy = ATM put IV vs HV30, same formula as generate_dividend_wheel_candidates.
-        Includes a bid/ask spread liquidity check and an earnings-date filter (skipped, not
-        fabricated, if Twelve Data's earnings endpoint has nothing for the symbol — these are
-        ETFs/BDCs and most have no earnings date at all).
-        Also surfaces a concrete CSP setup (strike/DTE/delta/volume/OI) and real dividend data
-        (yield/frequency/amount) for each flagged symbol — this is dispatched as income content,
-        so it needs to carry the same depth as the dividend wheel v2 screener.
-        Returns only symbols where ivr_proxy > ivr_threshold AND liquidity/earnings checks pass.
+        Wheel Strategy IV Rank Scanner — dynamic universe, not a fixed watchlist.
+
+        Scans WHEEL_UNIVERSE for elevated IV environments where selling premium
+        has a statistical edge (IV > HV = options are priced above realized vol).
+        Merges methodology from SMB Capital, Options with Ryan, Andy Tanner,
+        Invest with Henry: quality underlyings you'd be comfortable owning,
+        concrete CSP setups at 0.20-0.35 delta, 20-45 DTE.
+
+        Filters: IVR proxy > threshold, bid/ask spread < 10% of mid,
+        earnings not within 45 days. Returns flagged symbols with full setup.
         """
-        universe = universe or ["MAIN", "MLPI", "GPIQ", "KQQQ", "TDAQ"]
+        universe = universe or self.WHEEL_UNIVERSE
         flagged = []
         today = datetime.now()
         DELTA_MIN, DELTA_MAX = 0.20, 0.35
