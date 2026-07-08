@@ -34,7 +34,9 @@ PUSHOVER_USER_KEY      = os.getenv("PUSHOVER_USER_KEY", "")
 # Manual override: set this in .env if SimpleFIN doesn't expose your E*TRADE margin
 # loan as a separate account. Positive value = current margin balance (stored as negative).
 # Example: ETRADE_MARGIN_BALANCE=5000.00  → shows as E*trade — Margin: $-5,000.00
-ETRADE_MARGIN_BALANCE  = os.getenv("ETRADE_MARGIN_BALANCE", "")
+# ETRADE_MARGIN_BALANCE removed — margin changes daily and can't be pulled
+# automatically from SimpleFIN. A stale static value is more misleading than
+# no value. Monitor the margin balance directly in E*TRADE.
 
 STATE_FILE = os.path.join(BASE_DIR, ".daily_pulse_state.json")
 
@@ -128,21 +130,7 @@ def fetch_simplefin_accounts(debug=False):
         else:
             liquid.append(entry)
 
-    # ── Inject synthetic E*TRADE margin entry if not already present from SimpleFIN
-    has_margin = any("margin" in a["name"].lower() for a in credit)
-    if not has_margin and ETRADE_MARGIN_BALANCE:
-        try:
-            margin_val = -abs(float(ETRADE_MARGIN_BALANCE))
-            credit.insert(0, {
-                "org": "E*TRADE", "name": "Margin Loan",
-                "balance": margin_val, "available": margin_val,
-                "_synthetic": True,
-            })
-            logger.info(f"Injected synthetic E*TRADE margin balance: ${margin_val:,.2f}")
-        except ValueError:
-            logger.warning(f"ETRADE_MARGIN_BALANCE invalid: {ETRADE_MARGIN_BALANCE!r}")
-
-    # Sort credit by balance ascending so largest liability (margin) leads
+    # Sort credit by balance ascending so largest liability leads
     credit.sort(key=lambda a: a["balance"])
 
     logger.info(f"SimpleFIN: {len(liquid)} liquid | {len(credit)} credit | {len(brokerage)} brokerage")
@@ -235,6 +223,64 @@ def save_state(state):
         logger.error(f"State save failed: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SEC EDGAR — Lightweight RO status check for daily pulse
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_ro_status():
+    """
+    Checks EDGAR for CLM and CRF. Returns a short status string per ticker:
+      🔴 RO RISK   — N-2 or N-2/A filed within 90 days
+      👁 HOLDER CHG — SC 13D/G filed within 180 days
+      🟢 Stable    — no actionable filings
+    """
+    CIK_MAP = {"CLM": "0000814083", "CRF": "0000033934"}
+    N2_WINDOW    = 90
+    HOLDER_WINDOW = 180
+    headers = {"User-Agent": "RockefellerSystem/1.0 (admin@rockefeller.local)"}
+    session = requests.Session()
+    results = {}
+
+    for ticker, cik in CIK_MAP.items():
+        try:
+            res = session.get(
+                f"https://data.sec.gov/submissions/CIK{cik}.json",
+                headers=headers, timeout=20)
+            if res.status_code != 200:
+                results[ticker] = "⚪ EDGAR unavailable"
+                continue
+
+            filings     = res.json().get("filings", {}).get("recent", {})
+            forms       = filings.get("form", [])
+            dates       = filings.get("filingDate", [])
+            today_dt    = datetime.utcnow().date()
+            ro_detected = False
+            holder_detected = False
+
+            for form, filing_date in zip(forms, dates):
+                try:
+                    age = (today_dt - datetime.strptime(filing_date, "%Y-%m-%d").date()).days
+                except ValueError:
+                    continue
+                if form in ("N-2", "N-2/A") and age <= N2_WINDOW:
+                    ro_detected = True
+                elif form in ("SC 13D", "SC 13G", "SC 13D/A", "SC 13G/A") and age <= HOLDER_WINDOW:
+                    holder_detected = True
+
+            if ro_detected:
+                results[ticker] = "🔴 RO RISK — N-2 filing active"
+            elif holder_detected:
+                results[ticker] = "👁 Holder change detected (SC 13D/G)"
+            else:
+                results[ticker] = "🟢 Stable — no actionable filings"
+
+        except Exception as e:
+            logger.warning(f"EDGAR check failed for {ticker}: {e}")
+            results[ticker] = "⚪ EDGAR unavailable"
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FORMAT — ┣/┗ Pulse Message
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -293,23 +339,24 @@ def _delta(current, prev):
     return f" ({arrow}${abs(d):,.0f})"
 
 
-def _brokerage_deltas(current, state):
+def _portfolio_deltas(current_total, state):
     """
-    Returns delta strings for 1D / 3M / 6M / 1Y using dated snapshots
-    stored in state['snapshots']. Falls back to 'N/A' until enough history
-    accumulates (snapshots are written once per day, so 1Y takes 365 runs).
+    Returns delta strings for 1D / 3M / 6M / 1Y comparing total_brokerage
+    snapshots. Snapshots store the combined portfolio value, so deltas here
+    reflect the whole portfolio — not a single account — avoiding the bug
+    where comparing one account's balance against a multi-account snapshot
+    produces a false large delta.
     """
-    today      = date.today()
-    snapshots  = state.get("snapshots", {})
-    horizons   = {"1D": 1, "3M": 90, "6M": 180, "1Y": 365}
-    parts      = []
+    today     = date.today()
+    snapshots = state.get("snapshots", {})
+    horizons  = {"1D": 1, "3M": 90, "6M": 180, "1Y": 365}
+    parts     = []
     for label, days in horizons.items():
-        target = (today - __import__("datetime").timedelta(days=days)).isoformat()
-        # Find the closest snapshot on or before the target date
+        target     = (today - __import__("datetime").timedelta(days=days)).isoformat()
         past_dates = sorted(k for k in snapshots if k <= target)
         if past_dates:
             past_val = snapshots[past_dates[-1]]
-            d = current - past_val
+            d = current_total - past_val
             arrow = "↑" if d >= 0 else "↓"
             parts.append(f"{label}: {arrow}${abs(d):,.0f}")
         else:
@@ -317,7 +364,7 @@ def _brokerage_deltas(current, state):
     return " | ".join(parts)
 
 
-def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None):
     today     = date.today().strftime("%b %d, %Y")
     spy_price, bull, vixy_z, vixy_label = regime
     lines     = []
@@ -344,16 +391,15 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
         lines.append("┗ No credit balances")
 
     # ── Section 3: Brokerage (skip zero-balance accounts)
-    active_brokers = [a for a in brokerage if a["balance"] != 0]
+    active_brokers  = [a for a in brokerage if a["balance"] != 0]
     total_brokerage = sum(a["balance"] for a in active_brokers if a["balance"] > 0)
+    port_deltas     = _portfolio_deltas(total_brokerage, state)
     lines.append("")
     lines.append("BROKERAGE")
     for a in active_brokers:
-        deltas = _brokerage_deltas(a["balance"], state) if "etrade" in a["org"].lower() or "e*trade" in a["org"].lower() else ""
         lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
-        if deltas:
-            lines.append(f"┃  {deltas}")
-    lines.append(f"┗ Total Portfolio: ${total_brokerage:,.2f}{_delta(total_brokerage, state.get('total_brokerage'))}")
+    lines.append(f"┣ Total Portfolio: ${total_brokerage:,.2f}")
+    lines.append(f"┗ {port_deltas}")
 
     # ── Section 4: Net Worth Snapshot
     net_worth = total_liquid + total_owed + total_brokerage
@@ -364,15 +410,15 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state):
     lines.append(f"┣ Portfolio: ${total_brokerage:,.2f}")
     lines.append(f"┗ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
 
-    # ── Section 5: CLM / CRF Cornerstone
-    if cef:
-        lines.append("")
-        lines.append("CORNERSTONE (CLM / CRF)")
-        for ticker, d in cef.items():
-            if d["price"] > 0:
-                prem_str = f"{d['premium']:+.1f}% premium" if d["premium"] >= 0 else f"{abs(d['premium']):.1f}% discount"
-                lines.append(f"┣ {ticker}: ${d['price']:.4f} | NAV ${d['nav']:.4f} | {prem_str} | RSI {d['rsi']:.1f}")
-        lines.append("┗ DRIP at NAV only — premium > 15% = accumulation caution zone")
+    # ── Section 5: CLM / CRF Cornerstone — RO status only
+    lines.append("")
+    lines.append("CORNERSTONE (CLM / CRF)")
+    if ro_status:
+        for ticker, status in ro_status.items():
+            prefix = "┣" if ticker != list(ro_status.keys())[-1] else "┗"
+            lines.append(f"{prefix} {ticker}: {status}")
+    else:
+        lines.append("┗ EDGAR status unavailable")
 
     # ── Section 6: Market Regime
     lines.append("")
@@ -430,8 +476,8 @@ def run_daily_pulse(force=False, debug=False):
         return
 
     liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
-    cef    = fetch_cef_snapshot()
-    regime = fetch_market_regime()
+    regime    = fetch_market_regime()
+    ro_status = fetch_ro_status()
 
     # ── Low balance check — fires independently, never gates the daily pulse
     total_liquid = sum(a["balance"] for a in liquid)
@@ -442,7 +488,7 @@ def run_daily_pulse(force=False, debug=False):
             priority=1,
         )
 
-    title, message, _ = format_pulse_message(liquid, credit, brokerage, cef, regime, state)
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, regime, state, ro_status)
     success = push_to_pushover(title, message, priority=0)
 
     if success:
