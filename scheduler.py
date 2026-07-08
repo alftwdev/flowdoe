@@ -479,7 +479,6 @@ def main():
                             assigned_line = ""
                             if f.get("div_yield") is not None:
                                 div_line = f"┣ Dividend: Yield `{f['div_yield']:.1f}%` | {f['div_freq']} | Amount `${f['div_amount']:.4f}`/share\n"
-                                # If assigned, show combined premium + dividend return for the monthly wheel
                                 if f.get("div_freq") == "Monthly" and csp and csp.get("premium") and csp.get("strike"):
                                     premium_yield = (csp["premium"] / csp["strike"]) * 100
                                     monthly_div_yield = f["div_yield"] / 12
@@ -489,11 +488,11 @@ def main():
                                         f"┣ Combined Return: Premium `{premium_yield:.2f}%` + Div `{monthly_div_yield:.2f}%` = `{combined_monthly:.2f}%`/mo\n"
                                     )
                             iv_hv = f.get("iv_hv_ratio")
-                        iv_context = (
-                            f"┣ IV/HV Ratio: `{iv_hv:.2f}x` HV30 — selling premium at a `{(iv_hv - 1) * 100:.0f}%` statistical premium to realized vol\n"
-                            if iv_hv and iv_hv > 1.0 else ""
-                        )
-                        ivr_payload += (
+                            iv_context = (
+                                f"┣ IV/HV Ratio: `{iv_hv:.2f}x` HV30 — selling premium at a `{(iv_hv - 1) * 100:.0f}%` statistical premium to realized vol\n"
+                                if iv_hv and iv_hv > 1.0 else ""
+                            )
+                            ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | IVR Proxy: `{f['ivr_proxy']:.0f}%`\n"
                                 f"{iv_context}"
