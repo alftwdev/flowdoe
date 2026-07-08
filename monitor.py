@@ -1441,14 +1441,24 @@ def run_monitor():
         logger.warning(f"[WS] WebSocket startup failed (REST polling continues): {e}")
 
     while True:
+        now_utc_h = datetime.now(timezone.utc).hour
+        rth = 13 <= now_utc_h < 21   # Regular Trading Hours (13:00–21:00 UTC)
+
         try:
-            # ── Continuous capital-protection scan (every tick)
-            check_and_escalate_if_critical()
+            if rth:
+                # ── Full scan during market hours
+                # Price/NAV/RSI fetches, WS-triggered escalation, seasonal check
+                check_and_escalate_if_critical()
+                check_and_dispatch_seasonal_caution()
+            else:
+                # ── Off-hours: SEC/EDGAR only — N-2 and SC 13D/G filings drop 24/7
+                # Skip the expensive Twelve Data REST calls (no prices to act on)
+                try:
+                    check_sec_edgar()
+                except Exception as e:
+                    logger.warning(f"[Off-hours SEC] check_sec_edgar error: {e}")
 
-            # ── Seasonal caution dispatcher (fires once on month entry)
-            check_and_dispatch_seasonal_caution()
-
-            # ── 0800 HST daily pulse gate
+            # ── 0800 HST daily pulse gate (always active — fires once per calendar day)
             now          = datetime.now(tz_h)
             current_date = now.strftime("%Y-%m-%d")
             last_pulse   = db.get_state("last_monitor_pulse_date", "")
@@ -1461,11 +1471,9 @@ def run_monitor():
         except Exception as e:
             logger.critical(f"FATAL LOOP EXCEPTION: {e}")
 
-        # Extend sleep during off-hours (21:00–13:00 UTC) — markets are closed,
-        # no N-2 filings drop overnight, and WS is not streaming equity prices.
-        # RTH window (13:00–21:00 UTC): keep 300s to match WS callback debounce.
-        now_utc_h = datetime.now(timezone.utc).hour
-        sleep_secs = 300 if 13 <= now_utc_h < 21 else 1800
+        # RTH: 300s (matches WS callback debounce — no point checking faster than WS fires)
+        # Off-hours: 900s (SEC filing check every 15 min — EDGAR accepts filings 24/7)
+        sleep_secs = 300 if rth else 900
         time.sleep(sleep_secs)
 
 if __name__ == "__main__":

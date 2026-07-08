@@ -38,6 +38,7 @@ class TDWebSocketManager:
         self._lock = threading.Lock()
         self._connected = False
         self._connected_at = 0.0
+        self._bg_thread = None
 
     def register_callback(self, fn):
         """
@@ -154,11 +155,17 @@ class TDWebSocketManager:
 
     def start_background(self) -> threading.Thread:
         """
-        Starts the WebSocket in a daemon thread. Returns the thread so the
-        caller can join it if needed, but it runs independently of the main loop.
+        Starts the WebSocket background thread — idempotent. Safe to call from
+        multiple processes sharing this singleton; the thread is only started once.
+        Both monitor.py and tqqq.py call this; the second call is a no-op.
         """
-        t = threading.Thread(target=self._run_forever, daemon=True, name="TDWebSocket")
-        t.start()
+        with self._lock:
+            if self._bg_thread is not None and self._bg_thread.is_alive():
+                logger.info("WebSocket background thread already running — skipping duplicate start.")
+                return self._bg_thread
+            t = threading.Thread(target=self._run_forever, daemon=True, name="TDWebSocket")
+            t.start()
+            self._bg_thread = t
         logger.info("WebSocket background thread started.")
         return t
 
