@@ -141,9 +141,14 @@ class TDWebSocketManager:
         outside market hours (no live stream to serve). Attempting to connect
         off-hours produces a tight 2-second connect/drop storm from the SDK's
         own internal retry loop. Sleep 60s and re-check rather than hammering.
+
+        Storm floor: the TD SDK handles reconnects internally inside keep_alive()
+        with ~1s delay — our backoff never fires during the storm. A minimum 15s
+        sleep after any short-lived session prevents the SDK from hammering the
+        server faster than we'd allow from the outer loop.
         """
         backoff = 30.0
-        _last_deferred_h = -1  # track last logged hour to avoid per-minute log spam
+        _last_deferred_h = -1
         while True:
             now_h = datetime.now(timezone.utc).hour
             if not (13 <= now_h < 21):
@@ -152,21 +157,33 @@ class TDWebSocketManager:
                     _last_deferred_h = now_h
                 time.sleep(60)
                 continue
-            _last_deferred_h = -1  # reset so re-entry after RTH logs cleanly
+            _last_deferred_h = -1
 
+            attempt_start = time.time()
             try:
                 self.connect()
                 if self._connected:
                     self.keep_alive()
             except Exception as e:
                 logger.error(f"WS run loop error: {e}")
+
+            session_duration = time.time() - attempt_start
             stable = self._connected_at > 0 and (time.time() - self._connected_at) >= 60
             if stable:
                 backoff = 30.0
             else:
                 backoff = min(backoff * 2, 300.0)
-            logger.info(f"WebSocket disconnected — reconnecting in {backoff:.0f}s")
-            time.sleep(backoff)
+
+            # Storm floor: if the session (including SDK internal retries) lasted
+            # less than 15s, the SDK was in a rapid reconnect storm. Force a minimum
+            # 30s pause so we don't hammer TD at the RTH boundary.
+            if session_duration < 15:
+                sleep_secs = max(backoff, 30.0)
+                logger.info(f"WS storm detected (session {session_duration:.0f}s) — cooling off {sleep_secs:.0f}s")
+            else:
+                sleep_secs = backoff
+                logger.info(f"WebSocket disconnected — reconnecting in {sleep_secs:.0f}s")
+            time.sleep(sleep_secs)
 
     def start_background(self) -> threading.Thread:
         """
