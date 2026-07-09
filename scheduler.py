@@ -50,15 +50,15 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
     targets = {
         WEBHOOK_FUTURES: (
-            f"{header}┣ SPY POC ${snap['futures_poc']:,.2f} | Gamma: {snap['gex']['market_state']}\n"
-            f"┣ VIXY z {snap['vixy_z']:+.2f}σ | Breadth {snap['breadth']:.0%}\n{footer}"
+            f"{header}┣ SPY POC ${snap['futures_poc']:,.2f} | VIXY z {snap['vixy_z']:+.2f}σ\n"
+            f"┣ Breadth {snap['breadth']:.0%} | Risk Regime: {snap['risk_regime']}\n{footer}"
         ),
         WEBHOOK_CRYPTO: (
             f"{header}┣ Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap.get("fng") else header
         ) + f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}",
         WEBHOOK_OPTIONS: (
-            f"{header}┣ Gamma: {snap['gex']['market_state']} | Flip ${snap['gex']['flip_strike']:,.2f}\n"
-            f"┣ VIXY z {snap['vixy_z']:+.2f}σ\n{footer}"
+            f"{header}┣ VIXY z {snap['vixy_z']:+.2f}σ | Breadth {snap['breadth']:.0%}\n"
+            f"┣ Conviction: {snap['conviction_bias']} ({snap['conviction_score']:+d}/4)\n{footer}"
         ),
         # WEBHOOK_INCOME intentionally omitted — income channel is a dedicated
         # dividend/wheel audience; cross-posting the macro conviction sync there
