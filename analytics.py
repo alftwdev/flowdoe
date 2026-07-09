@@ -786,7 +786,24 @@ class HighFidelityAnalyticsEngine:
 
                 atm_iv_raw = near_term["implied_volatility"].median()
                 atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
-                ivr_proxy = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
+
+                # Try real IVR from Tradier + stored iv_daily history; fall back to HV30 proxy.
+                ivr_val = 0.0
+                ivr_source = "proxy"
+                try:
+                    from tradier_client import TradierClient
+                    tc = TradierClient()
+                    if tc.api_key:
+                        ivr_data = tc.get_iv_rank(symbol, self.db)
+                        if ivr_data.get("reliable"):
+                            ivr_val = ivr_data["ivr"]
+                            ivr_source = "Tradier"
+                except Exception:
+                    pass
+                if ivr_val == 0.0:
+                    ivr_val = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
+
+                ivr_proxy = ivr_val  # keep var name for downstream references
                 if ivr_proxy <= ivr_threshold:
                     continue
 
@@ -863,6 +880,7 @@ class HighFidelityAnalyticsEngine:
                     "iv": round(float(atm_iv), 1),
                     "hv30": round(float(hv30), 1),
                     "ivr_proxy": round(float(ivr_proxy), 1),
+                    "ivr_source": ivr_source,
                     "iv_hv_ratio": iv_hv_ratio,
                     "spread_pct": round(spread_pct, 1),
                     "strategy": "CSP (Cash-Secured Put)",
@@ -1173,10 +1191,23 @@ class HighFidelityAnalyticsEngine:
                 if df_f.empty:
                     continue
 
-                # ATM IV for IVR proxy
+                # ATM IV and IVR — try real Tradier IVR first, fall back to HV30 proxy.
                 atm_iv_raw = df_f["implied_volatility"].median()
                 atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
-                ivr_proxy = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
+                ivr_proxy = 0.0
+                ivr_source = "proxy"
+                try:
+                    from tradier_client import TradierClient
+                    _tc = TradierClient()
+                    if _tc.api_key:
+                        _ivr = _tc.get_iv_rank(symbol, self.db)
+                        if _ivr.get("reliable"):
+                            ivr_proxy = _ivr["ivr"]
+                            ivr_source = "Tradier"
+                except Exception:
+                    pass
+                if ivr_proxy == 0.0:
+                    ivr_proxy = max(0.0, min(100.0, (atm_iv / hv30 - 1.0) * 100)) if hv30 > 0 else 0.0
                 if ivr_proxy < IVR_MIN or ivr_proxy > IVR_MAX:
                     continue  # IV environment not favorable for premium selling
 
@@ -1849,12 +1880,34 @@ class HighFidelityAnalyticsEngine:
 
     def calculate_gex_profile(self, symbol="SPY"):
         """
-        Also returns a Put/Call Open-Interest ratio — the one Unusual-Whales-style "options flow
-        sentiment" signal that's honestly replicable on Twelve Data's plan tier. Real dark-pool
-        prints and large block/sweep tape (UW's actual flagship features) require Level 2/order-flow
-        data this plan doesn't have; rather than fake that, this sticks to OI skew, which is real.
-        Reuses the same chain fetch as the GEX calc — no extra API call.
+        GEX + Put/Call OI ratio. Uses Tradier real OI when key is configured
+        (1-hour DB cache prevents re-fetch every 5-min monitor loop tick).
+        Falls back to Twelve Data chain if Tradier unavailable.
         """
+        import time as _time
+        cache_key = f"gex_profile_{symbol}"
+        try:
+            cached = self.db.get_state(cache_key)
+            if cached and (_time.time() - cached.get("ts", 0)) < 3600:
+                return cached["data"]
+        except Exception:
+            pass
+
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+            if tc.api_key:
+                result = tc.get_gex(symbol)
+                if result.get("market_state", "UNKNOWN") != "UNKNOWN":
+                    try:
+                        self.db.update_state(cache_key, {"ts": _time.time(), "data": result})
+                    except Exception:
+                        pass
+                    return result
+        except Exception:
+            pass
+
+        # Twelve Data fallback
         chain = self._execute_query("options/chain", {"symbol": symbol})
         spot_data = self._execute_query("price", {"symbol": symbol})
         if not chain or "data" not in chain or not spot_data:

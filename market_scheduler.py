@@ -85,7 +85,12 @@ SCHEDULE = [
     # all three runs fell through to the fallback "Options Market Flowstate" embed
     # with SPY Gamma Posture: UNKNOWN and GEX Flip Level: $0.00. Zero signal value.
     (17, 30, "market_intraday",    "scheduler",    ["--mode", "market_intraday"], True),
+    # SPX 0DTE iron condor scout — fires mid-session when IV environment is known.
+    # Gated internally by VIXY z < 0.5 and breadth > 60%; no-op when conditions are wrong.
+    (17, 45, "spx_income",        "scheduler",    ["--mode", "spx_income"],      True),
     (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
+    # store_daily_iv is NOT here — it runs once/day via PythonAnywhere scheduled task
+    # at 21:30 UTC (after market close). Add to cron: python scheduler.py --mode store_daily_iv
     (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),

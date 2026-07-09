@@ -69,6 +69,35 @@ def estimate_iv(rv20, vix=None, min_iv=0.55, iv_premium_mult=1.15, tqqq_vix_mult
     return max(iv, min_iv)
 
 
+def fetch_tqqq_atm_iv(db=None) -> float:
+    """
+    Return real ATM IV for TQQQ from Tradier (30–50 DTE window, call side).
+    Falls back to 0.0 — caller must then use estimate_iv() proxy.
+    Caches result in DB for 1 hour to avoid redundant chain fetches across
+    the monitor loop's 5-min ticks.
+    """
+    import time
+    try:
+        cache_key = "tqqq_atm_iv_tradier"
+        if db is not None:
+            cached = db.get_state(cache_key)
+            if cached:
+                ts, val = cached.get("ts", 0), cached.get("iv", 0.0)
+                if time.time() - ts < 3600 and val > 0:
+                    return float(val)
+
+        from tradier_client import TradierClient
+        tc = TradierClient()
+        if not tc.api_key:
+            return 0.0
+        iv = tc.get_atm_iv("TQQQ", option_type="call", dte_min=30, dte_max=50)
+        if iv > 0 and db is not None:
+            db.update_state(cache_key, {"ts": time.time(), "iv": iv})
+        return iv
+    except Exception:
+        return 0.0
+
+
 def bs_d1(S, K, T, r, sigma):
     return (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
 
@@ -420,7 +449,9 @@ class TQQQTacticalSniper:
             returns = tqqq_daily["close"].pct_change().dropna()
             rv20 = float(returns.tail(20).std() * np.sqrt(252))
             vix = setup.get("vix", 18.0)
-            iv = estimate_iv(rv20, vix)
+            # Try real Tradier IV first; fall back to RV20 proxy if unavailable.
+            real_iv = fetch_tqqq_atm_iv(db)
+            iv = real_iv if real_iv > 0 else estimate_iv(rv20, vix)
 
             dte = setup.get("real_dte", 15)
             T = dte / 365.0
@@ -438,6 +469,7 @@ class TQQQTacticalSniper:
 
             setup["bs_rv20"] = round(rv20 * 100, 1)
             setup["bs_iv_est"] = round(iv * 100, 1)
+            setup["bs_iv_source"] = "Tradier" if real_iv > 0 else "RV20 proxy"
             setup["bs_strike"] = strike
             setup["bs_delta"] = round(greeks["delta"], 3)
             setup["bs_gamma"] = round(greeks["gamma"], 4)
@@ -596,7 +628,7 @@ class TQQQTacticalSniper:
                 f"┣ Self-Derived Greeks (RV20-based, conviction cross-check):\n"
                 f"┃  Δ {setup['bs_delta']:+.2f} | Γ {setup['bs_gamma']:.4f} | "
                 f"Θ {setup['bs_theta']:+.3f}/day | Vega {setup['bs_vega']:.3f}\n"
-                f"┃  Strike ${setup['bs_strike']:.2f} | IV est {setup['bs_iv_est']:.1f}% (RV20 {setup['bs_rv20']:.1f}%) | "
+                f"┃  Strike ${setup['bs_strike']:.2f} | IV {setup['bs_iv_est']:.1f}% [{setup.get('bs_iv_source','proxy')}] RV20 {setup['bs_rv20']:.1f}% | "
                 f"Theo Price ${setup['bs_theo_price']:.2f}\n"
                 f"┣ Risk-Neutral Prob. ITM at Expiry: {setup['bs_prob_itm']:.1f}%\n"
                 f"┣ Breakeven: ${setup['bs_breakeven']:.2f} | ATR-Projected Move ({setup.get('real_dte', 15)}D): ${setup['expected_move']:.2f}\n"

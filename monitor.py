@@ -1351,6 +1351,24 @@ def send_daily_pulse(is_test=False):
         logger.error(f"Cornerstone ledger sweep failed: {e}")
 
     full_report, worst_tier = compute_cornerstone_reports()
+
+    # Append GEX context line (uses 1-hour DB cache — zero extra API calls in the loop)
+    try:
+        from analytics import HighFidelityAnalyticsEngine
+        gex = HighFidelityAnalyticsEngine().calculate_gex_profile("SPY")
+        if gex.get("market_state", "UNKNOWN") != "UNKNOWN":
+            flip = gex.get("flip_strike", 0.0)
+            pc = gex.get("pc_oi_ratio", 1.0)
+            gex_total = gex.get("gex_total")
+            gex_line = (
+                f"┣ SPY GEX: {gex['market_state']} | Flip ${flip:,.0f}"
+                + (f" | Net {gex_total:+.1f}B" if gex_total is not None else "")
+                + f"\n┣ P/C OI: {pc} — {gex['pc_tag']}\n"
+            )
+            full_report = gex_line + full_report
+    except Exception:
+        pass
+
     title = "☕️ Cornerstone Flowstate" + (" 🧪 TEST" if is_test else "")
     color = 0xe74c3c if worst_tier == "CRITICAL" else (0xf1c40f if worst_tier == "ELEVATED" else 0x2ecc71)
     dispatch_cornerstone_alert(title, full_report, color)

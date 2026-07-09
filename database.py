@@ -81,6 +81,17 @@ class EcosystemDatabase:
                         last_alert_dte INTEGER
                     )
                 """)
+                # Daily IV snapshot table — feeds real IVR after 30+ trading days.
+                # Populated via scheduler.py --mode store_daily_iv at 21:30 UTC.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS iv_daily (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        symbol TEXT NOT NULL,
+                        iv_value REAL NOT NULL,
+                        recorded_date TEXT NOT NULL,
+                        UNIQUE(symbol, recorded_date)
+                    )
+                """)
                 conn.commit()
 
                 # Graceful column migrations — try each; OperationalError means already exists.
@@ -447,3 +458,53 @@ class EcosystemDatabase:
                 return default
         except sqlite3.OperationalError:
             return default
+
+    # ── IV Daily snapshot — feeds real IVR after 30+ trading days ─────────────
+
+    def store_daily_iv(self, symbol: str, iv_value: float):
+        """Insert today's ATM IV for symbol (UPSERT — safe to call multiple times)."""
+        today = __import__("datetime").date.today().isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO iv_daily (symbol, iv_value, recorded_date) VALUES (?, ?, ?) "
+                    "ON CONFLICT(symbol, recorded_date) DO UPDATE SET iv_value=excluded.iv_value",
+                    (symbol, iv_value, today),
+                )
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.error(f"store_daily_iv failed for {symbol}: {e}")
+
+    def get_iv_history(self, symbol: str, days: int = 252) -> list:
+        """Return list of (iv_value,) rows for symbol, newest first, up to `days` rows."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT iv_value FROM iv_daily WHERE symbol = ? "
+                    "ORDER BY recorded_date DESC LIMIT ?",
+                    (symbol, days),
+                )
+                return cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+    def get_iv_rank(self, symbol: str) -> dict:
+        """
+        Compute IVR from stored history. Returns dict with ivr, days_history, reliable.
+        Reliable once ≥30 rows exist (roughly 6 trading weeks).
+        """
+        rows = self.get_iv_history(symbol, 252)
+        days = len(rows)
+        if days < 2:
+            return {"ivr": 0.0, "days_history": days, "reliable": False, "tag": f"BUILDING ({days}/30 days)"}
+        values = [float(r[0]) for r in rows]
+        # Current IV is the most recent stored value (not a live fetch — caller provides live IV)
+        current = values[0]
+        low = min(values)
+        high = max(values)
+        ivr = ((current - low) / (high - low) * 100) if high > low else 0.0
+        ivr = round(max(0.0, min(100.0, ivr)), 1)
+        tag = "LOW IVR" if ivr < 35 else ("ELEVATED IVR" if ivr > 60 else "MID IVR")
+        return {"ivr": ivr, "days_history": days, "reliable": days >= 30, "tag": tag, "current_iv": current}

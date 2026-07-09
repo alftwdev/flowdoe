@@ -214,7 +214,13 @@ def main():
             try:
                 morning_brief, morning_snap = engine.generate_market_analysis_morning_report()
                 if morning_brief and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", morning_brief, 0x1abc9c)
+                    # 4 Pillars header (Andy Tanner framework): orients every report around the
+                    # fundamental → technical → cash flow → risk decision sequence.
+                    pillars_header = (
+                        "**4 Pillars Framework** — Fundamental → Technical → Cash Flow → Risk\n"
+                        "─────────────────────────────────────────────────\n"
+                    )
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", pillars_header + morning_brief, 0x1abc9c)
                     dispatch_conviction_sync(engine, morning_snap, "morning")
             except Exception as e:
                 logger.error(f"Market analysis morning brief failed: {e}")
@@ -491,9 +497,11 @@ def main():
                                 f"┣ IV/HV Ratio: `{iv_hv:.2f}x` HV30 — selling premium at a `{(iv_hv - 1) * 100:.0f}%` statistical premium to realized vol\n"
                                 if iv_hv and iv_hv > 1.0 else ""
                             )
+                            ivr_src = f.get("ivr_source", "proxy")
+                            ivr_label = "IVR" if ivr_src == "Tradier" else "IVR est"
                             ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
-                                f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | IVR Proxy: `{f['ivr_proxy']:.0f}%`\n"
+                                f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | {ivr_label}: `{f['ivr_proxy']:.0f}%` [{ivr_src}]\n"
                                 f"{iv_context}"
                                 f"{setup_line}"
                                 f"{div_line}"
@@ -527,8 +535,10 @@ def main():
             except Exception as e:
                 logger.error(f"Tier 2 IV Rank screener failed: {e}")
 
-            # ── MODULE 2: WHEEL POSITION DTE COUNTDOWN ─────────────────────────
+            # ── MODULE 2: WHEEL POSITION MONITOR (DTE + P&L alerts) ────────────
             try:
+                from tradier_client import TradierClient
+                tc_wheel = TradierClient()
                 open_positions = engine.db.get_open_wheel_positions()
                 today = datetime.now().date()
                 for pos in open_positions:
@@ -536,18 +546,67 @@ def main():
                     dte = (exp_date - today).days
                     if dte < 0:
                         continue
+
                     alert_dte = None
+                    urgency = ""
                     if dte <= 14 and pos.get("last_alert_dte") != 14 and (pos.get("last_alert_dte") is None or pos["last_alert_dte"] > 14):
                         alert_dte = 14
                         urgency = "🔴 CLOSE/ROLL DEADLINE"
                     elif dte <= 21 and pos.get("last_alert_dte") is None:
                         alert_dte = 21
                         urgency = "🟡 ROLL DECISION WINDOW"
+
+                    # P&L check via Tradier current market price (50% profit / 200% loss triggers)
+                    pnl_line = ""
+                    try:
+                        if tc_wheel.api_key:
+                            csp_now = tc_wheel.find_csp_strike(
+                                pos["symbol"], target_delta=0.20,
+                                dte_min=max(1, dte - 3), dte_max=dte + 3,
+                            )
+                            if csp_now and csp_now.get("mid"):
+                                current_val = csp_now["mid"]
+                                entry_prem = pos.get("premium_collected", 0)
+                                if entry_prem > 0:
+                                    pct_decay = (entry_prem - current_val) / entry_prem * 100
+                                    pnl_line = f"┣ Current value: `${current_val:.2f}` | Decay: `{pct_decay:.0f}%`\n"
+                                    # 50% profit alert
+                                    if pct_decay >= 50:
+                                        profit_key = f"wheel_profit50_{pos['id']}"
+                                        if not engine.db.get_state(profit_key):
+                                            engine.db.update_state(profit_key, True)
+                                            profit_payload = (
+                                                f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
+                                                f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
+                                                f"┣ Entry premium: `${entry_prem:.2f}` | Now: `${current_val:.2f}`\n"
+                                                f"┣ Profit: `{pct_decay:.0f}%` of max\n"
+                                                f"┗ 🟢 50% PROFIT TARGET HIT — consider closing early (Tasty rule)"
+                                            )
+                                            if WEBHOOK_INCOME:
+                                                send_essentials_embed(WEBHOOK_INCOME, "WHEEL | 50% Profit Target", profit_payload, 0x2ecc71)
+                                    # 200% loss alert (position value 3x entry = deep ITM breach)
+                                    elif pct_decay <= -200:
+                                        loss_key = f"wheel_loss200_{pos['id']}"
+                                        if not engine.db.get_state(loss_key):
+                                            engine.db.update_state(loss_key, True)
+                                            loss_payload = (
+                                                f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
+                                                f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
+                                                f"┣ Entry premium: `${entry_prem:.2f}` | Now: `${current_val:.2f}`\n"
+                                                f"┣ Current loss: `{abs(pct_decay):.0f}%` of premium received\n"
+                                                f"┗ 🔴 DEEP ITM BREACH — roll down+out for credit or prep for assignment"
+                                            )
+                                            if WEBHOOK_INCOME:
+                                                send_essentials_embed(WEBHOOK_INCOME, "WHEEL | Deep ITM Alert", loss_payload, 0xe74c3c)
+                    except Exception:
+                        pass
+
                     if alert_dte is not None:
                         dte_payload = (
                             f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
                             f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
                             f"┣ Premium Collected: `${pos['premium_collected']:.2f}` x {pos['contracts']}\n"
+                            f"{pnl_line}"
                             f"┗ {urgency}"
                         )
                         if WEBHOOK_INCOME:
@@ -555,7 +614,7 @@ def main():
                             engine.db.mark_wheel_position_alerted(pos["id"], alert_dte)
                             logger.info(f"Wheel DTE alert dispatched: {pos['symbol']} at {alert_dte} DTE.")
             except Exception as e:
-                logger.error(f"Wheel position DTE countdown failed: {e}")
+                logger.error(f"Wheel position monitor failed: {e}")
 
         elif args.mode == "wheel_position":
             if args.action == "open":
@@ -924,6 +983,80 @@ def main():
                     logger.info("Pattern scan: no qualifying patterns returned (may be outside market hours).")
             except Exception as e:
                 logger.error(f"Futures social scan failed: {e}")
+
+        # ── STORE DAILY IV — 21:30 UTC cron, saves ATM IV for IVR tracker ─────
+        elif args.mode == "store_daily_iv":
+            try:
+                from tradier_client import TradierClient
+                from database import EcosystemDatabase
+                tc = TradierClient()
+                db_iv = EcosystemDatabase()
+                UNIVERSE = [
+                    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+                    "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+                    "TSLA", "COIN", "SOFI", "PLTR",
+                    "SPY", "QQQ", "IWM", "GLD", "XLE",
+                    "TQQQ", "MAIN", "MLPI", "KQQQ", "TDAQ",
+                ]
+                stored, skipped = 0, 0
+                for sym in UNIVERSE:
+                    try:
+                        iv = tc.get_atm_iv(sym, option_type="call", dte_min=20, dte_max=50)
+                        if iv > 0:
+                            db_iv.store_daily_iv(sym, iv)
+                            stored += 1
+                        else:
+                            skipped += 1
+                    except Exception as sym_e:
+                        logger.warning(f"store_daily_iv: skipped {sym}: {sym_e}")
+                        skipped += 1
+                logger.info(f"store_daily_iv: stored={stored} skipped={skipped}")
+            except Exception as e:
+                logger.error(f"store_daily_iv failed: {e}")
+
+        # ── SPX 0DTE INCOME — defined-risk iron condor scout → #options-wheel ──
+        elif args.mode == "spx_income":
+            try:
+                from tradier_client import TradierClient
+                from analytics import HighFidelityAnalyticsEngine
+                engine = HighFidelityAnalyticsEngine()
+                tc = TradierClient()
+
+                # Gate: VIXY z-score < 0.5 + SPY breadth > 60% (low-vol only)
+                vixy_price, vixy_z = engine.fetch_vixy_proxy()
+                snap = engine._gather_cross_asset_snapshot()
+                breadth = snap.get("breadth", 0.5)
+
+                if vixy_z >= 0.5:
+                    logger.info(f"SPX income: gated — VIXY z {vixy_z:+.2f}σ (need < 0.5). No dispatch.")
+                elif breadth < 0.60:
+                    logger.info(f"SPX income: gated — breadth {breadth:.0%} (need > 60%). No dispatch.")
+                else:
+                    condor = tc.get_spx_0dte_condor(wing_width=5, target_delta=0.10)
+                    if not condor.get("valid"):
+                        logger.info(f"SPX income: {condor.get('reason','no valid condor')}")
+                    else:
+                        rr = condor["rr_ratio"]
+                        payload = (
+                            f"**SPX 0DTE Iron Condor Scout**\n"
+                            f"┣ Expiration: {condor['expiration']} (0DTE)\n"
+                            f"┣ Call side: Sell {condor['call_sell']:.0f} / Buy {condor['call_buy']:.0f}\n"
+                            f"┣ Put side:  Sell {condor['put_sell']:.0f} / Buy {condor['put_buy']:.0f}\n"
+                            f"┣ Credit: ${condor['credit']:.2f} (${condor['credit_dollars']} per spread)\n"
+                            f"┣ Max risk: ${condor['max_risk']:.0f} | R:R = 1:{rr}\n"
+                            f"┣ Gate: VIXY z {vixy_z:+.2f}σ ✅ | Breadth {breadth:.0%} ✅\n"
+                            f"┗ Defined risk — max loss is the wing width minus credit collected.\n"
+                            f"─────────────────────────\n"
+                            f"4 Pillars: Cash Flow play — premium expires worthless if SPX stays between wings.\n"
+                            f"Not financial advice — educational/informational only."
+                        )
+                        color = 0x2ecc71 if rr <= 3 else 0xf1c40f
+                        WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
+                        if WEBHOOK_OPTIONS:
+                            send_essentials_embed(WEBHOOK_OPTIONS, "SPX Income | 0DTE Condor", payload, color)
+                            logger.info(f"SPX income condor dispatched: credit ${condor['credit']:.2f}, R:R 1:{rr}")
+            except Exception as e:
+                logger.error(f"SPX income mode failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")
