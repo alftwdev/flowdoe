@@ -49,10 +49,9 @@ def dispatch_conviction_sync(engine, snap, report_label):
     footer = f"┗ Master Conviction: {bias} (score {score:+d}/4)\n*Full cross-asset breakdown in Market Analysis.*"
 
     targets = {
-        WEBHOOK_FUTURES: (
-            f"{header}┣ SPY POC ${snap['futures_poc']:,.2f} | VIXY z {snap['vixy_z']:+.2f}σ\n"
-            f"┣ Breadth {snap['breadth']:.0%} | Risk Regime: {snap['risk_regime']}\n{footer}"
-        ),
+        # WEBHOOK_FUTURES intentionally omitted — futures trade ~23h/day; an
+        # "EOD" equity-session conviction sync landing mid-futures-session is
+        # contextually wrong and adds noise to a channel with its own cadence.
         WEBHOOK_CRYPTO: (
             f"{header}┣ Fear & Greed: {snap['fng']['value']} ({snap['fng']['label']})\n" if snap.get("fng") else header
         ) + f"┣ Macro Risk Regime: {snap['risk_regime']}\n{footer}",

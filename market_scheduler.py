@@ -64,26 +64,33 @@ FIRE_WINDOW_MINUTES = 2
 
 SCHEDULE = [
     # UTC    key                    script          args                   wkdays
-    (12, 45, "morning",             "scheduler",    ["--mode", "morning"],         True),
+    # ── Futures: 4 session windows ──────────────────────────────────────────────
+    # CME equity futures trade ~23h/day (Sun 18:00 UTC – Fri 21:00 UTC).
+    # Four boards cover Asian close/European open, US pre-market, RTH open, PM.
+    ( 7,  0, "cross_asset_asia",   "cross_asset",  [],                            True),  # 21:00 HST (Asian close / EU pre)
+    (12, 45, "cross_asset_premarket","cross_asset", [],                            True),  # 02:45 HST (US pre-market)
+    (14,  0, "cross_asset_am",     "cross_asset",  [],                            True),  # 04:00 HST (cash open)
+    (18, 45, "cross_asset_pm",     "cross_asset",  [],                            True),  # 08:45 HST (mid-session)
+    # ── Market Analysis & Macro ──────────────────────────────────────────────────
+    (12, 50, "morning",            "scheduler",    ["--mode", "morning"],         True),
     # gex removed — calculate_gex_profile() returns 0.0 at this Twelve Data tier;
     # output is always UNKNOWN/suppressed and wastes a subprocess launch.
-    (13, 28, "macro_am",            "scheduler",    ["--mode", "macro"],           True),
-    (13, 35, "trending_plays",      "scheduler",    ["--mode", "trending_plays"],  True),
-    (13, 40, "futures_social",      "scheduler",    ["--mode", "futures_social"],  True),
-    (13, 45, "wheel_signals",       "scheduler",    ["--mode", "wheel_signals"],   True),
-    (13, 50, "crypto_social",       "scheduler",    ["--mode", "crypto_social"],   True),
-    (14,  0, "cross_asset_am",      "cross_asset",  [],                            True),
+    (13, 28, "macro_am",           "scheduler",    ["--mode", "macro"],           True),
+    # ── Signals & Income ────────────────────────────────────────────────────────
+    (13, 35, "trending_plays",     "scheduler",    ["--mode", "trending_plays"],  True),
+    (13, 40, "futures_social",     "scheduler",    ["--mode", "futures_social"],  True),
+    (13, 45, "wheel_signals",      "scheduler",    ["--mode", "wheel_signals"],   True),
+    (13, 50, "crypto_social",      "scheduler",    ["--mode", "crypto_social"],   True),
     # options_flow (×3) removed — GEX always returns UNKNOWN at this plan tier;
     # all three runs fell through to the fallback "Options Market Flowstate" embed
     # with SPY Gamma Posture: UNKNOWN and GEX Flip Level: $0.00. Zero signal value.
-    (17, 30, "market_intraday",     "scheduler",    ["--mode", "market_intraday"], True),
-    (18,  5, "income",              "scheduler",    ["--mode", "income"],          True),
-    (18, 15, "iv_crush",            "scheduler",    ["--mode", "iv_crush"],        True),
-    (18, 45, "cross_asset_pm",      "cross_asset",  [],                            True),
-    (20, 14, "post_market",         "scheduler",    ["--mode", "post_market"],     True),
-    (20, 16, "eod",                 "scheduler",    ["--mode", "eod"],             True),
-    (20, 30, "macro_pm",            "scheduler",    ["--mode", "macro"],           True),
-    (20, 30, "weekly_scorecard",    "scheduler",    ["--mode", "weekly_scorecard"],True),
+    (17, 30, "market_intraday",    "scheduler",    ["--mode", "market_intraday"], True),
+    (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
+    (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
+    (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
+    (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),
+    (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
+    (20, 30, "weekly_scorecard",   "scheduler",    ["--mode", "weekly_scorecard"],True),
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
