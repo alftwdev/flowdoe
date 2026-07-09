@@ -763,6 +763,16 @@ class HighFidelityAnalyticsEngine:
         today = datetime.now()
         DELTA_MIN, DELTA_MAX = 0.20, 0.35
 
+        # Build Tradier client once per screener run (not once per symbol)
+        _tc_ivr = None
+        try:
+            from tradier_client import TradierClient
+            _tc_ivr = TradierClient()
+            if not _tc_ivr.api_key:
+                _tc_ivr = None
+        except Exception:
+            pass
+
         for symbol in universe:
             try:
                 hv30 = self.calculate_historical_volatility(symbol, lookback=30)
@@ -791,10 +801,8 @@ class HighFidelityAnalyticsEngine:
                 ivr_val = 0.0
                 ivr_source = "proxy"
                 try:
-                    from tradier_client import TradierClient
-                    tc = TradierClient()
-                    if tc.api_key:
-                        ivr_data = tc.get_iv_rank(symbol, self.db)
+                    if _tc_ivr:
+                        ivr_data = _tc_ivr.get_iv_rank(symbol, self.db)
                         if ivr_data.get("reliable"):
                             ivr_val = ivr_data["ivr"]
                             ivr_source = "Tradier"
@@ -1068,6 +1076,16 @@ class HighFidelityAnalyticsEngine:
         DELTA_MIN, DELTA_MAX = 0.20, 0.35
         IVR_MIN, IVR_MAX = 20.0, 85.0
 
+        # Build Tradier client once per screener run (not once per symbol)
+        _tc_wheel = None
+        try:
+            from tradier_client import TradierClient
+            _tc_wheel = TradierClient()
+            if not _tc_wheel.api_key:
+                _tc_wheel = None
+        except Exception:
+            pass
+
         for symbol in WHEEL_UNIVERSE:
             try:
                 # ── 1. TIME SERIES: Spot, SMA50, SMA200, RSI-14, BB%B ──────
@@ -1197,10 +1215,8 @@ class HighFidelityAnalyticsEngine:
                 ivr_proxy = 0.0
                 ivr_source = "proxy"
                 try:
-                    from tradier_client import TradierClient
-                    _tc = TradierClient()
-                    if _tc.api_key:
-                        _ivr = _tc.get_iv_rank(symbol, self.db)
+                    if _tc_wheel:
+                        _ivr = _tc_wheel.get_iv_rank(symbol, self.db)
                         if _ivr.get("reliable"):
                             ivr_proxy = _ivr["ivr"]
                             ivr_source = "Tradier"
