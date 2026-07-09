@@ -87,9 +87,21 @@ Margin freed → reborrow → buy more CLM/CRF or Tier 2
 ## 3. Options Strategy
 
 ### Wheel (0.20 delta, 30–45 DTE)
-**Underlyings:** TDAQ, MLPI, MAIN, KQQQ
+**Underlyings:** Dynamic 25-name universe (not Tier 2 long holds — those are for dividends, not wheeling)
+```python
+WHEEL_UNIVERSE = [
+    # CORE
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+    # INCOME
+    "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+    # GROWTH
+    "TSLA", "COIN", "SOFI", "PLTR",
+    # SECTOR
+    "SPY", "QQQ", "IWM", "GLD", "XLE",
+]
 ```
-STEP 1 — Entry filter: IV Rank > 30, bid/ask < $0.10, no earnings in window
+```
+STEP 1 — Entry filter: IVR > 35%, (ask-bid)/mid < 10%, no earnings within 45 days
 STEP 2 — Sell CSP: 0.20 delta, 30–45 DTE, premium ≥ 1% of strike
 STEP 3 — Manage: Close at 50% profit | Roll at 21 DTE if untested
           If breached: roll down+out for credit, or take assignment → sell CC
@@ -98,18 +110,36 @@ STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 ```
 **Premium income → margin paydown bucket**
 
+**Current data limitation:** IVR and delta are proxy-calculated (HV30-based). With Tradier ($10/mo), these become real options chain values — accurate 0.20 delta strikes, real bid/ask spread check, real OI/volume for liquidity confirmation. Build 52-week IVR by storing daily IV in DB; after 252 days it's a full historical rank.
+
 ### TQQQ Sniper (BTO Calls + Puts)
 **Calls (directional, bullish):**
 - QQQ above 21 EMA + VIX < 20
 - Strike: 10–15% OTM | DTE: 90–180 days
 - Size: max 5% of portfolio | Scale: 50% entry → add 50% on confirmation
 - Exit: 100% gain OR 14 DTE | Stop: 40% loss → close
+- **With Tradier:** replace HV×1.15 IV proxy with real ATM IV from TQQQ chain; require volume > 100 contracts and OI > 500 at target strike
 
-**Puts (insurance, always active):**
-- Always 1 active put open — 30 DTE, rinse & repeat (homeowners insurance model)
-- Strike: 10% OTM | Roll at 14 DTE
+**Puts (insurance / margin protection — homeowners insurance model):**
+- Always 1 active put open — 30 DTE, rinse & repeat
+- Roll at 14 DTE regardless of profit/loss
 - Budget: ≤ 0.5% of portfolio/month
 - If VIX > 30 → close puts at profit → rotate into TQQQ calls (fear peak = call entry)
+
+**Strike distance tied to margin cushion, not a fixed %:**
+```
+Conservative margin (< 15% utilization) → 10% OTM (insures against 2008-style 30-40% crash)
+Moderate margin (15–25% utilization)    →  7% OTM (tighter trigger, more cushion needed)
+Aggressive margin (25%+ utilization)    →  5% OTM (must catch danger zone before margin call)
+Rule: run your current equity ratio → find max tolerable decline → set strike inside that threshold
+```
+**Basis risk caveat:** SPY puts are used for liquidity (CLM/CRF have thin-to-no options markets).
+SPY protects against broad market crashes. It does NOT protect against CEF-specific events
+(distribution cut, rights offering, premium blowout) where CLM/CRF drops while SPY shrugs.
+This is real basis risk — "feels insured" ≠ "insured." monitor.py's EDGAR + dark pool + premium
+compression detection covers the CLM/CRF-specific risk that SPY puts cannot touch.
+Sequencing: Tier 2 diversification addresses concentration risk more than a SPY put would.
+SPY puts are best applied at the ~$100K+ portfolio stage using your actual margin-buffer number.
 
 **Seasonal rules (March & September):**
 - Calls: reduce size 50%, wait for 3 consecutive green days before entering
@@ -125,7 +155,7 @@ STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 | #announcements | WEBHOOK_ANNOUNCEMENTS | announcements.py | Free tier scorecard/bait — conversion engine |
 | #cornerstone | WEBHOOK_CORNERSTONE_RO | monitor.py | CLM/CRF protection engine |
 | #market-analysis | WEBHOOK_MARKET_ANALYSIS | market_analysis.py | 0800 HST premarket command center |
-| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board, ES/NQ market profile deep-dive, Initial Balance breakout scanner |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day: Asian close 07:00, US pre-market 12:45, cash open 14:00, mid-session 18:45 UTC) + IB breakout scanner. No conviction sync here — futures trade 23h/day, equity EOD labels are wrong context. |
 | #crypto | WEBHOOK_CRYPTO | crypto.py | BTC/ETH spot, Fear & Greed, on-chain |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | options.py | Wheel strategy + TQQQ sniper signals |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode trending_plays`) | Social sentiment scanner (StockTwits + Reddit WSB + Finviz) → top 5 options plays with BTO setup when HIGH conviction |
@@ -265,7 +295,7 @@ margin_rate = 7.25                      # benchmark margin cost %
 | `market_analysis.py` | 🔲 To build | 0800 HST premarket morning report |
 | `cross_asset.py` | ✅ Live | Futures board, ES/NQ market profile + CVD + structure, Initial Balance breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher — morning/eod/income/wheel_signals/wheel_position/iv_crush/gex/etc. |
+| `scheduler.py` | ✅ Live | Central dispatcher — morning/eod/income/wheel_signals/wheel_position/iv_crush/trending_plays/macro/etc. `gex` and `options_flow` modes removed — `calculate_gex_profile()` returns 0.0 at current Twelve Data tier; all three options_flow runs fell through to fallback with GEX: UNKNOWN. Re-enable when Tradier is wired in. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts, VIXY real-time price → DB for monitor.py. REST poller (StructuralBreakoutAgent) removed — was burning 2,880 API calls/day with no unique value vs tqqq.py. |
 | `tqqq.py` | ✅ Live | TQQQ directional sniper + standalone insurance-put renewal clock |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
@@ -319,13 +349,30 @@ WEBHOOK_FOREX=               # key retained, channel deprecated
 ---
 
 ## 8. Infrastructure & Workflow
-- **Data source:** Twelve Data (commercially licensed)
+- **Data source:** Twelve Data (commercially licensed) — price, OHLCV, RSI, time series, EDGAR
+- **Planned add:** Tradier ($10/mo) — full options chains with real IV, delta, OI, bid/ask per strike
 - **Runtime:** PythonAnywhere always-on task or tmux session
 - **Notification stack:** Discord webhooks + Pushover + Gmail SMTP (personal + work)
 - **Local dev:** MacBook + tmux + neovim
 - **Deploy:** `git push origin main` → PythonAnywhere `git pull origin main`
 - **Test:** `python monitor.py test` (fires once, skips date gate)
 - **Force:** `python monitor.py force` (same as test)
+
+### Data Source Gap Map
+| Need | Current | With Tradier |
+|------|---------|-------------|
+| Options IV (wheel IVR) | HV30 × 1.15 proxy ⚠️ | Real ATM IV from chain ✅ |
+| Delta at strike | Formula approximation ⚠️ | Real chain delta ✅ |
+| Bid/ask spread check | Estimated ⚠️ | Real market prices ✅ |
+| OI / volume confirmation | Proxy range ⚠️ | Real per-strike OI ✅ |
+| IV Rank (52-week) | Not available ❌ | Build by storing daily IV in DB ✅ |
+| GEX (SPY dealer flow) | Returns 0.0 — disabled ❌ | Real strike-by-strike OI → real GEX ✅ |
+| CLM/CRF options | N/A (CEF, thin market) | N/A — monitor.py covers via EDGAR ✅ |
+
+**GEX note:** `calculate_gex_profile()` was disabled (returns 0.0 at Twelve Data tier). With Tradier
+providing real SPY OI per strike, GEX becomes a genuine signal: when spot crosses the gamma flip,
+dealer hedging switches from suppressing volatility to amplifying it — early warning for CLM/CRF
+premium compression events. Re-enable once Tradier is wired in.
 
 ---
 
@@ -376,11 +423,22 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 ---
 
 ## 12. Next Priorities for Claude Code Sessions
+
+### Data Infrastructure
+- [ ] **Tradier integration ($10/mo)** — wire bearer token into `.env`, build `tradier_client.py` helper; replace HV30 IV proxy in `analytics.py` with real chain data; unlock real delta/OI for wheel scanner and TQQQ sniper; re-enable `gex` mode in `market_scheduler.py` once real SPY OI available
+- [ ] **IVR tracker** — store daily ATM IV per symbol in DB; after 30 days = usable IVR; after 252 days = full 52-week rank; replaces current proxy permanently
+
+### Scripts to Build
 - [ ] `market_analysis.py` — 0800 HST premarket report aggregating all channel feeds
-- [ ] `/CL` `/GC` futures-channel content is still just the steady-cadence board — no deep-dive/breakout module for them yet (ES/NQ have one via `cross_asset.py`)
 - [ ] `crypto.py` — BTC/ETH + Fear & Greed + funding rates + NVDA/BTC correlation tracker
 - [ ] `announcements.py` — weekly accuracy scorecard, prediction vs actual grader
+- [ ] `/CL` `/GC` deep-dive/breakout module — futures channel currently board-only for commodities; ES/NQ have full profile via `cross_asset.py`
+
+### Options & Automation
+- [ ] **SPY put insurance implementation** — log puts via `tqqq.py --log-put`; strike distance tied to live margin utilization ratio (not fixed 10%); re-evaluate at ~$100K portfolio stage
+- [ ] TQQQ insurance leg: automate "put pays out → buy TQQQ at discount → sell CCs on it" (only 14 DTE renewal clock exists now)
+- [ ] Wheel position entry still manual-only (`scheduler.py --mode wheel_position`) — no brokerage API
+
+### Monetization
 - [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #announcements
 - [ ] Subscriber tier gating — lock premium channels, route free tier to #announcements only
-- [ ] TQQQ insurance leg: automate "put pays out → buy TQQQ at discount → sell CCs on it" (currently only the 14 DTE renewal clock exists, see Section 5b)
-- [ ] Wheel position entry currently manual-only (`scheduler.py --mode wheel_position`) — no brokerage API to auto-detect fills
