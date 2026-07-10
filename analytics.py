@@ -3350,3 +3350,190 @@ class HighFidelityAnalyticsEngine:
         except Exception as e:
             logger.error(f"[NVDA/BTC Corr] Failed: {e}")
             return {}
+
+    # ── Tier 2 Daily Income Briefing ─────────────────────────────────────────
+    # Fires unconditionally every market day — keeps #dividend-ccetfs alive even
+    # when no screener conditions are met (low IV, no ex-div events, quiet tape).
+    # Competes directly with InvestWithHenry / SpencerInvests daily income posts.
+
+    TIER2_HOLDS = [
+        {"symbol": "MAIN",  "name": "Main Street Capital",        "type": "BDC",      "freq": "Monthly",   "drip": False},
+        {"symbol": "MLPI",  "name": "ETRACS Alerian MLP CC ETF",  "type": "MLP/CC ETF","freq": "Monthly",  "drip": False},
+        {"symbol": "TDAQ",  "name": "TappAlpha 0DTE NASDAQ CC",   "type": "CC ETF",   "freq": "Monthly",   "drip": False},
+        {"symbol": "KQQQ",  "name": "Kurv Tech Titans CC",        "type": "CC ETF",   "freq": "Monthly",   "drip": False},
+    ]
+    CORNERSTONE_HOLDS = [
+        {"symbol": "CLM",   "nav_ticker": "XCLMX", "default_nav": 6.45, "annual_dist": 0.1215},
+        {"symbol": "CRF",   "nav_ticker": "XCRFX", "default_nav": 6.30, "annual_dist": 0.1176},
+    ]
+
+    def generate_tier2_income_briefing(self) -> str:
+        """
+        Daily income pulse — always posts to #dividend-ccetfs regardless of screener results.
+        Shows Tier 2 current yield at today's price + ex-div countdown, and CLM/CRF NAV/premium.
+        This is the post InvestWithHenry and SpencerInvests publish manually every day — we automate it.
+        """
+        today = datetime.now()
+        today_str = today.strftime("%Y-%m-%d")
+
+        # ── Tier 2: MAIN / MLPI / TDAQ / KQQQ ───────────────────────────────
+        tier2_symbols = [h["symbol"] for h in self.TIER2_HOLDS]
+        quotes = self._fetch_twelve_data_quotes(tier2_symbols)
+        tier2_lines = []
+        next_events = []
+
+        for hold in self.TIER2_HOLDS:
+            sym = hold["symbol"]
+            try:
+                q = quotes.get(sym, {})
+                spot = float(q.get("close", 0.0))
+                if spot == 0.0:
+                    continue
+                div_history = self._fetch_dividend_history(sym, span="2Y")
+                next_ex, amount, _ = self._project_next_ex_date(div_history, today)
+                if amount > 0 and spot > 0:
+                    ann_yield = (amount * 12) / spot * 100
+                else:
+                    ann_yield = 0.0
+
+                if next_ex:
+                    days = (next_ex - today).days
+                    urgency = "🔥" if days <= 3 else ("⚡" if days <= 7 else ("📅" if days <= 14 else ""))
+                    ex_str = f"Ex-div: `{next_ex.strftime('%b %d')}` ({days}d) {urgency}".strip()
+                    if days <= 14:
+                        next_events.append((days, sym, amount, next_ex.strftime("%b %d")))
+                else:
+                    ex_str = "Ex-div: TBD"
+
+                amount_str = f"${amount:.4f}/share" if amount > 0 else "—"
+                tier2_lines.append(
+                    f"┣ **{sym}** `${spot:.2f}` | Yield `{ann_yield:.1f}%` | {amount_str} | {ex_str}"
+                )
+            except Exception as e:
+                logger.warning(f"Tier 2 briefing failed for {sym}: {e}")
+
+        # ── Cornerstone: CLM / CRF NAV/premium tracker ───────────────────────
+        cs_lines = []
+        try:
+            cs_symbols = [h["symbol"] for h in self.CORNERSTONE_HOLDS]
+            cs_quotes = self._fetch_twelve_data_quotes(cs_symbols)
+            for hold in self.CORNERSTONE_HOLDS:
+                sym = hold["symbol"]
+                q = cs_quotes.get(sym, {})
+                price = float(q.get("close", 0.0))
+                if price == 0.0:
+                    continue
+                # Fetch estimated NAV (XCLMX / XCRFX mutual fund proxy)
+                try:
+                    nav_data = self._execute_query("price", {"symbol": hold["nav_ticker"]})
+                    nav = float(nav_data.get("price", hold["default_nav"])) if nav_data else hold["default_nav"]
+                except Exception:
+                    nav = hold["default_nav"]
+
+                premium = ((price - nav) / nav) * 100 if nav > 0 else 0.0
+                ann_yield = (hold["annual_dist"] / price) * 100 if price > 0 else 0.0
+
+                # 30-day average premium from DB (stored by monitor.py)
+                avg_key = f"clm_crf_avg_premium_{sym}"
+                avg_prem = self.db.get_state(avg_key)
+                trend_str = ""
+                if avg_prem is not None:
+                    diff = premium - float(avg_prem)
+                    trend_str = f" (30D avg `{float(avg_prem):.1f}%`, `{diff:+.1f}%` vs avg)"
+
+                if premium > 20:
+                    prem_tag = "EXTENDED — wait for pullback"
+                elif premium > 15:
+                    prem_tag = "HIGH — accumulate cautiously"
+                elif premium < 5:
+                    prem_tag = "NEAR NAV — strong DRIP entry"
+                else:
+                    prem_tag = "normal range"
+
+                drip_yield = (hold["annual_dist"] / nav) * 100 if nav > 0 else 0.0
+                cs_lines.append(
+                    f"┣ **{sym}** `${price:.2f}` | NAV est. `${nav:.2f}` | Premium `{premium:.1f}%` {trend_str}\n"
+                    f"┃  Yield at price `{ann_yield:.1f}%` | DRIP yield at NAV `{drip_yield:.1f}%` | {prem_tag}"
+                )
+                # Store today's premium in DB for trend tracking
+                self.db.update_state(f"clm_crf_premium_{sym}_{today_str}", premium)
+        except Exception as e:
+            logger.warning(f"Cornerstone NAV section failed: {e}")
+
+        # ── Next income event summary ─────────────────────────────────────────
+        next_events.sort()
+        next_line = ""
+        if next_events:
+            evt = next_events[0]
+            next_line = f"\n┗ **Next income:** {evt[1]} ex-div `{evt[3]}` (${evt[2]:.4f}/share) — {evt[0]} days"
+        elif tier2_lines:
+            next_line = "\n┗ No ex-div events in the next 14 days — all positions accumulating"
+
+        t2_block = "\n".join(tier2_lines) if tier2_lines else "┣ Tier 2 data unavailable"
+        cs_block = "\n".join(cs_lines) if cs_lines else "┣ Cornerstone data unavailable"
+
+        return (
+            f"**TIER 2 INCOME HOLDS** (cash dividends → margin paydown)\n"
+            f"{t2_block}\n\n"
+            f"**CORNERSTONE** (DRIP at NAV — never interrupted)\n"
+            f"{cs_block}"
+            f"{next_line}"
+        )
+
+    def detect_new_distributions(self) -> list:
+        """
+        Compares the most recent dividend record in Twelve Data history against the last
+        date cached in DB. If a new distribution has posted since the last check, returns
+        a list of dicts {symbol, ex_date, amount, yield_at_price, days_since_last}.
+        Used to fire "distribution posted" alerts in #dividend-ccetfs.
+        """
+        monitor_universe = [
+            {"symbol": "MAIN",  "freq_mult": 12},
+            {"symbol": "MLPI",  "freq_mult": 12},
+            {"symbol": "TDAQ",  "freq_mult": 12},
+            {"symbol": "KQQQ",  "freq_mult": 12},
+            {"symbol": "CLM",   "freq_mult": 12},
+            {"symbol": "CRF",   "freq_mult": 12},
+        ]
+        new_distributions = []
+        quotes = self._fetch_twelve_data_quotes([h["symbol"] for h in monitor_universe])
+
+        for hold in monitor_universe:
+            sym = hold["symbol"]
+            try:
+                history = self._fetch_dividend_history(sym, span="6M")
+                if not history:
+                    continue
+                latest = history[0]
+                latest_date = latest.get("ex_date", "")
+                if not latest_date:
+                    continue
+
+                cache_key = f"last_known_div_date_{sym}"
+                last_known = self.db.get_state(cache_key, "")
+
+                if latest_date != last_known:
+                    self.db.update_state(cache_key, latest_date)
+                    if last_known:
+                        amount = float(latest.get("amount", 0.0))
+                        q = quotes.get(sym, {})
+                        spot = float(q.get("close", 0.0))
+                        ann_yield = (amount * hold["freq_mult"]) / spot * 100 if spot > 0 and amount > 0 else 0.0
+                        try:
+                            prev_date = datetime.strptime(last_known, "%Y-%m-%d")
+                            curr_date = datetime.strptime(latest_date, "%Y-%m-%d")
+                            days_since = (curr_date - prev_date).days
+                        except Exception:
+                            days_since = None
+                        new_distributions.append({
+                            "symbol":       sym,
+                            "ex_date":      latest_date,
+                            "amount":       amount,
+                            "spot":         spot,
+                            "yield_annual": ann_yield,
+                            "days_since":   days_since,
+                        })
+            except Exception as e:
+                logger.warning(f"Distribution check failed for {sym}: {e}")
+
+        return new_distributions

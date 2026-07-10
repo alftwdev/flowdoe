@@ -224,6 +224,19 @@ def main():
                     dispatch_conviction_sync(engine, morning_snap, "morning")
             except Exception as e:
                 logger.error(f"Market analysis morning brief failed: {e}")
+                try:
+                    import requests as _req
+                    _po_token = os.getenv("PUSHOVER_API_TOKEN")
+                    _po_user  = os.getenv("PUSHOVER_USER_KEY")
+                    if _po_token and _po_user:
+                        _req.post("https://api.pushover.net/1/messages.json", data={
+                            "token": _po_token, "user": _po_user,
+                            "title": "⚠️ Morning Brief FAILED",
+                            "message": f"market_analysis morning brief exception: {e}",
+                            "priority": 1,
+                        }, timeout=10)
+                except Exception:
+                    pass
 
             # ── OPTIONS CHANNEL: Pre-Market GEX + VIX Brief ──────────────
             # Gives options traders their day-start context before the open.
@@ -455,6 +468,36 @@ def main():
             except Exception as e:
                 logger.error(f"New income ETF screener segment failed: {e}")
 
+            # ── SEGMENT 3: TIER 2 INCOME BRIEFING (always posts) ──────────────
+            # Fires unconditionally — keeps #dividend-ccetfs alive even when screeners
+            # find nothing. Competes with InvestWithHenry / SpencerInvests daily posts.
+            try:
+                briefing = engine.generate_tier2_income_briefing()
+                if briefing and WEBHOOK_INCOME:
+                    send_essentials_embed(WEBHOOK_INCOME, "💰 DAILY INCOME BRIEFING | Tier 2 + Cornerstone", briefing, 0x27ae60)
+                    logger.info("Daily income briefing dispatched.")
+            except Exception as e:
+                logger.error(f"Daily income briefing failed: {e}")
+
+            # ── SEGMENT 4: DISTRIBUTION POSTED DETECTOR ────────────────────────
+            # Fires only when a new distribution is detected vs. last cached date.
+            try:
+                new_divs = engine.detect_new_distributions()
+                for d in new_divs:
+                    div_payload = (
+                        f"**{d['symbol']}** distribution posted\n"
+                        f"┣ Ex-Date: `{d['ex_date']}`\n"
+                        f"┣ Amount: `${d['amount']:.4f}/share`\n"
+                        f"┣ Current Price: `${d['spot']:.2f}` | Annualized Yield: `{d['yield_annual']:.1f}%`\n"
+                        + (f"┣ Days since last: `{d['days_since']}` days\n" if d.get("days_since") else "")
+                        + f"┗ Income confirmed — add to velocity banking paydown log"
+                    )
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(WEBHOOK_INCOME, f"📬 DISTRIBUTION POSTED | {d['symbol']}", div_payload, 0x2ecc71)
+                        logger.info(f"Distribution alert dispatched: {d['symbol']} ${d['amount']:.4f} on {d['ex_date']}")
+            except Exception as e:
+                logger.error(f"Distribution posted detector failed: {e}")
+
         elif args.mode == "wheel_signals":
             # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
             # — wheeling these Tier 2 holdings (MAIN/MLPI/GPIQ/KQQQ/TDAQ) for long-term income is
@@ -615,6 +658,46 @@ def main():
                             logger.info(f"Wheel DTE alert dispatched: {pos['symbol']} at {alert_dte} DTE.")
             except Exception as e:
                 logger.error(f"Wheel position monitor failed: {e}")
+
+            # ── MODULE 3: IV ENVIRONMENT STANDING-DOWN POST ────────────────────
+            # Posts every session regardless of screener results — members see activity
+            # even on low-IV days. Explains WHY the wheel is quiet and what to watch.
+            try:
+                _, vixy_z = engine.fetch_vixy_proxy() if hasattr(engine, "fetch_vixy_proxy") else (0, 0)
+                if vixy_z < 0.5:
+                    iv_env = "LOW — implied vol below recent baseline. Options sellers have thin edge."
+                    directive = "Stand down on new wheel entries. Watch for IVR > 35% to open positions."
+                elif vixy_z < 1.0:
+                    iv_env = "MODERATE — some premium available. Be selective."
+                    directive = "Selective entries only. Prioritize high-quality underlyings with IVR > 35%."
+                else:
+                    iv_env = "ELEVATED — premium environment favorable for wheel."
+                    directive = "Active scanning. Run wheel screener for setups."
+
+                # Show IVR proxy for top 5 WHEEL_UNIVERSE symbols
+                sample_universe = ["NVDA", "AAPL", "TSLA", "QQQ", "PLTR"]
+                ivr_lines = []
+                for sym in sample_universe:
+                    try:
+                        hv30 = engine.calculate_historical_volatility(sym, lookback=30)
+                        iv_est = hv30 * 1.15
+                        ivr_proxy = min(iv_est * 100, 99)
+                        bar = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
+                        ivr_lines.append(f"┣ {bar} **{sym}** IVR est `{ivr_proxy:.0f}%` (HV30 `{hv30*100:.1f}%`)")
+                    except Exception:
+                        pass
+
+                standing_payload = (
+                    f"**IV Environment:** {iv_env}\n"
+                    f"┣ VIXY z-score: `{vixy_z:+.2f}σ`\n"
+                    + ("\n".join(ivr_lines) + "\n" if ivr_lines else "")
+                    + f"┗ {directive}"
+                )
+                if WEBHOOK_INCOME:
+                    send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL STATUS | Daily IV Environment", standing_payload, 0x3498db)
+                    logger.info("Wheel IV environment standing-down post dispatched.")
+            except Exception as e:
+                logger.error(f"Wheel IV environment post failed: {e}")
 
         elif args.mode == "wheel_position":
             if args.action == "open":
