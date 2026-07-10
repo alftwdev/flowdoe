@@ -468,36 +468,6 @@ def main():
             except Exception as e:
                 logger.error(f"New income ETF screener segment failed: {e}")
 
-            # ── SEGMENT 3: TIER 2 INCOME BRIEFING (always posts) ──────────────
-            # Fires unconditionally — keeps #dividend-ccetfs alive even when screeners
-            # find nothing. Competes with InvestWithHenry / SpencerInvests daily posts.
-            try:
-                briefing = engine.generate_tier2_income_briefing()
-                if briefing and WEBHOOK_INCOME:
-                    send_essentials_embed(WEBHOOK_INCOME, "💰 DAILY INCOME BRIEFING | Tier 2 + Cornerstone", briefing, 0x27ae60)
-                    logger.info("Daily income briefing dispatched.")
-            except Exception as e:
-                logger.error(f"Daily income briefing failed: {e}")
-
-            # ── SEGMENT 4: DISTRIBUTION POSTED DETECTOR ────────────────────────
-            # Fires only when a new distribution is detected vs. last cached date.
-            try:
-                new_divs = engine.detect_new_distributions()
-                for d in new_divs:
-                    div_payload = (
-                        f"**{d['symbol']}** distribution posted\n"
-                        f"┣ Ex-Date: `{d['ex_date']}`\n"
-                        f"┣ Amount: `${d['amount']:.4f}/share`\n"
-                        f"┣ Current Price: `${d['spot']:.2f}` | Annualized Yield: `{d['yield_annual']:.1f}%`\n"
-                        + (f"┣ Days since last: `{d['days_since']}` days\n" if d.get("days_since") else "")
-                        + f"┗ Income confirmed — add to velocity banking paydown log"
-                    )
-                    if WEBHOOK_INCOME:
-                        send_essentials_embed(WEBHOOK_INCOME, f"📬 DISTRIBUTION POSTED | {d['symbol']}", div_payload, 0x2ecc71)
-                        logger.info(f"Distribution alert dispatched: {d['symbol']} ${d['amount']:.4f} on {d['ex_date']}")
-            except Exception as e:
-                logger.error(f"Distribution posted detector failed: {e}")
-
         elif args.mode == "wheel_signals":
             # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
             # — wheeling these Tier 2 holdings (MAIN/MLPI/GPIQ/KQQQ/TDAQ) for long-term income is
