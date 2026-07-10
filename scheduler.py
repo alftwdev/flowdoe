@@ -71,7 +71,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
