@@ -656,8 +656,11 @@ def main():
             iv_dispatched = False
             flow_dispatched = False
 
-            # ── SEGMENT 1: IV CRUSH SCANNER (expanded universe: 15 tickers) ──
-            scan_data = engine.run_iv_crush_scan()
+            # Fetch chains once — shared by both segments (no double-fetch)
+            iv_chains = engine._fetch_iv_crush_chains()
+
+            # ── SEGMENT 1: IV CRUSH SCANNER ──
+            scan_data = engine.run_iv_crush_scan(chains=iv_chains)
             if scan_data:
                 payload = "Systemic IV Overpricing & Volatility Crush Report\n\n"
                 for asset in scan_data:
@@ -674,7 +677,7 @@ def main():
                 logger.info(f"IV crush scan dispatched: {len(scan_data)} elevated-premium assets.")
 
             # ── SEGMENT 2: UNUSUAL FLOW SCANNER (Cheddar Flow / UW replacement) ──
-            flow_data = engine.scan_unusual_options_flow()
+            flow_data = engine.scan_unusual_options_flow(chains=iv_chains)
             if flow_data:
                 flow_payload = "Institutional Sweep & OI Positioning Intelligence\n\n"
                 for signal in flow_data:

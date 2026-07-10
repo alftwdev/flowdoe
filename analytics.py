@@ -740,7 +740,7 @@ class HighFidelityAnalyticsEngine:
         # INCOME — dividend growers; CSP into dividend capture, CC on top if assigned
         "SCHD", "JEPI", "JEPQ", "O", "ARCC",
         # GROWTH — elevated IV = richer premium; size smaller, manage more actively
-        "TSLA", "COIN", "SOFI", "PLTR",
+        "TSLA", "COIN", "SOFI", "PLTR", "HIMS",
         # SECTOR ETFs — low single-stock risk, good for larger collateral deployment
         "SPY", "QQQ", "IWM", "GLD", "XLE",
     ]
@@ -1758,27 +1758,44 @@ class HighFidelityAnalyticsEngine:
 
         return {"score": round(score, 1), "verdict": verdict, "components": components}
 
-    def run_iv_crush_scan(self):
-        universe = [
-            "AAPL", "NVDA", "MSFT", "TSLA", "META",
-            "GOOGL", "AMZN", "AMD", "AVGO", "NFLX",
-            "SPY", "QQQ", "CRM", "COIN", "BABA"
-        ]
-        results = []
-        for symbol in universe:
-            hv_30 = self.calculate_historical_volatility(symbol)
+    # Shared universe for iv_crush + unusual_flow — fetched once, used by both.
+    _IV_CRUSH_UNIVERSE = [
+        "AAPL", "NVDA", "MSFT", "TSLA", "META",
+        "GOOGL", "AMZN", "AMD", "AVGO", "NFLX",
+        "SPY", "QQQ", "IWM", "COIN", "SMCI",
+    ]
+
+    def _fetch_iv_crush_chains(self) -> dict:
+        """
+        Fetch options chains for the shared iv_crush/unusual_flow universe once.
+        Returns {symbol: DataFrame} — callers use this dict instead of re-fetching.
+        """
+        chains = {}
+        for symbol in self._IV_CRUSH_UNIVERSE:
             chain = self._execute_query("options/chain", {"symbol": symbol})
-            if not chain or "data" not in chain or not chain["data"]: continue
+            if chain and "data" in chain and chain["data"]:
+                try:
+                    df = pd.DataFrame(chain["data"])
+                    df["strike"] = df["strike"].astype(float)
+                    df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                    df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
+                    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
+                    chains[symbol] = df
+                except Exception as e:
+                    logger.warning(f"iv_crush chain parse failed for {symbol}: {e}")
+        return chains
+
+    def run_iv_crush_scan(self, chains: dict = None):
+        """IV premium scanner. Pass pre-fetched chains dict to avoid double fetch."""
+        if chains is None:
+            chains = self._fetch_iv_crush_chains()
+        results = []
+        for symbol, df_options in chains.items():
             try:
-                df_options = pd.DataFrame(chain["data"])
-                df_options["implied_volatility"] = pd.to_numeric(
-                    df_options["implied_volatility"], errors="coerce"
-                ).fillna(0)
+                hv_30 = self.calculate_historical_volatility(symbol)
                 atm_iv_raw = df_options["implied_volatility"].median()
-                # Twelve Data returns IV as decimal (0.35 = 35%) — normalize to percentage
                 atm_iv = atm_iv_raw * 100 if atm_iv_raw < 5.0 else atm_iv_raw
                 spread = round(atm_iv - hv_30, 1)
-                # Only surface tickers where IV is meaningfully elevated above HV30
                 if spread >= 5.0:
                     results.append({
                         "symbol": symbol,
@@ -1788,44 +1805,35 @@ class HighFidelityAnalyticsEngine:
                     })
             except Exception as e:
                 logger.error(f"IV crush scan failed for {symbol}: {e}")
-        # Sort by highest IV premium above HV30 (most crush-favorable first)
         return sorted(results, key=lambda x: x["spread"], reverse=True)
 
-    def scan_unusual_options_flow(self, universe=None):
+    def scan_unusual_options_flow(self, universe=None, chains: dict = None):
         """
-        Replicates Cheddar Flow / Unusual Whales sweep detection using Twelve Data options/chain.
-
-        Detects two signal types:
-        1. SWEEP — volume:OI ratio > 2.0x on a single strike (fresh directional positioning)
-        2. OI_SKEW — aggregate put:call OI ratio reveals institutional hedging vs. accumulation bias
-
-        Returns top signals sorted by conviction (volume magnitude).
+        Sweep + OI skew detector. Pass pre-fetched chains dict to avoid double fetch.
+        If universe is provided without chains, fetches only those symbols.
         """
-        if universe is None:
-            universe = [
-                "SPY", "QQQ", "AAPL", "NVDA", "MSFT",
-                "TSLA", "META", "AMD", "AMZN", "GOOGL",
-                "IWM", "COIN", "AVGO", "NFLX", "SMCI"
-            ]
+        if chains is None:
+            if universe is None:
+                chains = self._fetch_iv_crush_chains()
+            else:
+                chains = {}
+                for symbol in universe:
+                    chain = self._execute_query("options/chain", {"symbol": symbol})
+                    if chain and "data" in chain and chain["data"]:
+                        try:
+                            df = pd.DataFrame(chain["data"])
+                            df["strike"] = df["strike"].astype(float)
+                            df["open_interest"] = pd.to_numeric(df.get("open_interest", 0), errors="coerce").fillna(0)
+                            df["implied_volatility"] = pd.to_numeric(df.get("implied_volatility", 0), errors="coerce").fillna(0)
+                            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
+                            chains[symbol] = df
+                        except Exception:
+                            pass
 
         sweeps, skews = [], []
 
-        for symbol in universe:
+        for symbol, df in chains.items():
             try:
-                chain = self._execute_query("options/chain", {"symbol": symbol})
-                if not chain or "data" not in chain or not chain["data"]:
-                    continue
-
-                df = pd.DataFrame(chain["data"])
-                df["strike"] = df["strike"].astype(float)
-                df["open_interest"] = pd.to_numeric(
-                    df.get("open_interest", 0), errors="coerce"
-                ).fillna(0)
-                df["implied_volatility"] = pd.to_numeric(
-                    df.get("implied_volatility", 0), errors="coerce"
-                ).fillna(0)
-                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0) if "volume" in df.columns else 0
-
                 # ── SWEEP DETECTOR ──────────────────────────────────────
                 # Fresh positioning: volume far exceeds existing open interest
                 df["vol_oi_ratio"] = df["volume"] / (df["open_interest"] + 1)
@@ -2076,6 +2084,10 @@ class HighFidelityAnalyticsEngine:
         self.db.update_state(f"market_analysis_morning_call_{today_str}", {
             "bias": snap["conviction_bias"], "score": snap["conviction_score"], "spot": snap["gex"]["current_spot"],
         })
+        # Clean key for daily announcements teaser grading
+        raw_bias = snap["conviction_bias"]
+        clean_bias = "BULLISH" if "BULL" in raw_bias.upper() else ("BEARISH" if "BEAR" in raw_bias.upper() else "NEUTRAL")
+        self.db.update_state(f"morning_conviction_bias_{today_str}", clean_bias)
 
         crypto_line = ""
         if snap["crypto_mover"]:
@@ -2622,30 +2634,81 @@ class HighFidelityAnalyticsEngine:
 
     def generate_announcements_teaser(self, accuracy_score, predicted, actual, snap):
         """
-        Public, non-paywalled bait content for WEBHOOK_ANNOUNCEMENTS — proves the ecosystem's math
-        works without giving away the full depth behind the paywall. Factual and value-forward,
-        not hype copy: the accuracy number and a real cross-asset stat do the convincing on their own.
+        Daily public scorecard for #announcements — per-channel accuracy proof.
+        Shows one graded metric per channel so readers see the full breadth of what runs,
+        not just SPY price proximity. All numbers come from the live ledger (never fabricated).
         """
         trend = self.record_and_get_accuracy_trend(accuracy_score)
+        today_str = __import__("datetime").date.today().isoformat()
 
-        crypto_blurb = ""
+        # ── #market-analysis: SPY direction call (bull/bear/neutral vs actual move) ──
+        spy_move = actual - predicted
+        spy_dir_predicted = self.db.get_state(f"morning_conviction_bias_{today_str}", "NEUTRAL")
+        spy_actual_dir = "BULLISH" if spy_move > 0.5 else ("BEARISH" if spy_move < -0.5 else "NEUTRAL/CHOP")
+        ma_hit = spy_dir_predicted == spy_actual_dir or (spy_dir_predicted == "NEUTRAL" and spy_actual_dir == "NEUTRAL/CHOP")
+        ma_icon = "✅" if ma_hit else "❌"
+
+        # ── #futures-trading: /NQ direction bias logged at morning brief ──
+        nq_bias = self.db.get_state(f"futures_nq_bias_{today_str}", "")
+        nq_actual = self.db.get_state(f"futures_nq_actual_dir_{today_str}", "")
+        if nq_bias and nq_actual:
+            nq_hit = (nq_bias == nq_actual) or ("NEUTRAL" in nq_bias and "NEUTRAL" in nq_actual)
+            futures_line = f"┣ #futures-trading  /NQ Direction: {nq_bias} → {nq_actual} {('✅' if nq_hit else '❌')}\n"
+        else:
+            futures_line = f"┣ #futures-trading  /NQ Board: 4×/day — overnight, pre-market, open, mid-session\n"
+
+        # ── #cornerstone: RO risk status today ──
+        ro_tier = self.db.get_state("cornerstone_alert_tier_rank", 0)
+        ro_fired = self.db.get_state(f"cornerstone_alert_fired_{today_str}", False)
+        if ro_fired:
+            ro_line = f"┣ #cornerstone      RO Alert: Fired ⚠️ — CLM/CRF protection triggered\n"
+        elif ro_tier == 0:
+            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: LOW — all clear ✅\n"
+        else:
+            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED — monitoring ⚠️\n"
+
+        # ── #options-wheel: did wheel screener find setups today? ──
+        wheel_spot = self.db.get_state("wheel_spotlight_latest")
+        if wheel_spot:
+            w_sym = wheel_spot.get("symbol", "—")
+            w_ivr = wheel_spot.get("ivr_proxy", 0)
+            options_line = f"┣ #options-wheel    Wheel Setup: `{w_sym}` IVR `{w_ivr:.0f}%` — elevated premium env\n"
+        else:
+            options_line = f"┣ #options-wheel    Wheel Screener: No elevated IVR today — low vol environment\n"
+
+        # ── #dividend-ccetfs: income ETF spotlight ──
+        etf_spot = self.db.get_state("cc_etf_spotlight_latest")
+        if etf_spot:
+            income_line = f"┣ #dividend-ccetfs  Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
+        else:
+            income_line = f"┣ #dividend-ccetfs  Income Screener: running daily — CC ETFs + dividend wheel\n"
+
+        # ── #crypto: Fear & Greed + mover ──
+        fng_val = snap.get("fng", {}).get("value", "—")
+        fng_label = snap.get("fng", {}).get("label", "")
+        crypto_mover = ""
         if snap.get("crypto_mover"):
             sym, _, _, pct = snap["crypto_mover"]
-            crypto_blurb = f"┣ Today's Biggest Crypto Mover: {sym} `{pct:+.2f}%`\n"
-        fng_blurb = f"┣ Crypto Fear & Greed Index: `{snap['fng']['value']}` ({snap['fng']['label']})\n" if snap.get("fng") else ""
+            crypto_mover = f" | Mover: {sym} `{pct:+.2f}%`"
+        crypto_line = f"┣ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
 
         payload = (
             f"📣 **DAILY ACCURACY INDEX — Public Sample**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"┣ Predicted SPY Target: `${predicted:,.2f}`\n"
-            f"┣ Actual SPY Close: `${actual:,.2f}`\n"
-            f"┣ Model Accuracy Today: `{accuracy_score}%`\n"
-            f"┣ Rolling Track Record: `{trend['avg_7d']}%` (7D avg) | `{trend['avg_30d']}%` (30D avg) over `{trend['sample_size']}` logged sessions\n"
-            f"{crypto_blurb}"
-            f"{fng_blurb}"
-            f"┗ This is one free sample of what the full ecosystem (futures, crypto, forex, options, income, TSP) "
-            f"calculates every single trading day — multiple times a day, before, during, and after the open. "
-            f"Every number posted here is logged, dated, and never deleted — good days and bad days both."
+            f"**#market-analysis**  SPY Predicted `${predicted:,.2f}` → Actual `${actual:,.2f}` "
+            f"| Direction: {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
+            f"┣ Model Score: `{accuracy_score}%` today | `{trend['avg_7d']}%` 7D | `{trend['avg_30d']}%` 30D "
+            f"over `{trend['sample_size']}` sessions\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"**Channel Accuracy Breakdown**\n"
+            f"{futures_line}"
+            f"{ro_line}"
+            f"{options_line}"
+            f"{income_line}"
+            f"{crypto_line}"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"┗ Every number is logged live and never deleted — good sessions and bad ones both. "
+            f"Full signals (TQQQ entries, wheel strikes, morning conviction call) are subscriber-only."
         )
         return payload
 

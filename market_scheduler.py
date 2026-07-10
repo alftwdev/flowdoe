@@ -95,7 +95,13 @@ SCHEDULE = [
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),
     (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
-    (20, 30, "weekly_scorecard",   "scheduler",    ["--mode", "weekly_scorecard"],True),
+    # weekly_scorecard fires Friday only — gated here, not inside the script.
+    # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
+]
+
+# Friday-only entries appended separately so the main loop can filter them.
+SCHEDULE_FRIDAY_ONLY = [
+    (20, 30, "weekly_scorecard",   "scheduler",    ["--mode", "weekly_scorecard"], True),
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -150,7 +156,8 @@ def run():
         date_str = now_utc.strftime("%Y-%m-%d")
         h, m     = now_utc.hour, now_utc.minute
 
-        for (t_h, t_m, task_key, script, args, wkdays_only) in SCHEDULE:
+        schedule = SCHEDULE + (SCHEDULE_FRIDAY_ONLY if weekday == 4 else [])
+        for (t_h, t_m, task_key, script, args, wkdays_only) in schedule:
             if wkdays_only and not is_wkday:
                 continue
             if not in_window(h, m, t_h, t_m):
