@@ -223,7 +223,9 @@ def main():
                     send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", pillars_header + morning_brief, 0x1abc9c)
                     dispatch_conviction_sync(engine, morning_snap, "morning")
             except Exception as e:
-                logger.error(f"Market analysis morning brief failed: {e}")
+                import traceback
+                tb = traceback.format_exc()
+                logger.error(f"Market analysis morning brief failed: {e}\n{tb}")
                 try:
                     import requests as _req
                     _po_token = os.getenv("PUSHOVER_API_TOKEN")
@@ -232,7 +234,7 @@ def main():
                         _req.post("https://api.pushover.net/1/messages.json", data={
                             "token": _po_token, "user": _po_user,
                             "title": "⚠️ Morning Brief FAILED",
-                            "message": f"market_analysis morning brief exception: {e}",
+                            "message": f"{e} | {tb[-300:]}",
                             "priority": 1,
                         }, timeout=10)
                 except Exception:

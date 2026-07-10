@@ -1981,14 +1981,36 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             snap["gex"] = {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN"}
 
-        snap["vixy_price"], snap["vixy_z"] = self.fetch_vixy_proxy()
-        snap["credit_spread"] = float(self.db.get_state("credit_spread", 3.5))
-        snap["vrp"] = self.calculate_vrp("SPY")
-        snap["net_liquidity"] = self.calculate_net_liquidity()
+        try:
+            snap["vixy_price"], snap["vixy_z"] = self.fetch_vixy_proxy()
+        except Exception as e:
+            logger.error(f"[snapshot] fetch_vixy_proxy failed: {e}")
+            snap["vixy_price"], snap["vixy_z"] = 20.0, 0.0
+        try:
+            snap["credit_spread"] = float(self.db.get_state("credit_spread", 3.5))
+        except Exception:
+            snap["credit_spread"] = 3.5
+        try:
+            snap["vrp"] = self.calculate_vrp("SPY")
+        except Exception as e:
+            logger.error(f"[snapshot] calculate_vrp failed: {e}")
+            snap["vrp"] = {"iv": 0.0, "hv30": 20.0, "vrp": 0.0, "regime": "UNKNOWN"}
+        try:
+            snap["net_liquidity"] = self.calculate_net_liquidity()
+        except Exception as e:
+            logger.error(f"[snapshot] calculate_net_liquidity failed: {e}")
+            snap["net_liquidity"] = {"net_liquidity": 0.0, "delta": 0.0, "trend": "UNKNOWN"}
         # Reuses TQQQ desk's daily-cached Nasdaq-100 breadth rather than re-fetching 10 symbols here.
-        snap["breadth"] = float(self.db.get_state("tqqq_breadth_cache", 0.60))
+        try:
+            snap["breadth"] = float(self.db.get_state("tqqq_breadth_cache", 0.60))
+        except Exception:
+            snap["breadth"] = 0.60
 
-        snap["fng"] = self.fetch_fear_greed_index()
+        try:
+            snap["fng"] = self.fetch_fear_greed_index()
+        except Exception as e:
+            logger.error(f"[snapshot] fetch_fear_greed_index failed: {e}")
+            snap["fng"] = None
 
         try:
             fx_quotes = self._fetch_twelve_data_quotes(["USD/JPY"])
