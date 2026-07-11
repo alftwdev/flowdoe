@@ -60,6 +60,18 @@ LEAP_TP1_PCT = 50.0         # % gain → scale 50% out
 LEAP_TP2_PCT = 100.0        # % gain → close remainder
 LEAP_ROLL_DTE = 90          # DTE remaining → roll forward consideration
 
+# PUT desk (top-hunting) — uses QQQ puts, not TQQQ (better liquidity, lower theta decay)
+LEAP_PUT_DTE_MIN = 180         # 6 months — tops can run; give it time
+LEAP_PUT_DTE_MAX = 365         # 12 months — don't over-extend, reroll if needed
+LEAP_PUT_DELTA_TARGET = -0.72  # deep ITM put (negative delta)
+LEAP_PUT_DELTA_BAND = 0.06     # accept delta in [-0.78, -0.66]
+LEAP_PUT_COOLDOWN_HOURS = 2    # same 2-hour re-evaluation cadence as CALL desk
+LEAP_PUT_SYMBOL = "QQQ"        # puts on QQQ — TQQQ puts have brutal theta + thin OI
+
+# Cycle position score thresholds — how oversold/overbought before a LEAP fires
+CYCLE_BOTTOM_THRESHOLD = 55    # bottom_score >= this unlocks CALL desk
+CYCLE_TOP_THRESHOLD = 55       # top_score >= this unlocks PUT desk
+
 
 def is_market_hours():
     """Returns True only during NYSE RTH (09:30–16:00 ET, Mon–Fri)."""
@@ -1022,18 +1034,184 @@ class TQQQTacticalSniper:
         db.update_state("tqqq_macro_regime", current_regime)
 
     # =========================================================================
+    # CYCLE POSITION SCORING — feeds both CALL and PUT LEAP desks
+    # =========================================================================
+
+    def fetch_qqq_extended_metrics(self):
+        """RSI14, 52w high/low, CNN Fear & Greed. Cached once per trading day."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"qqq_extended_{today_str}"
+        cached = db.get_state(cache_key)
+        if cached:
+            return cached
+
+        result = {"rsi14": 50.0, "high_52w": 0.0, "low_52w": 0.0, "fear_greed": 50.0}
+
+        try:
+            r = requests.get(
+                f"{self.base_url}/rsi",
+                params={"symbol": self.proxy_symbol, "interval": "1day",
+                        "time_period": 14, "apikey": TWELVE_DATA_API_KEY},
+                timeout=10
+            ).json()
+            result["rsi14"] = float(r.get("values", [{}])[0].get("rsi", 50.0))
+        except Exception as e:
+            logger.warning(f"RSI fetch failed: {e}")
+
+        try:
+            r = requests.get(
+                f"{self.base_url}/time_series",
+                params={"symbol": self.proxy_symbol, "interval": "1day",
+                        "outputsize": "252", "apikey": TWELVE_DATA_API_KEY},
+                timeout=12
+            ).json()
+            closes = [float(v["close"]) for v in r.get("values", [])]
+            if closes:
+                result["high_52w"] = max(closes)
+                result["low_52w"] = min(closes)
+        except Exception as e:
+            logger.warning(f"52w high/low fetch failed: {e}")
+
+        try:
+            fg_res = requests.get(
+                "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
+                timeout=8, headers={"User-Agent": "Mozilla/5.0"}
+            ).json()
+            result["fear_greed"] = float(fg_res.get("fear_and_greed", {}).get("score", 50.0))
+        except Exception as e:
+            logger.warning(f"CNN Fear & Greed fetch failed: {e}")
+
+        db.update_state(cache_key, result)
+        return result
+
+    def calculate_cycle_score(self, daily, vix_z, breadth, ext):
+        """
+        Composite bottom/top scores (0-100) for LEAP desk gating.
+
+        bottom_score: higher = more oversold/fearful = BTO CALL window
+        top_score:    higher = more overbought/greedy = BTO PUT window
+
+        Signal inputs (all available at Twelve Data tier, no external license needed):
+          VIXY z-score, RSI14, breadth, 52w high/low drawdown, CNN F&G, SMA200 extension
+        """
+        spot = daily.get("spot", 0.0)
+        sma200 = daily.get("sma200", spot)
+        ema21 = daily.get("ema21", spot)
+        rsi = ext.get("rsi14", 50.0)
+        high_52w = ext.get("high_52w", spot)
+        low_52w = ext.get("low_52w", spot)
+        fg = ext.get("fear_greed", 50.0)
+        adx_data = daily.get("adx_macd", {}) or {}
+        macd_hist = adx_data.get("macd_hist", 0.0)
+
+        drawdown = (spot - high_52w) / high_52w * 100 if high_52w > 0 else 0.0   # negative = below 52w high
+        extension = (spot - low_52w) / low_52w * 100 if low_52w > 0 else 0.0    # positive = above 52w low
+        pct_vs_sma200 = (spot - sma200) / sma200 * 100 if sma200 > 0 else 0.0
+        ema21_pct = (spot - ema21) / ema21 * 100 if ema21 > 0 else 0.0
+
+        # ── BOTTOM SCORE ──────────────────────────────────────────────────────
+        b = 0
+        # VIXY fear (max 30)
+        if vix_z >= 3.0:    b += 30
+        elif vix_z >= 2.0:  b += 22
+        elif vix_z >= 1.5:  b += 15
+        elif vix_z >= 0.75: b += 8
+
+        # RSI oversold (max 25)
+        if rsi < 25:   b += 25
+        elif rsi < 30: b += 18
+        elif rsi < 40: b += 10
+        elif rsi < 45: b += 5
+
+        # Breadth collapse (max 20)
+        if breadth < 0.20:   b += 20
+        elif breadth < 0.30: b += 14
+        elif breadth < 0.40: b += 8
+        elif breadth < 0.50: b += 4
+
+        # Drawdown from 52w high (max 15)
+        if drawdown <= -30:   b += 15
+        elif drawdown <= -20: b += 11
+        elif drawdown <= -10: b += 6
+        elif drawdown <= -5:  b += 3
+
+        # CNN Fear & Greed fear (max 10)
+        if fg < 15:   b += 10
+        elif fg < 25: b += 7
+        elif fg < 35: b += 4
+
+        # Below SMA200 (max 5)
+        if pct_vs_sma200 < -5:  b += 5
+        elif pct_vs_sma200 < 0: b += 3
+
+        # MACD bearish (max 3) — tie-breaker, not a primary signal
+        if macd_hist < 0: b += 3
+
+        bottom_score = min(b, 100)
+
+        # ── TOP SCORE ──────────────────────────────────────────────────────────
+        t = 0
+        # VIXY complacency (max 20)
+        if vix_z <= -1.5:   t += 20
+        elif vix_z <= -1.0: t += 14
+        elif vix_z <= -0.5: t += 8
+        elif vix_z <= 0.0:  t += 4
+
+        # RSI overbought (max 25)
+        if rsi > 80:   t += 25
+        elif rsi > 75: t += 18
+        elif rsi > 70: t += 12
+        elif rsi > 65: t += 6
+
+        # Breadth extended — nearly everything overbought (max 15)
+        if breadth > 0.90:   t += 15
+        elif breadth > 0.80: t += 10
+        elif breadth > 0.70: t += 5
+
+        # Extension from 52w low (max 15)
+        if extension >= 60:   t += 15
+        elif extension >= 40: t += 10
+        elif extension >= 25: t += 5
+
+        # CNN Fear & Greed greed (max 10)
+        if fg > 85:   t += 10
+        elif fg > 75: t += 7
+        elif fg > 65: t += 4
+
+        # Extended above SMA200 (max 10)
+        if pct_vs_sma200 > 15:  t += 10
+        elif pct_vs_sma200 > 10: t += 7
+        elif pct_vs_sma200 > 5:  t += 4
+
+        # Extended above EMA21 (max 5)
+        if ema21_pct > 5:   t += 5
+        elif ema21_pct > 3: t += 3
+
+        # MACD bullish (max 3)
+        if macd_hist > 0: t += 3
+
+        top_score = min(t, 100)
+
+        signals = {
+            "rsi14": rsi, "fear_greed": fg,
+            "drawdown_from_high_pct": drawdown,
+            "extension_from_low_pct": extension,
+            "pct_vs_sma200": pct_vs_sma200,
+            "ema21_pct": ema21_pct,
+        }
+        return {"bottom_score": bottom_score, "top_score": top_score, "signals": signals}
+
+    # =========================================================================
     # LEAP DESK METHODS
     # =========================================================================
 
-    def evaluate_leap_entry(self, daily, intraday, vix_price, vix_z, breadth, tqqq_daily):
+    def evaluate_leap_entry(self, daily, intraday, vix_price, vix_z, breadth, tqqq_daily, cycle=None):
         """
-        Returns leap_setup dict if today is a valid red-day LEAP window, else None.
-        Runs once per calendar day (gated) + 5-day cooldown between signals.
+        Returns leap_setup dict if conditions meet the red-day CALL entry window, else None.
+        Gated by 2-hour cooldown so a continued downtrend re-fires every 2 hours.
         Entry is intentionally permissive — the sniper catches confirmation; the
         LEAP desk catches fear. False positives have defined, bounded loss.
         """
-        # 2-hour cooldown between LEAP signals — lets a continued downtrend fire again so
-        # the user can track the bottom across multiple hours and choose the best entry.
         import time as _time
         last_ts = db.get_state("tqqq_last_leap_signal_ts", 0)
         if last_ts:
@@ -1045,21 +1223,26 @@ class TQQQTacticalSniper:
             except Exception:
                 pass
 
+        # Cycle score gate — bottom_score must show at least moderate oversold conditions.
+        # A pure red day on no fear (score < threshold) is distribution, not capitulation.
+        bottom_score = cycle.get("bottom_score", 0) if cycle else 0
+        if bottom_score < CYCLE_BOTTOM_THRESHOLD:
+            logger.debug(f"LEAP CALL: bottom_score {bottom_score} < {CYCLE_BOTTOM_THRESHOLD} — skip (not oversold enough)")
+            return None
+
         qqq_spot = daily["spot"]
         ema21 = daily.get("ema21", 0.0)
 
-        # Intraday change: fetch_daily_baseline spot = prior EOD close
         intraday_spot = intraday["spot"] if intraday else qqq_spot
         intraday_chg_pct = (intraday_spot - qqq_spot) / qqq_spot * 100 if qqq_spot > 0 else 0.0
 
-        is_red_day = intraday_chg_pct < -0.5          # QQQ down 0.5%+ intraday
+        is_red_day = intraday_chg_pct < -0.5
         is_below_ema21 = ema21 > 0 and qqq_spot < ema21
         adx_data = daily.get("adx_macd", {}) or {}
         is_macd_bear = adx_data.get("macd_hist", 0.0) < 0
 
-        # Need at least one bearish condition: red day OR below EMA21
         if not (is_red_day or is_below_ema21):
-            logger.debug(f"LEAP: no entry condition — intraday {intraday_chg_pct:+.2f}%, above EMA21")
+            logger.debug(f"LEAP CALL: no entry condition — intraday {intraday_chg_pct:+.2f}%, above EMA21")
             return None
 
         try:
@@ -1075,6 +1258,7 @@ class TQQQTacticalSniper:
             return None
 
         atr_pct_tqqq = calculate_atr_pct(tqqq_daily) if tqqq_daily is not None else 0.02
+        sigs = cycle.get("signals", {}) if cycle else {}
 
         return {
             "tqqq_spot": tqqq_spot,
@@ -1091,6 +1275,10 @@ class TQQQTacticalSniper:
             "panic_mode": vix_z >= 2.0,
             "macro_regime": "BEAR" if qqq_spot < daily.get("sma200", qqq_spot * 2) else "BULL",
             "sma200": daily.get("sma200", 0.0),
+            "bottom_score": bottom_score,
+            "rsi14": sigs.get("rsi14", 50.0),
+            "fear_greed": sigs.get("fear_greed", 50.0),
+            "drawdown_from_high_pct": sigs.get("drawdown_from_high_pct", 0.0),
         }
 
     def enrich_leap_with_tradier_chain(self, leap_setup):
@@ -1266,11 +1454,15 @@ class TQQQTacticalSniper:
             if leap_setup["is_macd_bear"] else
             "┣ MACD: Bullish histogram — structural pullback, not a momentum collapse\n"
         )
-        breadth_line = f"┗ Breadth: `{leap_setup['breadth']:.0%}` of QQQ top-20 above SMA200"
+        breadth_line = f"┣ Breadth: `{leap_setup['breadth']:.0%}` of QQQ top-20 above SMA200\n"
+        score = leap_setup.get("bottom_score", 0)
+        rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
+        score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
+        score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
 
         regime_payload = (
             f"TQQQ LEAP Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + score_line
         )
 
         # --- Embed 2: Contract setup ---
@@ -1475,6 +1667,363 @@ class TQQQTacticalSniper:
         if len(updated_positions) != len(positions):
             db.update_state("tqqq_leap_positions", updated_positions)
 
+    # =========================================================================
+    # LEAP PUT DESK — top-hunting, BTO deep ITM QQQ puts on green/overbought days
+    # =========================================================================
+
+    def evaluate_leap_put_entry(self, daily, intraday, vix_price, vix_z, breadth, cycle):
+        """
+        PUT desk: fires on green days / extended overbought conditions when top_score is high.
+        Uses QQQ puts (not TQQQ) — TQQQ puts have brutal theta decay and thin OI long-dated.
+        Thesis: buying TIME for the inevitable correction. 6-12 month DTE absorbs timing risk.
+        """
+        import time as _time
+        last_ts = db.get_state("tqqq_last_leap_put_signal_ts", 0)
+        if last_ts:
+            try:
+                elapsed_hours = (_time.time() - float(last_ts)) / 3600
+                if elapsed_hours < LEAP_PUT_COOLDOWN_HOURS:
+                    logger.debug(f"LEAP PUT cooldown — {elapsed_hours:.1f}h since last signal")
+                    return None
+            except Exception:
+                pass
+
+        top_score = cycle.get("top_score", 0) if cycle else 0
+        if top_score < CYCLE_TOP_THRESHOLD:
+            logger.debug(f"LEAP PUT: top_score {top_score} < {CYCLE_TOP_THRESHOLD} — skip")
+            return None
+
+        qqq_spot = daily["spot"]
+        ema21 = daily.get("ema21", 0.0)
+        intraday_spot = intraday["spot"] if intraday else qqq_spot
+        intraday_chg_pct = (intraday_spot - qqq_spot) / qqq_spot * 100 if qqq_spot > 0 else 0.0
+
+        ema21_pct = (qqq_spot - ema21) / ema21 * 100 if ema21 > 0 else 0.0
+        is_green_day = intraday_chg_pct > 0.5
+        is_extended_above_ema21 = ema21 > 0 and ema21_pct > 2.0
+
+        if not (is_green_day or is_extended_above_ema21):
+            logger.debug(f"LEAP PUT: no entry condition — {intraday_chg_pct:+.2f}% intraday, {ema21_pct:+.1f}% above EMA21")
+            return None
+
+        adx_data = daily.get("adx_macd", {}) or {}
+        is_macd_bull = adx_data.get("macd_hist", 0.0) > 0
+        sigs = cycle.get("signals", {}) if cycle else {}
+
+        return {
+            "qqq_spot": qqq_spot,
+            "qqq_ema21": ema21,
+            "ema21_pct": ema21_pct,
+            "intraday_chg_pct": intraday_chg_pct,
+            "is_green_day": is_green_day,
+            "is_extended_above_ema21": is_extended_above_ema21,
+            "is_macd_bull": is_macd_bull,
+            "vix_price": vix_price,
+            "vix_z": vix_z,
+            "breadth": breadth,
+            "sma200": daily.get("sma200", 0.0),
+            "macro_regime": "BULL" if qqq_spot > daily.get("sma200", 0.0) else "BEAR",
+            "top_score": top_score,
+            "rsi14": sigs.get("rsi14", 50.0),
+            "fear_greed": sigs.get("fear_greed", 50.0),
+            "extension_from_low_pct": sigs.get("extension_from_low_pct", 0.0),
+            "pct_vs_sma200": sigs.get("pct_vs_sma200", 0.0),
+            "complacency_mode": vix_z <= -1.0,
+        }
+
+    def enrich_leap_put_with_tradier_chain(self, put_setup):
+        """
+        Find the best deep ITM QQQ put in the 180-365 DTE window via Tradier.
+        Targets delta -0.72: high intrinsic, meaningful time value, liquid OI.
+        """
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+            if not tc.api_key:
+                return put_setup
+
+            today = datetime.utcnow().date()
+            expirations = tc.get_expirations(LEAP_PUT_SYMBOL)
+            if not expirations:
+                return put_setup
+
+            best_contract = None
+            best_delta_diff = float("inf")
+
+            for exp_str in expirations:
+                try:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte < LEAP_PUT_DTE_MIN or dte > LEAP_PUT_DTE_MAX:
+                        continue
+
+                    chain = tc.get_options_chain(LEAP_PUT_SYMBOL, exp_str, greeks=True)
+                    if not chain:
+                        continue
+
+                    qqq_spot = put_setup["qqq_spot"]
+                    for c in chain:
+                        if c.get("option_type", "").lower() != "put":
+                            continue
+                        strike = float(c.get("strike", 0.0))
+                        if strike <= 0 or strike >= qqq_spot:
+                            continue  # deep ITM puts have strike below spot; skip OTM
+                        greeks = c.get("greeks") or {}
+                        delta = float(greeks.get("delta", 0.0))
+                        if delta >= 0 or abs(delta) < 0.40:
+                            continue
+                        iv = float(greeks.get("mid_iv") or greeks.get("smv_vol") or 0.0)
+                        bid = float(c.get("bid") or 0.0)
+                        ask = float(c.get("ask") or 0.0)
+                        mid = (bid + ask) / 2 if bid and ask else 0.0
+                        if mid <= 0 or (ask - bid) / mid > 0.15:
+                            continue  # skip wide markets
+
+                        delta_diff = abs(abs(delta) - abs(LEAP_PUT_DELTA_TARGET))
+                        if delta_diff > LEAP_PUT_DELTA_BAND or delta_diff >= best_delta_diff:
+                            continue
+
+                        best_contract = {
+                            "strike": strike,
+                            "expiry": exp_str,
+                            "dte": dte,
+                            "delta": round(delta, 2),
+                            "iv": round(iv * 100 if iv < 5.0 else iv, 1),
+                            "bid": round(bid, 2),
+                            "ask": round(ask, 2),
+                            "mid": round(mid, 2),
+                            "oi": int(c.get("open_interest") or 0),
+                            "volume": int(c.get("volume") or 0),
+                        }
+                        best_delta_diff = delta_diff
+                except Exception:
+                    continue
+
+            if best_contract:
+                qqq_spot = put_setup["qqq_spot"]
+                intrinsic = max(0.0, best_contract["strike"] - qqq_spot)
+                time_val = max(0.0, best_contract["mid"] - intrinsic)
+                put_setup.update({
+                    "real_strike": best_contract["strike"],
+                    "real_expiry": best_contract["expiry"],
+                    "real_dte": best_contract["dte"],
+                    "real_delta": best_contract["delta"],
+                    "real_iv": best_contract["iv"],
+                    "real_bid": best_contract["bid"],
+                    "real_ask": best_contract["ask"],
+                    "real_mid": best_contract["mid"],
+                    "real_oi": best_contract["oi"],
+                    "real_volume": best_contract["volume"],
+                    "real_cost_per_contract": round(best_contract["mid"] * 100, 0),
+                    "real_intrinsic": round(intrinsic, 2),
+                    "real_time_value": round(time_val, 2),
+                })
+        except Exception as e:
+            logger.warning(f"LEAP PUT Tradier chain lookup failed: {e}")
+
+        return put_setup
+
+    def dispatch_leap_put_signal(self, put_setup):
+        """
+        Two Discord embeds for PUT desk: (1) top context, (2) QQQ put contract setup.
+        Blue (0x3498db) — distinct from CALL desk (orange) and sniper (green/red).
+        """
+        color = 0x3498db
+        is_complacent = put_setup.get("complacency_mode", False)
+
+        green_tag = "🟢 GREEN DAY" if put_setup["is_green_day"] else ""
+        ema_tag = " | EXTENDED ABOVE EMA21" if put_setup["is_extended_above_ema21"] else ""
+        header_tag = (green_tag + ema_tag).strip(" |") or "OVERBOUGHT SETUP"
+
+        intraday_line = f"┣ Intraday Move: `{put_setup['intraday_chg_pct']:+.2f}%` {green_tag}\n"
+        ema_line = (
+            f"┣ QQQ `${put_setup['qqq_spot']:.2f}` extended `{put_setup['ema21_pct']:+.1f}%` above EMA21 `${put_setup['qqq_ema21']:.2f}` — stretched\n"
+            if put_setup["is_extended_above_ema21"] else
+            f"┣ QQQ `${put_setup['qqq_spot']:.2f}` near EMA21 `${put_setup['qqq_ema21']:.2f}` — green day on support\n"
+        )
+        macro_line = f"┣ Macro: {put_setup['macro_regime']} REGIME | SMA200 `${put_setup['sma200']:.2f}` ({put_setup['pct_vs_sma200']:+.1f}%)\n"
+
+        if is_complacent:
+            fear_note = "🟢 DEEP COMPLACENCY — optimal PUT window (cheap vol, elevated risk of surprise reversal)"
+        elif put_setup["vix_z"] <= 0.0:
+            fear_note = "🟡 LOW FEAR — market calm, structural extended"
+        else:
+            fear_note = "⚠️ ELEVATED VIXY — unusual for a top setup; verify context"
+        fear_line = f"┣ VIXY `{put_setup['vix_price']:.2f}` (z `{put_setup['vix_z']:+.2f}σ`) — {fear_note}\n"
+
+        macd_line = (
+            "┣ MACD: Bullish histogram — momentum extended, reversal risk elevated\n"
+            if put_setup["is_macd_bull"] else
+            "┣ MACD: Histogram turning — momentum weakening while price elevated\n"
+        )
+        breadth_line = f"┣ Breadth: `{put_setup['breadth']:.0%}` of QQQ top-20 above SMA200\n"
+        rsi_line = f"┣ RSI14: `{put_setup.get('rsi14', 50):.1f}` | F&G: `{put_setup.get('fear_greed', 50):.0f}/100` | Extension from 52w low: `+{put_setup.get('extension_from_low_pct', 0):.1f}%`\n"
+
+        score = put_setup.get("top_score", 0)
+        score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
+        score_line = f"┗ Top Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
+
+        context_payload = (
+            f"QQQ LEAP PUT Entry Window — {header_tag}\n"
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + score_line
+        )
+
+        # Contract setup
+        if "real_strike" in put_setup:
+            contract_line = (
+                f"${put_setup['real_strike']:.2f} PUT — "
+                f"{put_setup['real_expiry']} ({put_setup['real_dte']} DTE / "
+                f"~{put_setup['real_dte']//30} months)"
+            )
+            delta_line = f"┣ Delta: Δ {put_setup['real_delta']:.2f} — `{abs(put_setup['real_delta']):.0%}` probability ITM at expiry\n"
+            cost_line = (
+                f"┣ Cost: ~${put_setup['real_cost_per_contract']:.0f}/contract "
+                f"(mid ${put_setup['real_mid']:.2f} | bid ${put_setup['real_bid']:.2f} / ask ${put_setup['real_ask']:.2f})\n"
+                f"┣ Intrinsic: ${put_setup['real_intrinsic']:.2f} | Time Value (your insurance premium): ${put_setup['real_time_value']:.2f}\n"
+            )
+            liquidity_line = f"┣ Liquidity: Volume `{put_setup.get('real_volume', 0):,}` | OI `{put_setup.get('real_oi', 0):,}`\n"
+        else:
+            bs_strike_est = round(put_setup["qqq_spot"] * 1.08, 2)
+            contract_line = (
+                f"~${bs_strike_est:.2f} PUT — 180-365 DTE (6-12 months) | "
+                "Tradier chain unavailable — verify strike manually"
+            )
+            delta_line = f"┣ Delta: Δ ~{LEAP_PUT_DELTA_TARGET:.2f} target (deep ITM put)\n"
+            cost_line = ""
+            liquidity_line = ""
+
+        tranche_note = (
+            "┣ 🟢 LOW FEAR (complacency peak): split 2 tranches — 50% now, 50% if market pushes higher next week\n"
+            if is_complacent else ""
+        )
+
+        execution_payload = (
+            f"QQQ @ `${put_setup['qqq_spot']:.2f}` | Buy Time on the Extension\n"
+            f"┣ 🎯 BTO LEAP PUT: {contract_line}\n"
+            + delta_line + cost_line + liquidity_line
+            + "┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)\n"
+            + tranche_note
+            + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
+            "┣ Stop: −30% underlying move (QQQ continues UP) → reassessment (review thesis)\n"
+            "┣ Roll: Alert fires at 90 DTE remaining — roll forward if thesis intact\n"
+            f"┗ Log entry: `python tqqq.py --log-leap-put --strike X --expiration YYYY-MM-DD "
+            f"--premium X --entry-price {put_setup['qqq_spot']:.2f}`"
+        )
+
+        if WEBHOOK_TRADE_SIGNALS:
+            send_essentials_embed(
+                WEBHOOK_TRADE_SIGNALS,
+                "TQQQ LEAP DESK | BTO PUT — Green Day / Top Hunting",
+                context_payload, color
+            )
+            send_essentials_embed(
+                WEBHOOK_TRADE_SIGNALS,
+                "TQQQ LEAP DESK | QQQ PUT CONTRACT SETUP",
+                execution_payload, color
+            )
+
+        import time as _time
+        db.update_state("tqqq_last_leap_put_signal_ts", _time.time())
+        logger.info(f"LEAP PUT signal dispatched — QQQ ${put_setup['qqq_spot']:.2f}, {header_tag}")
+
+    def check_leap_put_position_status(self, qqq_spot: float):
+        """Monitors open LEAP put positions. Same thresholds as CALL desk, inverted direction."""
+        positions = db.get_state("tqqq_leap_put_positions") or []
+        if not positions or qqq_spot <= 0:
+            return
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        color_val = 0x3498db
+        updated_positions = []
+
+        for pos in positions:
+            try:
+                entry_price = float(pos.get("entry_price", 0.0))
+                strike = float(pos.get("strike", 0.0))
+                premium = float(pos.get("premium", 0.0))
+                expiry_str = pos.get("expiration", "")
+                last_alert = pos.get("last_alert", "")
+
+                if not expiry_str or premium <= 0:
+                    updated_positions.append(pos)
+                    continue
+
+                exp_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+                dte_remaining = (exp_date - datetime.utcnow().date()).days
+
+                if dte_remaining <= 0:
+                    logger.info(f"LEAP PUT {strike}P expired — removing from tracker")
+                    continue
+
+                # Intrinsic P&L proxy: for a put, intrinsic = max(0, strike - qqq_spot)
+                intrinsic_now = max(0.0, strike - qqq_spot)
+                pnl_proxy = (intrinsic_now - premium) / premium * 100 if premium > 0 else 0.0
+
+                # Monthly check-in
+                last_monthly = pos.get("last_monthly_check", "")
+                days_since_monthly = (datetime.utcnow().date() - datetime.strptime(last_monthly, "%Y-%m-%d").date()).days if last_monthly else 999
+                if days_since_monthly >= 30:
+                    base_line = (
+                        f"┣ Position: QQQ ${strike:.2f} PUT exp {expiry_str} ({dte_remaining} DTE)\n"
+                        f"┣ QQQ Spot: ${qqq_spot:.2f} | Put P&L proxy: `{pnl_proxy:+.1f}%`\n"
+                    )
+                    send_essentials_embed(
+                        WEBHOOK_TRADE_SIGNALS,
+                        "LEAP PUT DESK | Monthly Check-In",
+                        base_line
+                        + f"┣ Premium paid: ${premium:.2f}/share | Cost basis: ${premium * 100:.0f}/contract\n"
+                        + f"┗ Thesis: QQQ correction to drive PUT into profit. Next alert: {LEAP_ROLL_DTE} DTE or profit target.",
+                        color_val
+                    )
+                    pos["last_monthly_check"] = today_str
+
+                if pnl_proxy <= LEAP_CUT_THRESHOLD and f"REASSESS_{today_str}" not in last_alert:
+                    send_essentials_embed(
+                        WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | ⚠️ Reassessment Flag",
+                        f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
+                        f"┣ QQQ moved HIGHER — PUT P&L proxy: `{pnl_proxy:+.1f}%` (threshold: {LEAP_CUT_THRESHOLD}%)\n"
+                        "┣ QQQ extended further than expected. Review top thesis.\n"
+                        "┗ Options: (1) Hold — still have time. (2) Roll up strike if QQQ keeps pushing. (3) Close.",
+                        0xe74c3c
+                    )
+                    pos["last_alert"] = f"REASSESS_{today_str}"
+
+                elif pnl_proxy >= LEAP_TP2_PCT and f"TP2_{today_str}" not in last_alert:
+                    send_essentials_embed(
+                        WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 🎯 TP2 — Close Remainder",
+                        f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
+                        f"┗ P&L proxy `+{pnl_proxy:.1f}%` — close full position. Target achieved.",
+                        color_val
+                    )
+                    pos["last_alert"] = f"TP2_{today_str}"
+
+                elif pnl_proxy >= LEAP_TP1_PCT and f"TP1_{today_str}" not in last_alert:
+                    send_essentials_embed(
+                        WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 📊 TP1 — Scale 50% Out",
+                        f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
+                        f"┗ P&L proxy `+{pnl_proxy:.1f}%` — sell half, let remainder ride.",
+                        color_val
+                    )
+                    pos["last_alert"] = f"TP1_{today_str}"
+
+                elif dte_remaining <= LEAP_ROLL_DTE and f"ROLL_{today_str}" not in last_alert:
+                    send_essentials_embed(
+                        WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 🔄 Roll Consideration",
+                        f"┣ QQQ PUT ${strike:.2f} exp {expiry_str} — `{dte_remaining} DTE` remaining\n"
+                        f"┣ P&L proxy: `{pnl_proxy:+.1f}%`\n"
+                        "┗ Approach 90 DTE: roll forward if thesis intact, or close if target hit.",
+                        color_val
+                    )
+                    pos["last_alert"] = f"ROLL_{today_str}"
+
+                updated_positions.append(pos)
+            except Exception as e:
+                logger.warning(f"LEAP PUT monitor failed for position {pos}: {e}")
+                updated_positions.append(pos)
+
+        if len(updated_positions) != len(positions):
+            db.update_state("tqqq_leap_put_positions", updated_positions)
+
     def execute_sniper_sweep(self):
         if not is_market_hours():
             logger.info("Market closed — TQQQ sniper standing down.")
@@ -1517,16 +2066,31 @@ class TQQQTacticalSniper:
         # Insurance put renewal clock — runs every sweep, fully independent of the sniper signal.
         self.check_insurance_put_renewal()
 
-        # LEAP desk: inverse entry to the sniper — fires on red days / below EMA21.
-        # Runs once per calendar day (evaluate_leap_entry has an internal date gate).
-        leap_setup = self.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily)
+        # Cycle position score — shared by both CALL and PUT desks.
+        # RSI, 52w high/low, CNN F&G fetched once and reused for both directions.
+        ext_metrics = self.fetch_qqq_extended_metrics()
+        cycle = self.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
+        logger.debug(f"Cycle score — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
+
+        # LEAP CALL desk: BTO deep ITM TQQQ calls on red days / oversold conditions.
+        # Gated by bottom_score >= CYCLE_BOTTOM_THRESHOLD so low-fear red days don't fire.
+        leap_setup = self.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily, cycle)
         if leap_setup:
             leap_setup = self.enrich_leap_with_tradier_chain(leap_setup)
             leap_setup = self.enrich_leap_with_greeks(leap_setup, tqqq_daily)
             self.dispatch_leap_signal(leap_setup)
 
+        # LEAP PUT desk: BTO deep ITM QQQ puts on green days / overbought conditions.
+        # Gated by top_score >= CYCLE_TOP_THRESHOLD so low-conviction green days don't fire.
+        put_setup = self.evaluate_leap_put_entry(daily, intraday, vix_price, vix_z, breadth, cycle)
+        if put_setup:
+            put_setup = self.enrich_leap_put_with_tradier_chain(put_setup)
+            self.dispatch_leap_put_signal(put_setup)
+
         # Monitor any open LEAP positions (monthly check-ins, TP/stop/roll alerts).
         self.check_leap_position_status(tqqq_spot_now)
+        qqq_spot_now = daily.get("spot", 0.0)
+        self.check_leap_put_position_status(qqq_spot_now)
 
         setup = self.evaluate_snipe(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq)
 
@@ -1580,8 +2144,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if "--test-leap" in sys.argv:
-        # Force one full LEAP evaluation regardless of date gate or cooldown.
-        logger.info("🧪 TEST MODE — forcing LEAP desk evaluation")
+        logger.info("🧪 TEST MODE — forcing LEAP CALL desk evaluation")
         db.update_state("tqqq_last_leap_signal_ts", 0)
         sniper = TQQQTacticalSniper()
         daily = sniper.fetch_daily_baseline()
@@ -1591,14 +2154,39 @@ if __name__ == "__main__":
         breadth = sniper.fetch_breadth()
         if daily and intraday:
             daily["adx_macd"] = sniper.fetch_adx_macd()
-            leap_setup = sniper.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily)
+            ext_metrics = sniper.fetch_qqq_extended_metrics()
+            cycle = sniper.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
+            logger.info(f"Cycle scores — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
+            leap_setup = sniper.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily, cycle)
             if leap_setup:
                 leap_setup = sniper.enrich_leap_with_tradier_chain(leap_setup)
                 leap_setup = sniper.enrich_leap_with_greeks(leap_setup, tqqq_daily)
                 sniper.dispatch_leap_signal(leap_setup)
-                logger.info("LEAP test dispatch complete.")
+                logger.info("LEAP CALL test dispatch complete.")
             else:
-                logger.info("LEAP: no entry conditions met — market not red/bearish enough.")
+                logger.info(f"LEAP CALL: no entry conditions met (bottom_score={cycle['bottom_score']}).")
+        sys.exit(0)
+
+    if "--test-leap-put" in sys.argv:
+        logger.info("🧪 TEST MODE — forcing LEAP PUT desk evaluation")
+        db.update_state("tqqq_last_leap_put_signal_ts", 0)
+        sniper = TQQQTacticalSniper()
+        daily = sniper.fetch_daily_baseline()
+        intraday = sniper.fetch_intraday_metrics()
+        vix_price, vix_z = sniper.fetch_vix()
+        breadth = sniper.fetch_breadth()
+        if daily and intraday:
+            daily["adx_macd"] = sniper.fetch_adx_macd()
+            ext_metrics = sniper.fetch_qqq_extended_metrics()
+            cycle = sniper.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
+            logger.info(f"Cycle scores — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
+            put_setup = sniper.evaluate_leap_put_entry(daily, intraday, vix_price, vix_z, breadth, cycle)
+            if put_setup:
+                put_setup = sniper.enrich_leap_put_with_tradier_chain(put_setup)
+                sniper.dispatch_leap_put_signal(put_setup)
+                logger.info("LEAP PUT test dispatch complete.")
+            else:
+                logger.info(f"LEAP PUT: no entry conditions met (top_score={cycle['top_score']}).")
         sys.exit(0)
 
     if "--log-leap" in sys.argv:
@@ -1638,6 +2226,30 @@ if __name__ == "__main__":
             "strike": args.strike, "expiration": args.expiration, "premium": args.premium
         })
         logger.info(f"Insurance put logged: ${args.strike} exp {args.expiration} premium ${args.premium:.2f}")
+        sys.exit(0)
+
+    if "--log-leap-put" in sys.argv:
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--log-leap-put", action="store_true")
+        parser.add_argument("--strike", type=float, required=True)
+        parser.add_argument("--expiration", type=str, required=True, help="YYYY-MM-DD")
+        parser.add_argument("--premium", type=float, required=True, help="Premium paid per share")
+        parser.add_argument("--entry-price", type=float, required=True, help="QQQ spot price at entry")
+        args = parser.parse_args()
+        positions = db.get_state("tqqq_leap_put_positions") or []
+        positions.append({
+            "strike": args.strike,
+            "expiration": args.expiration,
+            "premium": args.premium,
+            "entry_qqq_spot": args.entry_price,
+            "entry_date": datetime.now().strftime("%Y-%m-%d"),
+        })
+        db.update_state("tqqq_leap_put_positions", positions)
+        logger.info(
+            f"LEAP PUT logged: ${args.strike} PUT exp {args.expiration} "
+            f"premium ${args.premium:.2f}/share | QQQ @ ${args.entry_price:.2f}"
+        )
         sys.exit(0)
 
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
