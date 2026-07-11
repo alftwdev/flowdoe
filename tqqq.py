@@ -205,7 +205,14 @@ class TQQQTacticalSniper:
             return None
 
     def fetch_daily_baseline(self):
-        """QQQ daily series for SMA200/SMA50 macro posture."""
+        """QQQ daily series for SMA200/SMA50 macro posture. Cached once per trading day —
+        SMA200 doesn't change meaningfully between 15-min sweeps."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"tqqq_daily_baseline_{today_str}"
+        cached = db.get_state(cache_key)
+        if cached:
+            return cached
+
         params = {"symbol": self.proxy_symbol, "interval": "1day", "outputsize": "200", "apikey": TWELVE_DATA_API_KEY}
         try:
             res = requests.get(f"{self.base_url}/time_series", params=params, timeout=12).json()
@@ -214,12 +221,14 @@ class TQQQTacticalSniper:
             df = pd.DataFrame(res["values"])
             df["close"] = df["close"].astype(float)
             df = df.iloc[::-1].reset_index(drop=True)
-            return {
-                "spot": df["close"].iloc[-1],
-                "sma200": df["close"].rolling(window=200).mean().iloc[-1],
-                "sma50": df["close"].rolling(window=50).mean().iloc[-1],
-                "ema21": df["close"].ewm(span=21, adjust=False).mean().iloc[-1],
+            result = {
+                "spot": float(df["close"].iloc[-1]),
+                "sma200": float(df["close"].rolling(window=200).mean().iloc[-1]),
+                "sma50": float(df["close"].rolling(window=50).mean().iloc[-1]),
+                "ema21": float(df["close"].ewm(span=21, adjust=False).mean().iloc[-1]),
             }
+            db.update_state(cache_key, result)
+            return result
         except Exception as e:
             logger.error(f"Daily baseline fetch failed: {e}")
             return None
@@ -263,7 +272,16 @@ class TQQQTacticalSniper:
             return None
 
     def fetch_tqqq_daily_series(self, outputsize=30):
-        """TQQQ's own daily OHLC — for self-derived ATR% and realized volatility (RV20)."""
+        """TQQQ's own daily OHLC — for ATR% and RV20. Cached once per trading day."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"tqqq_daily_series_{today_str}"
+        cached = db.get_state(cache_key)
+        if cached:
+            try:
+                return pd.DataFrame(cached)
+            except Exception:
+                pass
+
         params = {"symbol": self.symbol, "interval": "1day", "outputsize": str(outputsize), "apikey": TWELVE_DATA_API_KEY}
         try:
             res = requests.get(f"{self.base_url}/time_series", params=params, timeout=12).json()
@@ -272,7 +290,9 @@ class TQQQTacticalSniper:
             df = pd.DataFrame(res["values"])
             for col in ("open", "high", "low", "close"):
                 df[col] = df[col].astype(float)
-            return df.iloc[::-1].reset_index(drop=True)
+            df = df.iloc[::-1].reset_index(drop=True)
+            db.update_state(cache_key, df.to_dict(orient="list"))
+            return df
         except Exception as e:
             logger.error(f"TQQQ daily series fetch failed: {e}")
             return None

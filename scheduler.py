@@ -1076,8 +1076,6 @@ def main():
         elif args.mode == "spx_income":
             try:
                 from tradier_client import TradierClient
-                from analytics import HighFidelityAnalyticsEngine
-                engine = HighFidelityAnalyticsEngine()
                 tc = TradierClient()
 
                 # Gate: VIXY z-score < 0.5 + SPY breadth > 60% (low-vol only)
@@ -1109,7 +1107,6 @@ def main():
                             f"Not financial advice — educational/informational only."
                         )
                         color = 0x2ecc71 if rr <= 3 else 0xf1c40f
-                        WEBHOOK_OPTIONS = os.getenv("WEBHOOK_TRADE_SIGNALS")
                         if WEBHOOK_OPTIONS:
                             send_essentials_embed(WEBHOOK_OPTIONS, "SPX Income | 0DTE Condor", payload, color)
                             logger.info(f"SPX income condor dispatched: credit ${condor['credit']:.2f}, R:R 1:{rr}")
