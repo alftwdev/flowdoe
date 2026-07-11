@@ -54,7 +54,7 @@ LEAP_DTE_MIN = 270          # 9 months minimum runway
 LEAP_DTE_MAX = 540          # 18 months maximum runway
 LEAP_DELTA_TARGET = 0.72    # deep ITM — high intrinsic, lower theta-decay %
 LEAP_DELTA_BAND = 0.06      # accept delta in [0.66, 0.78]
-LEAP_COOLDOWN_DAYS = 5      # min calendar days between LEAP entry signals
+LEAP_COOLDOWN_HOURS = 2     # min hours between LEAP entry signals — re-evaluates the bottom on continued downtrends
 LEAP_CUT_THRESHOLD = -30.0  # % underlying move → reassessment alert (not auto-close)
 LEAP_TP1_PCT = 50.0         # % gain → scale 50% out
 LEAP_TP2_PCT = 100.0        # % gain → close remainder
@@ -1032,24 +1032,18 @@ class TQQQTacticalSniper:
         Entry is intentionally permissive — the sniper catches confirmation; the
         LEAP desk catches fear. False positives have defined, bounded loss.
         """
-        today_str = datetime.now().strftime("%Y-%m-%d")
-
-        # Once-per-day gate — LEAP is a daily call, not a 15-min sweep
-        if db.get_state("tqqq_leap_check_date", "") == today_str:
-            return None
-
-        # Cooldown — max 1 LEAP signal per 5 calendar days
-        last_signal = db.get_state("tqqq_last_leap_signal_date", "")
-        if last_signal:
+        # 2-hour cooldown between LEAP signals — lets a continued downtrend fire again so
+        # the user can track the bottom across multiple hours and choose the best entry.
+        import time as _time
+        last_ts = db.get_state("tqqq_last_leap_signal_ts", 0)
+        if last_ts:
             try:
-                if (datetime.now() - datetime.strptime(last_signal, "%Y-%m-%d")).days < LEAP_COOLDOWN_DAYS:
-                    db.update_state("tqqq_leap_check_date", today_str)
-                    logger.debug(f"LEAP cooldown active — last signal {last_signal}")
+                elapsed_hours = (_time.time() - float(last_ts)) / 3600
+                if elapsed_hours < LEAP_COOLDOWN_HOURS:
+                    logger.debug(f"LEAP cooldown active — {elapsed_hours:.1f}h since last signal ({LEAP_COOLDOWN_HOURS}h required)")
                     return None
             except Exception:
                 pass
-
-        db.update_state("tqqq_leap_check_date", today_str)
 
         qqq_spot = daily["spot"]
         ema21 = daily.get("ema21", 0.0)
@@ -1360,7 +1354,8 @@ class TQQQTacticalSniper:
                 execution_payload, color
             )
 
-        db.update_state("tqqq_last_leap_signal_date", datetime.now().strftime("%Y-%m-%d"))
+        import time as _time
+        db.update_state("tqqq_last_leap_signal_ts", _time.time())
         logger.info(f"LEAP signal dispatched — TQQQ ${leap_setup['tqqq_spot']:.2f}, {header_tag}")
 
     def check_leap_position_status(self, tqqq_spot: float):
@@ -1587,8 +1582,7 @@ if __name__ == "__main__":
     if "--test-leap" in sys.argv:
         # Force one full LEAP evaluation regardless of date gate or cooldown.
         logger.info("🧪 TEST MODE — forcing LEAP desk evaluation")
-        db.update_state("tqqq_leap_check_date", None)
-        db.update_state("tqqq_last_leap_signal_date", None)
+        db.update_state("tqqq_last_leap_signal_ts", 0)
         sniper = TQQQTacticalSniper()
         daily = sniper.fetch_daily_baseline()
         intraday = sniper.fetch_intraday_metrics()
