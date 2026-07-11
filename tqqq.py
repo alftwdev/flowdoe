@@ -612,28 +612,37 @@ class TQQQTacticalSniper:
                 f"${setup['real_strike']:.2f} {setup['contract']} — "
                 f"{setup['real_expiry']} ({setup['real_dte']} DTE)"
             )
-            greeks_line = f"Δ {setup['real_delta']:.2f} (chain) | IV {setup['real_iv']:.1f}% (chain)"
-            prem_line = f"~${setup['real_premium'] * 100:.0f} per contract (mid-market)"
-            liquidity_line = f"┣ Liquidity: Volume `{setup.get('real_volume', 0):,}` | OI `{setup.get('real_oi', 0):,}` (range `{setup.get('real_oi_low', 0):,}`–`{setup.get('real_oi_high', 0):,}`)\n"
+            delta_so_what = f"Δ {setup['real_delta']:.2f} — {abs(setup['real_delta']):.0%} probability ITM at expiry"
+            cost_line = f"┣ Cost: ~${setup['real_premium'] * 100:.0f}/contract (mid-market)\n"
+            liquidity_line = f"┣ Liquidity: Volume `{setup.get('real_volume', 0):,}` | OI `{setup.get('real_oi', 0):,}`\n"
         else:
             est_strike = setup['tqqq_spot'] * (1.05 if setup['contract'] == "CALL" else 0.95)
             contract_line = f"~${est_strike:.2f} {setup['contract']} — 10-21 DTE"
-            greeks_line = "Δ 0.35-0.45 (target range)"
-            prem_line = "Fetch live chain for precise pricing"
+            delta_so_what = "Δ 0.35–0.45 target — moderate leverage, ~35-45% prob ITM at expiry"
+            cost_line = ""  # no Tradier data — omit rather than show placeholder
             liquidity_line = ""
 
         bs_block = ""
         if "bs_delta" in setup:
+            theta_dollar = setup['bs_theta'] * 100  # per contract
+            vega_dollar  = setup['bs_vega'] * 100
             bs_block = (
-                f"┣ Self-Derived Greeks (RV20-based, conviction cross-check):\n"
-                f"┃  Δ {setup['bs_delta']:+.2f} | Γ {setup['bs_gamma']:.4f} | "
-                f"Θ {setup['bs_theta']:+.3f}/day | Vega {setup['bs_vega']:.3f}\n"
-                f"┃  Strike ${setup['bs_strike']:.2f} | IV {setup['bs_iv_est']:.1f}% [{setup.get('bs_iv_source','proxy')}] RV20 {setup['bs_rv20']:.1f}% | "
-                f"Theo Price ${setup['bs_theo_price']:.2f}\n"
-                f"┣ Risk-Neutral Prob. ITM at Expiry: {setup['bs_prob_itm']:.1f}%\n"
-                f"┣ Breakeven: ${setup['bs_breakeven']:.2f} | ATR-Projected Move ({setup.get('real_dte', 15)}D): ${setup['expected_move']:.2f}\n"
+                f"┣ Math Check (RV20-based Black-Scholes):\n"
+                f"┃  Strike ${setup['bs_strike']:.2f} | Theo ${setup['bs_theo_price']:.2f}"
+                + (f" (chain mid ~${setup['real_premium']*100:.0f})" if "real_strike" in setup else "")
+                + f" | IV {setup['bs_iv_est']:.1f}% [{setup.get('bs_iv_source','proxy')}] vs RV20 {setup['bs_rv20']:.1f}%\n"
+                f"┃  Decay: {theta_dollar:+.2f}/day per contract | IV sensitivity: ${vega_dollar:.2f} per 1% IV move\n"
             )
-        rr_line = f"┣ Risk/Reward (premium vs. ATR-projected move): 1:{setup['risk_reward']:.1f}\n" if setup.get("risk_reward") else ""
+
+        prob_rr_line = ""
+        if "bs_prob_itm" in setup:
+            rr_str = f" | R/R 1:{setup['risk_reward']:.1f}" if setup.get("risk_reward") else ""
+            prob_rr_line = f"┣ Prob. ITM at Expiry: {setup['bs_prob_itm']:.1f}%{rr_str} | Breakeven: ${setup['bs_breakeven']:.2f}\n"
+
+        atr_move_line = ""
+        if setup.get("expected_move"):
+            atr_move_line = f"┣ ATR-Projected Move ({setup.get('real_dte', 15)}D): ${setup['expected_move']:.2f} from current\n"
+
         structure_line = ""
         if structure and structure["setup"] != "NO STRUCTURE SETUP":
             confirm_tag = " ✅ CONFIRMS DIRECTION" if structure_confirms else ""
@@ -643,7 +652,7 @@ class TQQQTacticalSniper:
         macro = "BULL REGIME" if setup["qqq_spot"] > setup["sma200"] else "BEAR REGIME"
         vix_tag = "🔴 FEAR SPIKE" if setup["vix_z"] >= VIX_CRISIS_Z else ("🟡 ELEVATED" if setup["vix_z"] >= 0.75 else "🟢 CALM")
         breadth_tag = "🔴 COLLAPSING" if setup["breadth"] < BREADTH_COLLAPSE else ("🟢 STRONG" if setup["breadth"] >= BREADTH_STRONG else "🟡 MIXED")
-        atr_tag = "🔴 EXTREME" if setup["atr_pct_tqqq"] >= ATR_EXTREME else ("🟡 ELEVATED" if setup["atr_pct_tqqq"] >= ATR_ELEVATED else "🟢 NORMAL")
+        atr_tag = "🔴 EXTREME (high chop risk)" if setup["atr_pct_tqqq"] >= ATR_EXTREME else ("🟡 ELEVATED" if setup["atr_pct_tqqq"] >= ATR_ELEVATED else "🟢 NORMAL")
 
         adx_val = setup.get("adx", 0.0)
         adx_tag = "🔴 CHOP (<20)" if adx_val < 20 else ("🟡 WEAK (20-25)" if adx_val < 25 else "🟢 TRENDING (>25)")
@@ -652,29 +661,35 @@ class TQQQTacticalSniper:
                    ("▼ expanding" if setup.get("macd_expanding") and macd_hist < 0 else "→ compressing")
         macd_tag = f"{'🟢' if setup.get('macd_bull') else '🔴'} {macd_hist:+.3f} {macd_dir}"
 
-        payload = (
+        # Embed 1: Market regime/conditions — the "why now" context
+        regime_payload = (
             f"QQQ Proxy | Macro: {macro} | Intraday: {posture}\n"
             f"┣ QQQ Spot: `${setup['qqq_spot']:,.2f}` | VWAP: `${setup['qqq_vwap']:,.2f}`\n"
             f"┣ VWAP Z-Score: `{setup['z_score']:+.2f}σ` | Volume Surge Z: `{setup['vol_z']:+.2f}σ`\n"
             f"┣ ADX (14): `{adx_val:.1f}` {adx_tag} | MACD Hist: {macd_tag}\n"
-            f"┣ VIXY `{setup['vix']:.2f}` (z `{setup['vix_z']:+.2f}σ` {vix_tag}) | Breadth: `{setup['breadth']:.0%}` {breadth_tag} | ATR%: `{setup['atr_pct_tqqq']:.1%}` {atr_tag}\n"
-            f"┗ {status_tag}\n\n"
-            f"TQQQ @ ${setup['tqqq_spot']:.2f}\n"
-            f"┣ Directive: {setup['action']} {setup['contract']}\n"
-            f"┣ Contract: {contract_line}\n"
-            f"┣ Greeks: {greeks_line}\n"
-            f"┣ Est. Cost: {prem_line}\n"
+            f"┣ VIXY `{setup['vix']:.2f}` (z `{setup['vix_z']:+.2f}σ` {vix_tag}) | Breadth: `{setup['breadth']:.0%}` {breadth_tag}\n"
+            f"┗ ATR% (TQQQ daily range): `{setup['atr_pct_tqqq']:.1%}` {atr_tag}"
+        )
+
+        # Embed 2: Contract/execution — the "what to do" block
+        execution_payload = (
+            f"TQQQ @ `${setup['tqqq_spot']:.2f}`\n"
+            f"┣ 🎯 {setup['action']}: {contract_line}\n"
+            f"{cost_line}"
             f"{liquidity_line}"
+            f"┣ Entry Delta: {delta_so_what}\n"
             f"{bs_block}"
-            f"{rr_line}"
+            f"{prob_rr_line}"
+            f"{atr_move_line}"
             f"{structure_line}"
-            f"┗ Stop: −35% premium or 15m pivot break\n\n"
-            f"Take Profit: Scale 50% at +100%, trail remainder with 15m 21-EMA\n"
+            f"┣ Stop: −35% premium or 15m pivot break\n"
+            f"┗ Take Profit: Scale 50% at +100%, trail remainder with 15m 21-EMA\n\n"
             f"Exit Signal: Will fire automatically when Z-score reverts or reverses — watch this channel."
         )
 
         if WEBHOOK_TRADE_SIGNALS:
-            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, title, payload, color)
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, title, regime_payload, color)
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, f"{'BTO EXECUTION' if is_live else 'CONTRACT SETUP'} | TQQQ {setup['contract']}", execution_payload, color)
 
         if is_live:
             db.update_state("tqqq_last_live_signal_date", datetime.now().strftime("%Y-%m-%d"))
