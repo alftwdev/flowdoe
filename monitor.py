@@ -423,18 +423,22 @@ def check_crisis_amplification_risk(session):
 
 def _fetch_rvol_native(symbol: str):
     """
-    Fetch RVOL from TD's native RVOLEndpoint — more accurate than a manual 20D rolling
-    ratio because TD applies their own session-aware volume normalization.
+    Fetch RVOL via plain REST — previously used TDClient SDK which spawned a WebSocket
+    thread on every call, exhausting PythonAnywhere's thread limit over time.
     Returns the float rvol ratio, or None on failure (caller falls back to manual calc).
     """
     try:
-        from twelvedata import TDClient
-        td     = TDClient(apikey=TD_API_KEY)
-        result = td.rvol(symbol=symbol, interval="1day").as_json()
-        if result and len(result) > 0:
-            return float(result[0].get("rvol", 1.0))
+        import requests as _req
+        r = _req.get(
+            "https://api.twelvedata.com/rvol",
+            params={"symbol": symbol, "interval": "1day", "outputsize": 1, "apikey": TD_API_KEY},
+            timeout=10
+        ).json()
+        values = r.get("values", [])
+        if values:
+            return float(values[0].get("rvol", 1.0))
     except Exception as e:
-        logger.debug(f"[RVOL Native] {symbol}: {e} — falling back to manual")
+        logger.debug(f"[RVOL REST] {symbol}: {e} — falling back to manual")
     return None
 
 

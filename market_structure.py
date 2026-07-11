@@ -133,26 +133,38 @@ def calculate_supertrend(symbol_or_df, interval: str = "1day", period: int = 10,
     edge-case rounding differences in the manual loop. The DataFrame path is preserved so
     analyze_market_structure() and any caller without API access continues to work unchanged.
     """
-    # ── TD native path (preferred when a symbol string is provided)
+    # ── REST path (previously used TDClient SDK which spawned WebSocket threads on every call,
+    #    exhausting PythonAnywhere's thread limit. Plain requests.get() is identical data, zero threads.)
     if isinstance(symbol_or_df, str):
         try:
-            import os
-            from twelvedata import TDClient
+            import os, requests as _req
             key = api_key or os.getenv("TWELVE_DATA_API_KEY") or os.getenv("TD_API_KEY")
-            td = TDClient(apikey=key)
-            result = td.supertrend(
-                symbol=symbol_or_df, interval=interval,
-                period=period, multiplier=multiplier
-            ).as_json()
-            if result and len(result) > 0:
-                latest = result[0]
-                raw_trend = str(latest.get("trend", "")).lower()
-                trend_dir = "BULLISH" if raw_trend == "up" else ("BEARISH" if raw_trend == "down" else "NEUTRAL")
-                level = round(float(latest.get("supertrend", 0.0)), 2)
+            # Fetch 2 bars: supertrend level for latest bar, plus current close to derive direction
+            st_res = _req.get(
+                "https://api.twelvedata.com/supertrend",
+                params={"symbol": symbol_or_df, "interval": interval,
+                        "period": period, "multiplier": int(multiplier),
+                        "outputsize": 2, "apikey": key},
+                timeout=10
+            ).json()
+            values = st_res.get("values", [])
+            if values:
+                level = round(float(values[0].get("supertrend", 0.0)), 2)
+                # Direction: fetch latest close and compare to supertrend band
+                price_res = _req.get(
+                    "https://api.twelvedata.com/price",
+                    params={"symbol": symbol_or_df, "apikey": key},
+                    timeout=8
+                ).json()
+                close = float(price_res.get("price", 0.0))
+                if close > 0 and level > 0:
+                    trend_dir = "BULLISH" if close > level else "BEARISH"
+                else:
+                    trend_dir = "NEUTRAL"
                 return {"trend": trend_dir, "level": level}
         except Exception as e:
             import logging
-            logging.getLogger("market_structure").error(f"TD SuperTrend native failed for {symbol_or_df}: {e}")
+            logging.getLogger("market_structure").error(f"SuperTrend REST failed for {symbol_or_df}: {e}")
         return {"trend": "NEUTRAL", "level": 0.0}
 
     # ── DataFrame fallback path (callers that pass OHLCV directly)
