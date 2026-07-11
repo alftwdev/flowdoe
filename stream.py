@@ -163,8 +163,39 @@ class RealTimeTickAgent:
 # =====================================================================
 # DAEMON ORCHESTRATOR
 # =====================================================================
+PID_FILE = os.path.join(BASE_DIR, "stream.pid")
+
+def _acquire_pid_lock():
+    """
+    Prevent multiple concurrent stream.py instances. PythonAnywhere restarts the
+    always-on task without guaranteeing the previous process is dead — each new
+    instance was opening its own WebSocket, creating connection storms at every
+    restart. Write our PID; if another PID file exists and that process is alive,
+    exit immediately so the existing instance keeps running uninterrupted.
+    """
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if that process is still alive (signal 0 = existence check)
+            os.kill(old_pid, 0)
+            logger.warning(f"Another stream.py instance (PID {old_pid}) is already running — exiting.")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError):
+            # Stale PID file — previous process is gone, safe to take over
+            pass
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def _release_pid_lock():
+    try:
+        os.remove(PID_FILE)
+    except OSError:
+        pass
+
 if __name__ == "__main__":
-    logger.info("Initializing Stream Sentry (WebSocket only)...")
+    _acquire_pid_lock()
+    logger.info(f"Initializing Stream Sentry (WebSocket only) — PID {os.getpid()}...")
 
     ws_agent = RealTimeTickAgent()
     t1 = threading.Thread(target=ws_agent.execution_loop, name="WS_Streamer", daemon=True)
@@ -175,7 +206,9 @@ if __name__ == "__main__":
             time.sleep(60)
     except KeyboardInterrupt:
         logger.info("Operator triggered shutdown.")
+        _release_pid_lock()
         sys.exit(0)
     except Exception as e:
         logger.critical(f"Unhandled system crash: {e}")
+        _release_pid_lock()
         sys.exit(1)

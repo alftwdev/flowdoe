@@ -251,16 +251,6 @@ class TQQQTacticalSniper:
             latest = df.iloc[-1]
             spot = latest["close"]
 
-            # Overlay WS price when it's fresher than the last 5-min bar close — this
-            # closes the gap between a REST bar's timestamp and actual current price.
-            try:
-                from shared_ws import get_ws_manager
-                ws_mgr = get_ws_manager()
-                ws_price = ws_mgr.get_price(self.proxy_symbol)
-                if ws_mgr.is_fresh(self.proxy_symbol, 30) and ws_price > 0:
-                    spot = ws_price
-            except Exception:
-                pass
 
             return {
                 "spot": spot,
@@ -742,15 +732,7 @@ class TQQQTacticalSniper:
         if not exit_reason:
             return
 
-        # Use WebSocket price if fresh (< 60s old) — avoids a REST round-trip on every exit check.
-        # Falls back to REST if WS hasn't delivered a quote yet (e.g. pre-market, first startup).
-        try:
-            from shared_ws import get_ws_manager
-            ws_mgr = get_ws_manager()
-            tqqq_spot = ws_mgr.get_price(self.symbol) if ws_mgr.is_fresh(self.symbol, 60) else 0.0
-        except Exception:
-            tqqq_spot = 0.0
-
+        tqqq_spot = 0.0
         if not tqqq_spot:
             try:
                 tqqq_spot = float(requests.get(
@@ -1110,16 +1092,9 @@ if __name__ == "__main__":
 
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
 
-    # WebSocket: real-time QQQ and TQQQ price stream.
-    # Exit checks fire against the WS price (< 60s) rather than waiting for the next REST tick.
-    # Shared with monitor.py — one connection slot covers both daemons.
-    try:
-        from shared_ws import get_ws_manager
-        ws_mgr = get_ws_manager()
-        ws_mgr.start_background()
-        logger.info("[WS] Shared WebSocket manager started — QQQ/TQQQ streaming active.")
-    except Exception as e:
-        logger.warning(f"[WS] WebSocket startup failed (REST polling continues): {e}")
+    # WS removed: shared_ws.py created a new connection per process restart (module-level
+    # singleton doesn't survive across PythonAnywhere restarts), causing concurrent
+    # connection storms. REST polling every sweep covers all price data needed.
 
     sniper = TQQQTacticalSniper()
     while True:

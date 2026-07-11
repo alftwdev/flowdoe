@@ -1461,18 +1461,11 @@ def run_monitor():
         return
 
     logger.info("⏳ [Engine Loop] Cornerstone monitor active. DB state tracking enabled.")
-
-    # ── WebSocket: real-time CLM/CRF/VIXY price stream
-    # Supplements the 5-min REST polling loop — price moves trigger immediate
-    # escalation checks rather than waiting for the next scheduled tick.
-    try:
-        from shared_ws import get_ws_manager
-        ws_mgr = get_ws_manager()
-        ws_mgr.register_callback(_make_ws_callback())
-        ws_mgr.start_background()
-        logger.info("[WS] Shared WebSocket manager started — CLM/CRF/VIXY streaming active.")
-    except Exception as e:
-        logger.warning(f"[WS] WebSocket startup failed (REST polling continues): {e}")
+    # WS removed: the callback had a 300s debounce — identical to the REST polling
+    # interval. Multiple monitor.py process restarts were each opening a new SDK
+    # WebSocket connection (module-level singleton doesn't persist across processes),
+    # creating N concurrent connection storms that hammered TD and burned CPU.
+    # REST polling every 5 min is the protection engine — WS adds no unique value here.
 
     while True:
         now_utc_h = datetime.now(timezone.utc).hour
