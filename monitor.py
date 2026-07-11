@@ -790,9 +790,12 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["sec_n2"]
     if "N-2/A" in sec_shield:
         score += RO_SCORE_WEIGHTS["sec_n2a"]
-    if "N-CSR" in sec_shield:
+    # N-CSR and DEF 14A are routine filings (semi-annual report, annual proxy) —
+    # always present in EDGAR, they don't signal RO risk on their own.
+    # Only add weight when already elevated by a real signal (N-2 or z_danger).
+    if "N-CSR" in sec_shield and score > 0:
         score += RO_SCORE_WEIGHTS["sec_ncsr"]
-    if "DEF 14A" in sec_shield:
+    if "DEF 14A" in sec_shield and score > 0:
         score += RO_SCORE_WEIGHTS["sec_def14a"]
     if z_premium >= 2.0:
         score += RO_SCORE_WEIGHTS["z_danger"]
@@ -1360,10 +1363,21 @@ def send_daily_pulse(is_test=False):
             flip = gex.get("flip_strike", 0.0)
             pc = gex.get("pc_oi_ratio", 1.0)
             gex_total = gex.get("gex_total")
+            is_neg = "NEGATIVE" in gex.get("market_state", "")
+            gex_note = (
+                f"dealers amplify moves — volatility risk elevated for CLM/CRF premium" if is_neg else
+                "dealers suppress moves — stable environment for premium/CEF positioning"
+            )
+            pc_note = (
+                "options market leaning bearish — watch for CLM/CRF premium compression" if "PUT-HEAVY" in gex.get("pc_tag","") else
+                ("options market leaning bullish — premium expansion likely" if "CALL-HEAVY" in gex.get("pc_tag","") else
+                 "options market neutral")
+            )
             gex_line = (
                 f"┣ SPY GEX: {gex['market_state']} | Flip ${flip:,.0f}"
                 + (f" | Net {gex_total:+.1f}B" if gex_total is not None else "")
-                + f"\n┣ P/C OI: {pc} — {gex['pc_tag']}\n"
+                + f" — {gex_note}\n"
+                + f"┣ P/C OI: {pc} — {gex['pc_tag']} | {pc_note}\n"
             )
             full_report = gex_line + full_report
     except Exception:
