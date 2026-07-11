@@ -1045,7 +1045,12 @@ class TQQQTacticalSniper:
         if cached:
             return cached
 
-        result = {"rsi14": 50.0, "high_52w": 0.0, "low_52w": 0.0, "fear_greed": 50.0}
+        result = {
+            "rsi14": 50.0, "high_52w": 0.0, "low_52w": 0.0, "fear_greed": 50.0,
+            "put_call_ratio": 1.0,      # SPY aggregate OI P/C — neutral default
+            "vix_term_slope": 0.0,      # VIX9D - VIX3M: negative = contango (calm), positive = backwardation (fear)
+            "vix9d": 0.0, "vix3m": 0.0,
+        }
 
         try:
             r = requests.get(
@@ -1081,6 +1086,70 @@ class TQQQTacticalSniper:
         except Exception as e:
             logger.warning(f"CNN Fear & Greed fetch failed: {e}")
 
+        # VIX term structure via ETF proxies (VIX9D/VIX3M unavailable at this Twelve Data tier)
+        # VIXY = short-term VIX futures (~1-month); VXZ = medium-term VIX futures (~5-month)
+        # VIXY/VXZ ratio > 1 = front-month fear > back-month = backwardation = sustained fear
+        # VIXY/VXZ ratio < 1 = contango = near-term calm vs longer-dated uncertainty
+        # Normalized slope: (VIXY/VXZ - 1) * 10 maps to roughly the same scale as VIX9D-VIX3M pts
+        try:
+            vix_batch = requests.get(
+                f"{self.base_url}/price",
+                params={"symbol": "VIXY,VXZ", "apikey": TWELVE_DATA_API_KEY},
+                timeout=10
+            ).json()
+            vixy_p = float((vix_batch.get("VIXY") or {}).get("price", 0.0))
+            vxz_p = float((vix_batch.get("VXZ") or {}).get("price", 0.0))
+            if vixy_p > 0 and vxz_p > 0:
+                ratio = vixy_p / vxz_p
+                result["vix9d"] = vixy_p   # labeled as vix9d for downstream compat
+                result["vix3m"] = vxz_p    # labeled as vix3m
+                result["vix_term_slope"] = round((ratio - 1) * 10, 2)  # + = backwardation
+        except Exception as e:
+            logger.warning(f"VIX term structure fetch failed: {e}")
+
+        # Put/Call ratio from SPY options chain (Tradier) — OI across TWO near-term expiries.
+        # SPY structurally has high put OI (institutions hedge here, buy calls via QQQ/TQQQ),
+        # so raw ratio isn't meaningful alone. We store a 30-day rolling average in DB and
+        # score on the Z-score vs that baseline — a spike vs YOUR OWN history is the signal.
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+            if tc.api_key:
+                # Aggregate OI across two nearest expirations to smooth weekly-expiry skew
+                exps = tc.get_expirations("SPY")
+                today_d = datetime.utcnow().date()
+                near_exps = sorted(
+                    [e for e in exps if (datetime.strptime(e, "%Y-%m-%d").date() - today_d).days >= 7],
+                    key=lambda e: datetime.strptime(e, "%Y-%m-%d").date()
+                )[:2]
+                put_oi_total = call_oi_total = 0
+                for exp in near_exps:
+                    chain = tc.get_options_chain("SPY", expiration=exp, greeks=False)
+                    if chain:
+                        put_oi_total += sum(int(c.get("open_interest") or 0) for c in chain if c.get("option_type", "").lower() == "put")
+                        call_oi_total += sum(int(c.get("open_interest") or 0) for c in chain if c.get("option_type", "").lower() == "call")
+
+                if call_oi_total > 0:
+                    raw_pc = round(put_oi_total / call_oi_total, 2)
+                    # Update rolling 30-day history in DB
+                    pc_history = db.get_state("spy_pc_ratio_history") or []
+                    pc_history.append(raw_pc)
+                    if len(pc_history) > 30:
+                        pc_history = pc_history[-30:]
+                    db.update_state("spy_pc_ratio_history", pc_history)
+                    # Z-score vs rolling baseline — this is the actual signal
+                    if len(pc_history) >= 5:
+                        import statistics
+                        pc_mean = statistics.mean(pc_history)
+                        pc_std = statistics.stdev(pc_history) if len(pc_history) > 1 else 1.0
+                        pc_z = (raw_pc - pc_mean) / pc_std if pc_std > 0 else 0.0
+                    else:
+                        pc_z = 0.0
+                    result["put_call_ratio"] = raw_pc
+                    result["put_call_ratio_z"] = round(pc_z, 2)
+        except Exception as e:
+            logger.warning(f"P/C ratio fetch failed: {e}")
+
         db.update_state(cache_key, result)
         return result
 
@@ -1101,6 +1170,11 @@ class TQQQTacticalSniper:
         high_52w = ext.get("high_52w", spot)
         low_52w = ext.get("low_52w", spot)
         fg = ext.get("fear_greed", 50.0)
+        pc_ratio = ext.get("put_call_ratio", 1.0)
+        pc_z = ext.get("put_call_ratio_z", 0.0)  # z-score vs 30-day rolling baseline
+        vix_term_slope = ext.get("vix_term_slope", 0.0)  # normalized VIXY/VXZ ratio slope
+        vix9d = ext.get("vix9d", 0.0)
+        vix3m = ext.get("vix3m", 0.0)
         adx_data = daily.get("adx_macd", {}) or {}
         macd_hist = adx_data.get("macd_hist", 0.0)
 
@@ -1143,6 +1217,20 @@ class TQQQTacticalSniper:
         # Below SMA200 (max 5)
         if pct_vs_sma200 < -5:  b += 5
         elif pct_vs_sma200 < 0: b += 3
+
+        # Put/Call ratio Z-score vs 30-day baseline (max 15)
+        # SPY P/C is structurally high (institutions hedge here); raw ratio misleads.
+        # A spike ABOVE that baseline = unusual hedging surge = genuine fear = CALL signal.
+        if pc_z >= 2.0:   b += 15
+        elif pc_z >= 1.2: b += 10
+        elif pc_z >= 0.5: b += 5
+
+        # VIX term structure backwardation (max 12)
+        # VIX9D > VIX3M (positive slope) = market pricing SUSTAINED fear, not a spike
+        # This is the strongest structural confirmation that fear is real, not noise
+        if vix_term_slope >= 3.0:  b += 12
+        elif vix_term_slope >= 1.5: b += 8
+        elif vix_term_slope >= 0.5: b += 4
 
         # MACD bearish (max 3) — tie-breaker, not a primary signal
         if macd_hist < 0: b += 3
@@ -1187,6 +1275,19 @@ class TQQQTacticalSniper:
         if ema21_pct > 5:   t += 5
         elif ema21_pct > 3: t += 3
 
+        # Put/Call ratio Z-score — below baseline = less hedging than usual = complacency (max 15)
+        # A DROP in P/C vs rolling mean = unusual calm = PUT signal (top forming)
+        if pc_z <= -2.0:   t += 15
+        elif pc_z <= -1.2: t += 10
+        elif pc_z <= -0.5: t += 5
+
+        # VIX term structure contango depth (max 10)
+        # VIX9D << VIX3M (deep negative slope) = near-term calm, market not pricing any near risk
+        # Extreme contango is a complacency signal — the vol market is asleep
+        if vix_term_slope <= -3.0:  t += 10
+        elif vix_term_slope <= -2.0: t += 7
+        elif vix_term_slope <= -1.0: t += 4
+
         # MACD bullish (max 3)
         if macd_hist > 0: t += 3
 
@@ -1194,6 +1295,8 @@ class TQQQTacticalSniper:
 
         signals = {
             "rsi14": rsi, "fear_greed": fg,
+            "put_call_ratio": pc_ratio, "put_call_ratio_z": pc_z,
+            "vix_term_slope": vix_term_slope, "vix9d": vix9d, "vix3m": vix3m,
             "drawdown_from_high_pct": drawdown,
             "extension_from_low_pct": extension,
             "pct_vs_sma200": pct_vs_sma200,
@@ -1279,6 +1382,11 @@ class TQQQTacticalSniper:
             "rsi14": sigs.get("rsi14", 50.0),
             "fear_greed": sigs.get("fear_greed", 50.0),
             "drawdown_from_high_pct": sigs.get("drawdown_from_high_pct", 0.0),
+            "put_call_ratio": sigs.get("put_call_ratio", 1.0),
+            "put_call_ratio_z": sigs.get("put_call_ratio_z", 0.0),
+            "vix_term_slope": sigs.get("vix_term_slope", 0.0),
+            "vix9d": sigs.get("vix9d", 0.0),
+            "vix3m": sigs.get("vix3m", 0.0),
         }
 
     def enrich_leap_with_tradier_chain(self, leap_setup):
@@ -1456,13 +1564,22 @@ class TQQQTacticalSniper:
         )
         breadth_line = f"┣ Breadth: `{leap_setup['breadth']:.0%}` of QQQ top-20 above SMA200\n"
         score = leap_setup.get("bottom_score", 0)
+        pc = leap_setup.get("put_call_ratio", 1.0)
+        pc_z_v = leap_setup.get("put_call_ratio_z", 0.0)
+        vts = leap_setup.get("vix_term_slope", 0.0)
+        vix9d_v = leap_setup.get("vix9d", 0.0)
+        vix3m_v = leap_setup.get("vix3m", 0.0)
+        term_label = ("BACKWARDATION ⚠️ — sustained fear" if vts > 1.5 else
+                      "flat" if abs(vts) < 0.5 else "contango — calm structure")
+        pc_label = f"z `{pc_z_v:+.1f}σ` vs 30D mean — {'SPIKE ⚠️ fear surge' if pc_z_v >= 1.2 else 'elevated' if pc_z_v >= 0.5 else 'normal'}"
         rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
+        pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}\n"
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
         score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
 
         regime_payload = (
             f"TQQQ LEAP Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + score_line
         )
 
         # --- Embed 2: Contract setup ---
@@ -1729,6 +1846,11 @@ class TQQQTacticalSniper:
             "extension_from_low_pct": sigs.get("extension_from_low_pct", 0.0),
             "pct_vs_sma200": sigs.get("pct_vs_sma200", 0.0),
             "complacency_mode": vix_z <= -1.0,
+            "put_call_ratio": sigs.get("put_call_ratio", 1.0),
+            "put_call_ratio_z": sigs.get("put_call_ratio_z", 0.0),
+            "vix_term_slope": sigs.get("vix_term_slope", 0.0),
+            "vix9d": sigs.get("vix9d", 0.0),
+            "vix3m": sigs.get("vix3m", 0.0),
         }
 
     def enrich_leap_put_with_tradier_chain(self, put_setup):
@@ -1858,6 +1980,15 @@ class TQQQTacticalSniper:
         )
         breadth_line = f"┣ Breadth: `{put_setup['breadth']:.0%}` of QQQ top-20 above SMA200\n"
         rsi_line = f"┣ RSI14: `{put_setup.get('rsi14', 50):.1f}` | F&G: `{put_setup.get('fear_greed', 50):.0f}/100` | Extension from 52w low: `+{put_setup.get('extension_from_low_pct', 0):.1f}%`\n"
+        pc2 = put_setup.get("put_call_ratio", 1.0)
+        pc_z_v2 = put_setup.get("put_call_ratio_z", 0.0)
+        vts2 = put_setup.get("vix_term_slope", 0.0)
+        vix9d_v2 = put_setup.get("vix9d", 0.0)
+        vix3m_v2 = put_setup.get("vix3m", 0.0)
+        term_label2 = ("deep contango 🟢 — extreme complacency" if vts2 <= -2.0 else
+                       "contango — calm" if vts2 < -0.5 else "flat/backwardation — unusual for top setup")
+        pc_label2 = f"z `{pc_z_v2:+.1f}σ` vs 30D mean — {'DROP ⚠️ complacency surge' if pc_z_v2 <= -1.2 else 'low' if pc_z_v2 <= -0.5 else 'normal'}"
+        pc_line2 = f"┣ SPY P/C: `{pc2:.2f}` ({pc_label2}) | VIX Term: VIXY `{vix9d_v2:.2f}` / VXZ `{vix3m_v2:.2f}` = `{vts2:+.2f}` {term_label2}\n"
 
         score = put_setup.get("top_score", 0)
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
@@ -1865,7 +1996,7 @@ class TQQQTacticalSniper:
 
         context_payload = (
             f"QQQ LEAP PUT Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line2 + score_line
         )
 
         # Contract setup
