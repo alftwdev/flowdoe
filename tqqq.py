@@ -42,6 +42,24 @@ VIX_CRISIS_Z = 1.5         # VIXY z-score vs its own 20D mean — see fetch_vix(
 RISK_FREE_RATE = 0.045
 LIVE_SIGNAL_COOLDOWN_DAYS = 5  # retained for reference, no longer used as a gate — see execute_sniper_sweep
 
+# =========================================================================
+# TQQQ LEAP DESK — Deep ITM long-dated calls on red days / bearish setups.
+# Thesis: buy TIME on a red day. Recovery is virtually certain over a 9-18
+# month horizon on a Nasdaq-100 3× ETF. Defined risk = premium paid only.
+#
+# WARNING: TQQQ is already 3× leveraged. A LEAP on TQQQ = leverage on
+# leverage. Treat as high-conviction, small-size (max 2-3% portfolio).
+# =========================================================================
+LEAP_DTE_MIN = 270          # 9 months minimum runway
+LEAP_DTE_MAX = 540          # 18 months maximum runway
+LEAP_DELTA_TARGET = 0.72    # deep ITM — high intrinsic, lower theta-decay %
+LEAP_DELTA_BAND = 0.06      # accept delta in [0.66, 0.78]
+LEAP_COOLDOWN_DAYS = 5      # min calendar days between LEAP entry signals
+LEAP_CUT_THRESHOLD = -30.0  # % underlying move → reassessment alert (not auto-close)
+LEAP_TP1_PCT = 50.0         # % gain → scale 50% out
+LEAP_TP2_PCT = 100.0        # % gain → close remainder
+LEAP_ROLL_DTE = 90          # DTE remaining → roll forward consideration
+
 
 def is_market_hours():
     """Returns True only during NYSE RTH (09:30–16:00 ET, Mon–Fri)."""
@@ -1003,6 +1021,465 @@ class TQQQTacticalSniper:
 
         db.update_state("tqqq_macro_regime", current_regime)
 
+    # =========================================================================
+    # LEAP DESK METHODS
+    # =========================================================================
+
+    def evaluate_leap_entry(self, daily, intraday, vix_price, vix_z, breadth, tqqq_daily):
+        """
+        Returns leap_setup dict if today is a valid red-day LEAP window, else None.
+        Runs once per calendar day (gated) + 5-day cooldown between signals.
+        Entry is intentionally permissive — the sniper catches confirmation; the
+        LEAP desk catches fear. False positives have defined, bounded loss.
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # Once-per-day gate — LEAP is a daily call, not a 15-min sweep
+        if db.get_state("tqqq_leap_check_date", "") == today_str:
+            return None
+
+        # Cooldown — max 1 LEAP signal per 5 calendar days
+        last_signal = db.get_state("tqqq_last_leap_signal_date", "")
+        if last_signal:
+            try:
+                if (datetime.now() - datetime.strptime(last_signal, "%Y-%m-%d")).days < LEAP_COOLDOWN_DAYS:
+                    db.update_state("tqqq_leap_check_date", today_str)
+                    logger.debug(f"LEAP cooldown active — last signal {last_signal}")
+                    return None
+            except Exception:
+                pass
+
+        db.update_state("tqqq_leap_check_date", today_str)
+
+        qqq_spot = daily["spot"]
+        ema21 = daily.get("ema21", 0.0)
+
+        # Intraday change: fetch_daily_baseline spot = prior EOD close
+        intraday_spot = intraday["spot"] if intraday else qqq_spot
+        intraday_chg_pct = (intraday_spot - qqq_spot) / qqq_spot * 100 if qqq_spot > 0 else 0.0
+
+        is_red_day = intraday_chg_pct < -0.5          # QQQ down 0.5%+ intraday
+        is_below_ema21 = ema21 > 0 and qqq_spot < ema21
+        adx_data = daily.get("adx_macd", {}) or {}
+        is_macd_bear = adx_data.get("macd_hist", 0.0) < 0
+
+        # Need at least one bearish condition: red day OR below EMA21
+        if not (is_red_day or is_below_ema21):
+            logger.debug(f"LEAP: no entry condition — intraday {intraday_chg_pct:+.2f}%, above EMA21")
+            return None
+
+        try:
+            tqqq_spot = float(requests.get(
+                f"{self.base_url}/price",
+                params={"symbol": self.symbol, "apikey": TWELVE_DATA_API_KEY},
+                timeout=8
+            ).json().get("price", 0.0))
+        except Exception:
+            tqqq_spot = 0.0
+
+        if tqqq_spot == 0.0:
+            return None
+
+        atr_pct_tqqq = calculate_atr_pct(tqqq_daily) if tqqq_daily is not None else 0.02
+
+        return {
+            "tqqq_spot": tqqq_spot,
+            "qqq_spot": qqq_spot,
+            "qqq_ema21": ema21,
+            "intraday_chg_pct": intraday_chg_pct,
+            "is_red_day": is_red_day,
+            "is_below_ema21": is_below_ema21,
+            "is_macd_bear": is_macd_bear,
+            "vix_price": vix_price,
+            "vix_z": vix_z,
+            "breadth": breadth,
+            "atr_pct_tqqq": atr_pct_tqqq,
+            "panic_mode": vix_z >= 2.0,
+            "macro_regime": "BEAR" if qqq_spot < daily.get("sma200", qqq_spot * 2) else "BULL",
+            "sma200": daily.get("sma200", 0.0),
+        }
+
+    def enrich_leap_with_tradier_chain(self, leap_setup):
+        """
+        Find the best deep ITM TQQQ call in the 270-540 DTE window via Tradier.
+        Targets delta 0.70-0.75: high intrinsic value, manageable time-decay %.
+        """
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+            if not tc.api_key:
+                return leap_setup
+
+            today = datetime.utcnow().date()
+            exps = tc.get_expirations(self.symbol)
+            tqqq_spot = leap_setup["tqqq_spot"]
+
+            best_contract = None
+            best_delta_diff = float("inf")
+
+            for exp_str in sorted(exps):
+                try:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte < LEAP_DTE_MIN or dte > LEAP_DTE_MAX:
+                        continue
+
+                    chain = tc.get_options_chain(self.symbol, exp_str, greeks=True)
+                    for c in chain:
+                        if c.get("option_type") != "call":
+                            continue
+                        strike = float(c.get("strike", 0))
+                        if strike >= tqqq_spot:  # only ITM calls
+                            continue
+
+                        greeks = c.get("greeks") or {}
+                        delta = float(greeks.get("delta") or 0.0)
+                        iv = float(greeks.get("smv_vol") or c.get("implied_volatility") or 0.0)
+
+                        if delta <= 0 or delta > 1.0:
+                            continue
+
+                        delta_diff = abs(delta - LEAP_DELTA_TARGET)
+                        if delta_diff > LEAP_DELTA_BAND or delta_diff >= best_delta_diff:
+                            continue
+
+                        bid = float(c.get("bid") or 0.0)
+                        ask = float(c.get("ask") or 0.0)
+                        mid = (bid + ask) / 2 if (bid + ask) > 0 else 0.0
+                        if mid <= 0:
+                            continue
+
+                        best_contract = {
+                            "strike": strike,
+                            "expiry": exp_str,
+                            "dte": dte,
+                            "delta": round(delta, 2),
+                            "iv": round(iv * 100 if iv < 5.0 else iv, 1),
+                            "bid": round(bid, 2),
+                            "ask": round(ask, 2),
+                            "mid": round(mid, 2),
+                            "oi": int(c.get("open_interest") or 0),
+                            "volume": int(c.get("volume") or 0),
+                        }
+                        best_delta_diff = delta_diff
+                except Exception:
+                    continue
+
+            if best_contract:
+                intrinsic = max(0.0, tqqq_spot - best_contract["strike"])
+                time_val = max(0.0, best_contract["mid"] - intrinsic)
+                leap_setup.update({
+                    "real_strike": best_contract["strike"],
+                    "real_expiry": best_contract["expiry"],
+                    "real_dte": best_contract["dte"],
+                    "real_delta": best_contract["delta"],
+                    "real_iv": best_contract["iv"],
+                    "real_bid": best_contract["bid"],
+                    "real_ask": best_contract["ask"],
+                    "real_mid": best_contract["mid"],
+                    "real_oi": best_contract["oi"],
+                    "real_volume": best_contract["volume"],
+                    "real_cost_per_contract": round(best_contract["mid"] * 100, 0),
+                    "real_intrinsic": round(intrinsic, 2),
+                    "real_time_value": round(time_val, 2),
+                })
+        except Exception as e:
+            logger.warning(f"LEAP Tradier chain enrichment failed: {e}")
+        return leap_setup
+
+    def enrich_leap_with_greeks(self, leap_setup, tqqq_daily):
+        """
+        Black-Scholes Greeks for the long-dated ITM LEAP contract.
+        Key metrics: theta per day (the ongoing cost of time), total theta over DTE,
+        breakeven at expiry, and how much QQQ needs to move to break even.
+        """
+        if tqqq_daily is None or len(tqqq_daily) < 21:
+            return leap_setup
+        try:
+            returns = tqqq_daily["close"].pct_change().dropna()
+            rv20 = float(returns.tail(20).std() * np.sqrt(252))
+            real_iv = fetch_tqqq_atm_iv(db)
+            iv = real_iv if real_iv > 0 else estimate_iv(rv20, leap_setup.get("vix_price", 18.0))
+
+            dte = leap_setup.get("real_dte", 365)
+            T = dte / 365.0
+            spot = leap_setup["tqqq_spot"]
+
+            strike = leap_setup.get("real_strike")
+            if not strike:
+                strike = find_strike_for_delta(spot, T, RISK_FREE_RATE, iv, LEAP_DELTA_TARGET, "call")
+
+            greeks = bs_greeks(spot, strike, T, RISK_FREE_RATE, iv, "call")
+            theo_price = bs_price(spot, strike, T, RISK_FREE_RATE, iv, "call")
+
+            theta_per_day = greeks["theta"] * 100          # per contract per day
+            total_theta = abs(theta_per_day) * dte          # total decay cost over full DTE
+            breakeven = strike + theo_price
+            breakeven_pct = (breakeven / spot - 1) * 100
+            # TQQQ is ~3× QQQ — QQQ breakeven is approx 1/3 of TQQQ breakeven pct
+            qqq_breakeven_pct = breakeven_pct / 3.0
+
+            leap_setup.update({
+                "bs_strike": round(strike, 2),
+                "bs_iv": round(iv * 100, 1),
+                "bs_rv20": round(rv20 * 100, 1),
+                "bs_delta": round(greeks["delta"], 3),
+                "bs_theta_per_day": round(theta_per_day, 2),
+                "bs_total_theta": round(total_theta, 0),
+                "bs_vega": round(greeks["vega"] * 100, 2),
+                "bs_prob_itm": round(greeks["prob_itm"] * 100, 1),
+                "bs_theo_price": round(theo_price, 2),
+                "bs_breakeven": round(breakeven, 2),
+                "bs_breakeven_pct": round(breakeven_pct, 1),
+                "bs_qqq_breakeven_pct": round(qqq_breakeven_pct, 1),
+            })
+        except Exception as e:
+            logger.warning(f"LEAP Greeks calculation failed: {e}")
+        return leap_setup
+
+    def dispatch_leap_signal(self, leap_setup):
+        """
+        Two Discord embeds: (1) why now — red day conditions, (2) LEAP contract setup.
+        Orange color (0xe67e22) distinguishes LEAP signals from sniper (green/red) and
+        monitoring (yellow) so they're immediately recognizable in the channel.
+        """
+        color = 0xe67e22
+        is_panic = leap_setup.get("panic_mode", False)
+
+        # --- Embed 1: Context ---
+        red_tag = "🔴 RED DAY" if leap_setup["is_red_day"] else ""
+        ema_tag = " | BELOW EMA21" if leap_setup["is_below_ema21"] else ""
+        header_tag = (red_tag + ema_tag).strip(" |") or "BEARISH SETUP"
+
+        intraday_line = f"┣ Intraday Move: `{leap_setup['intraday_chg_pct']:+.2f}%` {red_tag}\n"
+        ema_line = (
+            f"┣ QQQ `${leap_setup['qqq_spot']:.2f}` BELOW EMA21 `${leap_setup['qqq_ema21']:.2f}` — bearish structure\n"
+            if leap_setup["is_below_ema21"] else
+            f"┣ QQQ `${leap_setup['qqq_spot']:.2f}` above EMA21 `${leap_setup['qqq_ema21']:.2f}` — pullback within uptrend\n"
+        )
+        macro_line = (
+            f"┣ Macro: {leap_setup['macro_regime']} REGIME | SMA200 `${leap_setup['sma200']:.2f}`\n"
+        )
+        if is_panic:
+            fear_note = "🚨 PANIC MODE — split into 2 tranches; first entry now, second on stabilization"
+        elif leap_setup["vix_z"] >= 0.75:
+            fear_note = "⚠️ ELEVATED FEAR — optimal LEAP window (cheaper spot + time value elevated)"
+        else:
+            fear_note = "🟢 CALM — red day on low fear = distribution signal, not capitulation"
+        fear_line = f"┣ VIXY `{leap_setup['vix_price']:.2f}` (z `{leap_setup['vix_z']:+.2f}σ`) — {fear_note}\n"
+        macd_line = (
+            "┣ MACD: Bearish histogram — momentum confirms downside pressure\n"
+            if leap_setup["is_macd_bear"] else
+            "┣ MACD: Bullish histogram — structural pullback, not a momentum collapse\n"
+        )
+        breadth_line = f"┗ Breadth: `{leap_setup['breadth']:.0%}` of QQQ top-20 above SMA200"
+
+        regime_payload = (
+            f"TQQQ LEAP Entry Window — {header_tag}\n"
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line
+        )
+
+        # --- Embed 2: Contract setup ---
+        if "real_strike" in leap_setup:
+            contract_line = (
+                f"${leap_setup['real_strike']:.2f} CALL — "
+                f"{leap_setup['real_expiry']} ({leap_setup['real_dte']} DTE / "
+                f"~{leap_setup['real_dte']//30} months)"
+            )
+            delta_line = (
+                f"┣ Delta: Δ {leap_setup['real_delta']:.2f} — "
+                f"~{leap_setup['real_delta']:.0%} probability ITM at expiry\n"
+            )
+            cost_line = (
+                f"┣ Cost: ~${leap_setup['real_cost_per_contract']:.0f}/contract "
+                f"(mid ${leap_setup['real_mid']:.2f} | bid ${leap_setup['real_bid']:.2f} / ask ${leap_setup['real_ask']:.2f})\n"
+                f"┣ Intrinsic: ${leap_setup['real_intrinsic']:.2f} | Time Value (your insurance premium): ${leap_setup['real_time_value']:.2f}\n"
+            )
+            liquidity_line = (
+                f"┣ Liquidity: Volume `{leap_setup.get('real_volume', 0):,}` | OI `{leap_setup.get('real_oi', 0):,}`\n"
+            )
+        else:
+            bs_strike_est = leap_setup.get("bs_strike", round(leap_setup["tqqq_spot"] * 0.88, 2))
+            contract_line = (
+                f"~${bs_strike_est:.2f} CALL — 270-540 DTE (9-18 months) | "
+                "Tradier chain unavailable — verify strike manually"
+            )
+            delta_line = f"┣ Delta: Δ ~{LEAP_DELTA_TARGET:.2f} target (deep ITM)\n"
+            cost_line = ""
+            liquidity_line = ""
+
+        bs_block = ""
+        if "bs_delta" in leap_setup:
+            chain_note = f" (chain mid ${leap_setup['real_mid']:.2f})" if "real_mid" in leap_setup else ""
+            bs_block = (
+                f"┣ Black-Scholes (IV {leap_setup['bs_iv']:.1f}% vs RV20 {leap_setup['bs_rv20']:.1f}%):\n"
+                f"┃  Theo ${leap_setup['bs_theo_price']:.2f}{chain_note} | "
+                f"Delta Δ {leap_setup['bs_delta']:.3f} | Prob ITM {leap_setup['bs_prob_itm']:.1f}%\n"
+                f"┃  Theta: ${leap_setup['bs_theta_per_day']:+.2f}/day per contract"
+                f" | Total time decay over DTE: ~${leap_setup['bs_total_theta']:.0f}\n"
+                f"┃  Vega: ${leap_setup['bs_vega']:.2f} per 1% IV move\n"
+            )
+
+        breakeven_block = ""
+        if "bs_breakeven" in leap_setup:
+            dte_months = leap_setup.get("real_dte", 365) // 30
+            breakeven_block = (
+                f"┣ Breakeven at Expiry: TQQQ `${leap_setup['bs_breakeven']:.2f}` "
+                f"({leap_setup['bs_breakeven_pct']:+.1f}% from now)\n"
+                f"┣   QQQ needs ~{leap_setup['bs_qqq_breakeven_pct']:+.1f}% over {dte_months} months "
+                f"(TQQQ magnifies ~3×)\n"
+            )
+
+        tranche_note = (
+            "┣ ⚠️ HIGH FEAR: split into 2 tranches — buy 50% now, 50% if more red in next 3 days\n"
+            if is_panic else ""
+        )
+
+        execution_payload = (
+            f"TQQQ @ `${leap_setup['tqqq_spot']:.2f}` | Buy Time on the Pullback\n"
+            f"┣ 🎯 BTO LEAP: {contract_line}\n"
+            + delta_line + cost_line + liquidity_line + bs_block + breakeven_block
+            + "┣ Sizing: Max 2-3% of portfolio (TQQQ 3× leveraged = leverage on leverage)\n"
+            + tranche_note
+            + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
+            "┣ Stop: −30% underlying move → reassessment alert (review thesis, not auto-close)\n"
+            "┣ Roll: Alert fires at 90 DTE remaining — roll forward if still bullish\n"
+            f"┗ Log entry: `python tqqq.py --log-leap --strike X --expiration YYYY-MM-DD "
+            f"--premium X --entry-price {leap_setup['tqqq_spot']:.2f}`"
+        )
+
+        if WEBHOOK_TRADE_SIGNALS:
+            send_essentials_embed(
+                WEBHOOK_TRADE_SIGNALS,
+                "TQQQ LEAP DESK | BTO CALL — Red Day Entry Window",
+                regime_payload, color
+            )
+            send_essentials_embed(
+                WEBHOOK_TRADE_SIGNALS,
+                "TQQQ LEAP DESK | CONTRACT SETUP",
+                execution_payload, color
+            )
+
+        db.update_state("tqqq_last_leap_signal_date", datetime.now().strftime("%Y-%m-%d"))
+        logger.info(f"LEAP signal dispatched — TQQQ ${leap_setup['tqqq_spot']:.2f}, {header_tag}")
+
+    def check_leap_position_status(self, tqqq_spot: float):
+        """
+        Monitors all open LEAP positions. Alert thresholds:
+        - -30% underlying move → reassessment flag (review thesis; LEAP has time, not auto-cut)
+        - +50% → scale out 50% of position
+        - +100% → close remainder
+        - 90 DTE remaining → roll forward consideration
+        - Monthly check-in while holding (every 30 calendar days)
+        """
+        positions = db.get_state("tqqq_leap_positions")
+        if not positions or not isinstance(positions, list) or tqqq_spot == 0.0:
+            return
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.strptime(today_str, "%Y-%m-%d")
+        updated_positions = []
+
+        for pos in positions:
+            try:
+                entry_price = float(pos.get("entry_tqqq_spot", tqqq_spot))
+                premium = float(pos.get("premium", 0.0))
+                strike = float(pos.get("strike", 0.0))
+                expiry_str = pos.get("expiration", "")
+                entry_date_str = pos.get("entry_date", today_str)
+
+                pnl_proxy = (tqqq_spot - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+
+                dte_remaining = 999
+                try:
+                    exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                    dte_remaining = max(0, (exp_date - today).days)
+                except Exception:
+                    pass
+
+                if dte_remaining == 0:
+                    logger.info(f"LEAP expired — removing: ${strike} exp {expiry_str}")
+                    continue
+
+                days_held = 0
+                try:
+                    days_held = (today - datetime.strptime(entry_date_str, "%Y-%m-%d")).days
+                except Exception:
+                    pass
+
+                pos_id = f"{entry_date_str}_{strike}"
+                alert_key = f"tqqq_leap_alert_{pos_id}"
+                last_alert = db.get_state(alert_key, "")
+
+                def _fire(title, body, color_val, tag):
+                    db.update_state(alert_key, f"{tag}_{today_str}")
+                    if WEBHOOK_TRADE_SIGNALS:
+                        send_essentials_embed(WEBHOOK_TRADE_SIGNALS, title, body, color_val)
+
+                base_line = (
+                    f"┣ Entry: `${entry_price:.2f}` → Now: `${tqqq_spot:.2f}` ({pnl_proxy:+.1f}% underlying move)\n"
+                    f"┣ Strike `${strike:.2f}` | Exp `{expiry_str}` ({dte_remaining} DTE remaining) | Held: {days_held}d\n"
+                )
+
+                if pnl_proxy <= LEAP_CUT_THRESHOLD and f"REASSESS_{today_str}" not in last_alert:
+                    _fire(
+                        "🔴 TQQQ LEAP | REASSESS FLAG",
+                        base_line
+                        + "┣ ⚠️ -30% threshold hit — review thesis before acting\n"
+                        f"┗ {dte_remaining//30} months of runway remain. TQQQ recoveries are typical over that horizon.",
+                        0xe74c3c, "REASSESS"
+                    )
+                elif pnl_proxy >= LEAP_TP2_PCT and f"TP2_{today_str}" not in last_alert:
+                    _fire(
+                        "🎯 TQQQ LEAP | FULL TARGET HIT",
+                        base_line + "┗ +100% target reached — close full position or trail with tight stop.",
+                        0x2ecc71, "TP2"
+                    )
+                elif pnl_proxy >= LEAP_TP1_PCT and f"TP1_{today_str}" not in last_alert:
+                    _fire(
+                        "✅ TQQQ LEAP | FIRST TARGET HIT",
+                        base_line + "┗ Scale out 50% of position — hold remainder for the full double.",
+                        0x2ecc71, "TP1"
+                    )
+                elif dte_remaining <= LEAP_ROLL_DTE and f"ROLL_{today_str}" not in last_alert:
+                    _fire(
+                        "⚠️ TQQQ LEAP | ROLL CONSIDERATION",
+                        base_line + "┗ 90 DTE remaining — consider selling and buying next 9-18 month expiry.",
+                        0xf39c12, "ROLL"
+                    )
+                else:
+                    # Monthly check-in
+                    monthly_key = f"tqqq_leap_monthly_{pos_id}"
+                    last_monthly = db.get_state(monthly_key, "")
+                    if not last_monthly:
+                        days_since = 31
+                    else:
+                        try:
+                            days_since = (today - datetime.strptime(last_monthly, "%Y-%m-%d")).days
+                        except Exception:
+                            days_since = 31
+                    if days_since >= 30:
+                        db.update_state(monthly_key, today_str)
+                        color_val = 0x2ecc71 if pnl_proxy >= 0 else 0xe74c3c
+                        if WEBHOOK_TRADE_SIGNALS:
+                            send_essentials_embed(
+                                WEBHOOK_TRADE_SIGNALS,
+                                f"🕐 TQQQ LEAP | MONTH {days_held//30} CHECK-IN",
+                                base_line
+                                + f"┣ Original premium: ${premium:.2f}/share | "
+                                f"Cost basis: ${premium * 100:.0f}/contract\n"
+                                + f"┗ Thesis intact — holding time. Next alert: {LEAP_ROLL_DTE} DTE or profit target.",
+                                color_val
+                            )
+
+                updated_positions.append(pos)
+            except Exception as e:
+                logger.warning(f"LEAP monitor failed for position {pos}: {e}")
+                updated_positions.append(pos)
+
+        if len(updated_positions) != len(positions):
+            db.update_state("tqqq_leap_positions", updated_positions)
+
     def execute_sniper_sweep(self):
         if not is_market_hours():
             logger.info("Market closed — TQQQ sniper standing down.")
@@ -1044,6 +1521,17 @@ class TQQQTacticalSniper:
 
         # Insurance put renewal clock — runs every sweep, fully independent of the sniper signal.
         self.check_insurance_put_renewal()
+
+        # LEAP desk: inverse entry to the sniper — fires on red days / below EMA21.
+        # Runs once per calendar day (evaluate_leap_entry has an internal date gate).
+        leap_setup = self.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily)
+        if leap_setup:
+            leap_setup = self.enrich_leap_with_tradier_chain(leap_setup)
+            leap_setup = self.enrich_leap_with_greeks(leap_setup, tqqq_daily)
+            self.dispatch_leap_signal(leap_setup)
+
+        # Monitor any open LEAP positions (monthly check-ins, TP/stop/roll alerts).
+        self.check_leap_position_status(tqqq_spot_now)
 
         setup = self.evaluate_snipe(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq)
 
@@ -1094,6 +1582,54 @@ if __name__ == "__main__":
             sniper.dispatch_intelligence(setup, tqqq_daily)
         else:
             sniper.dispatch_market_outlook(daily, intraday, vix_price, vix_z, breadth, atr_pct_tqqq, tqqq_daily)
+        sys.exit(0)
+
+    if "--test-leap" in sys.argv:
+        # Force one full LEAP evaluation regardless of date gate or cooldown.
+        logger.info("🧪 TEST MODE — forcing LEAP desk evaluation")
+        db.update_state("tqqq_leap_check_date", None)
+        db.update_state("tqqq_last_leap_signal_date", None)
+        sniper = TQQQTacticalSniper()
+        daily = sniper.fetch_daily_baseline()
+        intraday = sniper.fetch_intraday_metrics()
+        tqqq_daily = sniper.fetch_tqqq_daily_series()
+        vix_price, vix_z = sniper.fetch_vix()
+        breadth = sniper.fetch_breadth()
+        if daily and intraday:
+            daily["adx_macd"] = sniper.fetch_adx_macd()
+            leap_setup = sniper.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily)
+            if leap_setup:
+                leap_setup = sniper.enrich_leap_with_tradier_chain(leap_setup)
+                leap_setup = sniper.enrich_leap_with_greeks(leap_setup, tqqq_daily)
+                sniper.dispatch_leap_signal(leap_setup)
+                logger.info("LEAP test dispatch complete.")
+            else:
+                logger.info("LEAP: no entry conditions met — market not red/bearish enough.")
+        sys.exit(0)
+
+    if "--log-leap" in sys.argv:
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--log-leap", action="store_true")
+        parser.add_argument("--strike", type=float, required=True)
+        parser.add_argument("--expiration", type=str, required=True, help="YYYY-MM-DD")
+        parser.add_argument("--premium", type=float, required=True, help="Premium paid per share")
+        parser.add_argument("--entry-price", type=float, required=True, help="TQQQ spot price at entry")
+        args = parser.parse_args()
+        positions = db.get_state("tqqq_leap_positions") or []
+        new_pos = {
+            "strike": args.strike,
+            "expiration": args.expiration,
+            "premium": args.premium,
+            "entry_tqqq_spot": args.entry_price,
+            "entry_date": datetime.now().strftime("%Y-%m-%d"),
+        }
+        positions.append(new_pos)
+        db.update_state("tqqq_leap_positions", positions)
+        logger.info(
+            f"LEAP logged: ${args.strike} CALL exp {args.expiration} "
+            f"premium ${args.premium:.2f}/share | TQQQ @ ${args.entry_price:.2f}"
+        )
         sys.exit(0)
 
     if "--log-put" in sys.argv:
