@@ -630,7 +630,7 @@ class TQQQTacticalSniper:
                 f"┣ Math Check (RV20-based Black-Scholes):\n"
                 f"┃  Strike ${setup['bs_strike']:.2f} | Theo ${setup['bs_theo_price']:.2f}"
                 + (f" (chain mid ~${setup['real_premium']*100:.0f})" if "real_strike" in setup else "")
-                + f" | IV {setup['bs_iv_est']:.1f}% [{setup.get('bs_iv_source','proxy')}] vs RV20 {setup['bs_rv20']:.1f}%\n"
+                + f" | IV {setup['bs_iv_est']:.1f}% vs RV20 {setup['bs_rv20']:.1f}%\n"
                 f"┃  Decay: {theta_dollar:+.2f}/day per contract | IV sensitivity: ${vega_dollar:.2f} per 1% IV move\n"
             )
 
@@ -641,7 +641,8 @@ class TQQQTacticalSniper:
 
         atr_move_line = ""
         if setup.get("expected_move"):
-            atr_move_line = f"┣ ATR-Projected Move ({setup.get('real_dte', 15)}D): ${setup['expected_move']:.2f} from current\n"
+            atr_dir = "+" if setup["contract"] == "CALL" else "-"
+            atr_move_line = f"┣ ATR-Projected Move ({setup.get('real_dte', 15)}D): {atr_dir}${setup['expected_move']:.2f} from current\n"
 
         structure_line = ""
         if structure and structure["setup"] != "NO STRUCTURE SETUP":
