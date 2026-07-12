@@ -26,6 +26,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
+FRED_API_KEY        = os.getenv("FRED_API_KEY")
 WEBHOOK_TRADE_SIGNALS = os.getenv("WEBHOOK_TRADE_SIGNALS")
 WEBHOOK_MARKET_ANALYSIS = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 
@@ -1048,8 +1049,10 @@ class TQQQTacticalSniper:
         result = {
             "rsi14": 50.0, "high_52w": 0.0, "low_52w": 0.0, "fear_greed": 50.0,
             "put_call_ratio": 1.0,      # SPY aggregate OI P/C — neutral default
+            "put_call_ratio_z": 0.0,
             "vix_term_slope": 0.0,      # VIX9D - VIX3M: negative = contango (calm), positive = backwardation (fear)
             "vix9d": 0.0, "vix3m": 0.0,
+            "real_vix": None,           # FRED VIXCLS — actual CBOE VIX daily close
         }
 
         try:
@@ -1106,6 +1109,32 @@ class TQQQTacticalSniper:
                 result["vix_term_slope"] = round((ratio - 1) * 10, 2)  # + = backwardation
         except Exception as e:
             logger.warning(f"VIX term structure fetch failed: {e}")
+
+        # Real VIX from FRED VIXCLS — confirms VIXY proxy reading, removes ETF roll-cost distortion.
+        # FRED updates after US close (~4:30 PM ET). Cached separately from the extended metrics
+        # dict (daily) so a stale cache hit still returns the current FRED value.
+        if FRED_API_KEY:
+            try:
+                fred_cache_key  = "fred_vix_value"
+                fred_cache_date = "fred_vix_date"
+                if db.get_state(fred_cache_date) == today_str:
+                    cached_vix = db.get_state(fred_cache_key)
+                    if cached_vix:
+                        result["real_vix"] = float(cached_vix)
+                else:
+                    r_vix = requests.get(
+                        "https://api.stlouisfed.org/fred/series/observations",
+                        params={"series_id": "VIXCLS", "api_key": FRED_API_KEY,
+                                "file_type": "json", "sort_order": "desc", "limit": 1},
+                        timeout=12
+                    ).json()
+                    vix_val = float(r_vix["observations"][0]["value"])
+                    if vix_val > 0:
+                        result["real_vix"] = round(vix_val, 2)
+                        db.update_state(fred_cache_key, vix_val)
+                        db.update_state(fred_cache_date, today_str)
+            except Exception as e:
+                logger.warning(f"FRED VIXCLS fetch failed: {e}")
 
         # Put/Call ratio from SPY options chain (Tradier) — OI across TWO near-term expiries.
         # SPY structurally has high put OI (institutions hedge here, buy calls via QQQ/TQQQ),
@@ -1301,6 +1330,7 @@ class TQQQTacticalSniper:
             "extension_from_low_pct": extension,
             "pct_vs_sma200": pct_vs_sma200,
             "ema21_pct": ema21_pct,
+            "real_vix": ext.get("real_vix"),  # FRED VIXCLS — None if unavailable
         }
         return {"bottom_score": bottom_score, "top_score": top_score, "signals": signals}
 
@@ -1387,6 +1417,7 @@ class TQQQTacticalSniper:
             "vix_term_slope": sigs.get("vix_term_slope", 0.0),
             "vix9d": sigs.get("vix9d", 0.0),
             "vix3m": sigs.get("vix3m", 0.0),
+            "real_vix": cycle.get("signals", {}).get("real_vix") if cycle else None,
         }
 
     def enrich_leap_with_tradier_chain(self, leap_setup):
@@ -1573,7 +1604,9 @@ class TQQQTacticalSniper:
                       "flat" if abs(vts) < 0.5 else "contango — calm structure")
         pc_label = f"z `{pc_z_v:+.1f}σ` vs 30D mean — {'SPIKE ⚠️ fear surge' if pc_z_v >= 1.2 else 'elevated' if pc_z_v >= 0.5 else 'normal'}"
         rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
-        pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}\n"
+        real_vix = leap_setup.get("real_vix")
+        real_vix_str = f" | **VIX: `{real_vix:.1f}`** [FRED]" if real_vix else ""
+        pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}{real_vix_str}\n"
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
         score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
 

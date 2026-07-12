@@ -967,6 +967,34 @@ def main():
                         f"BTC {arrow_b}{abs(corr['btc_ret']):.1f}%\n\n"
                     )
 
+                # ── Binance Derivatives Intelligence (OI, L/S, taker volume) ──
+                # These are the signals institutional desks watch before price moves.
+                # All free Binance FAPI public endpoints — no API key required.
+                try:
+                    deriv = engine.fetch_binance_derivatives()
+                    if deriv:
+                        payload += "**Derivatives Signal Stack**\n"
+                        for sym_d, d in deriv.items():
+                            oi_b = d["oi_usd"] / 1e9
+                            ls_ratio = d["global_ls"]
+                            top_ls   = d["top_ls"]
+                            tb_pct   = d["taker_buy_pct"]
+                            # Divergence between retail (global) and smart money (top trader) L/S
+                            smart_vs_retail = ""
+                            if top_ls > 1.1 and ls_ratio < 1.0:
+                                smart_vs_retail = " ← smart money diverging long"
+                            elif top_ls < 0.9 and ls_ratio > 1.1:
+                                smart_vs_retail = " ← smart money diverging short"
+                            tb_label = "sellers in control" if tb_pct < 45 else ("buyers in control" if tb_pct > 55 else "balanced")
+                            payload += (
+                                f"┣ **{sym_d}** OI: `${oi_b:.1f}B` | "
+                                f"Global L/S: `{ls_ratio:.2f}` | Top Trader: `{top_ls:.2f}`{smart_vs_retail}\n"
+                                f"┣ Taker Buy: `{tb_pct:.0f}%` — {tb_label}\n"
+                            )
+                        payload = payload.rstrip("┣ \n") + "\n\n"
+                except Exception as e:
+                    logger.warning(f"Binance derivatives fetch failed: {e}")
+
                 payload += (
                     "─────────────────────────\n"
                     "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · Twelve Data\n"
@@ -974,7 +1002,7 @@ def main():
                 )
 
                 if WEBHOOK_CRYPTO:
-                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Correlation", payload, 0xf39c12)
+                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Derivatives", payload, 0xf39c12)
                     logger.info("Crypto social snapshot dispatched.")
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")

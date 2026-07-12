@@ -3314,6 +3314,87 @@ class HighFidelityAnalyticsEngine:
                 logger.warning(f"[Funding Rates] {binance_sym} failed: {e}")
         return results
 
+    def fetch_hy_spread(self) -> float:
+        """
+        FRED BAMLH0A0HYM2 — ICE BofA US High Yield Option-Adjusted Spread (daily, %).
+        Values below 4.5% = healthy credit. Above 4.5% = stress. Above 7% = crisis.
+        Cached once per day in DB (FRED updates once daily). Returns 0.0 on failure.
+        """
+        cache_key = "fred_hy_spread_value"
+        cache_date_key = "fred_hy_spread_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if self.db.get_state(cache_date_key) == today_str:
+            cached = self.db.get_state(cache_key)
+            if cached:
+                return float(cached)
+        val = self._fetch_fred_metric("BAMLH0A0HYM2")
+        if val and val > 0:
+            self.db.update_state(cache_key, val)
+            self.db.update_state(cache_date_key, today_str)
+            return round(val, 2)
+        return 0.0
+
+    def fetch_binance_derivatives(self) -> dict:
+        """
+        Binance FAPI public endpoints — no API key required.
+        Returns OI (USD), global long/short account ratio, top-trader L/S ratio,
+        and taker buy/sell volume ratio for BTC and ETH.
+        All returned as a dict keyed by display symbol ("BTC", "ETH").
+        Empty dict per symbol on failure — caller must handle missing keys.
+        """
+        symbols = [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]
+        results = {}
+        for binance_sym, display_sym in symbols:
+            try:
+                oi_r = requests.get(
+                    "https://fapi.binance.com/fapi/v1/openInterest",
+                    params={"symbol": binance_sym}, timeout=8
+                ).json()
+                # OI in contracts; need price to convert to USD — fetch from premiumIndex
+                price_r = requests.get(
+                    f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={binance_sym}",
+                    timeout=8
+                ).json()
+                oi_contracts = float(oi_r.get("openInterest", 0))
+                mark_price   = float(price_r.get("markPrice", 0))
+                oi_usd = oi_contracts * mark_price
+
+                ls_r = requests.get(
+                    "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                    params={"symbol": binance_sym, "period": "1h", "limit": 1}, timeout=8
+                ).json()
+                global_ls = float(ls_r[0].get("longShortRatio", 1.0)) if ls_r else 1.0
+
+                top_r = requests.get(
+                    "https://fapi.binance.com/futures/data/topLongShortAccountRatio",
+                    params={"symbol": binance_sym, "period": "1h", "limit": 1}, timeout=8
+                ).json()
+                top_ls = float(top_r[0].get("longShortRatio", 1.0)) if top_r else 1.0
+
+                taker_r = requests.get(
+                    "https://fapi.binance.com/futures/data/takerlongshortRatio",
+                    params={"symbol": binance_sym, "period": "1h", "limit": 2}, timeout=8
+                ).json()
+                if len(taker_r) >= 2:
+                    buy_vol_cur  = float(taker_r[0].get("buyVol", 1))
+                    sell_vol_cur = float(taker_r[0].get("sellVol", 1))
+                    buy_vol_prev = float(taker_r[1].get("buyVol", 1))
+                    sell_vol_prev = float(taker_r[1].get("sellVol", 1))
+                    taker_buy_pct = buy_vol_cur / (buy_vol_cur + sell_vol_cur) * 100 if (buy_vol_cur + sell_vol_cur) > 0 else 50.0
+                    oi_prev_contracts = float(taker_r[1].get("buyVol", 0)) + float(taker_r[1].get("sellVol", 0))
+                else:
+                    taker_buy_pct = 50.0
+
+                results[display_sym] = {
+                    "oi_usd":       oi_usd,
+                    "global_ls":    round(global_ls, 3),
+                    "top_ls":       round(top_ls, 3),
+                    "taker_buy_pct": round(taker_buy_pct, 1),
+                }
+            except Exception as e:
+                logger.warning(f"[Binance Derivatives] {binance_sym} failed: {e}")
+        return results
+
     # ── NVDA / BTC CORRELATION ────────────────────────────────────────────────
     # 30-day Pearson correlation on daily log returns.
     # NVDA and BTC both track AI/tech risk sentiment but decouple in

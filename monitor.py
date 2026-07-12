@@ -36,6 +36,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
 
+FRED_API_KEY = os.getenv("FRED_API_KEY")
+
 try:
     from essentials_tools import (
         send_essentials_embed, send_essentials_embed_with_chart,
@@ -146,6 +148,50 @@ EDGAR_FORMS_TO_WATCH = {
     "N-CSR":   "sec_ncsr",     # Semi-annual — distribution language
     "DEF 14A": "sec_def14a",   # Proxy — board distribution vote
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FRED — LIVE HY CREDIT SPREAD (replaces hardcoded 4.5% benchmark)
+# BAMLH0A0HYM2: ICE BofA US High Yield Option-Adjusted Spread (daily, %).
+# Cached once per calendar day — FRED updates after US market close (~5 PM ET).
+# Values: < 3% = compressed/tight | 3–4.5% = normal | > 4.5% = stress | > 7% = crisis
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_hy_spread_live() -> float:
+    """
+    Fetches live HY OAS from FRED. Cached to DB daily to avoid redundant FRED calls
+    on each 5-min monitor loop tick. Returns last known value on failure (never 0.0).
+    """
+    cache_key      = "fred_hy_spread_value"
+    cache_date_key = "fred_hy_spread_date"
+    today_str      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cached_date    = db.get_state(cache_date_key)
+    if cached_date == today_str:
+        cached = db.get_state(cache_key)
+        if cached:
+            return float(cached)
+    if not FRED_API_KEY:
+        fallback = float(db.get_state(cache_key) or 4.5)
+        logger.warning("FRED_API_KEY not set — using last known HY spread or default 4.5%")
+        return fallback
+    try:
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id=BAMLH0A0HYM2&api_key={FRED_API_KEY}"
+            "&file_type=json&sort_order=desc&limit=1"
+        )
+        res = requests.get(url, timeout=12)
+        res.raise_for_status()
+        val = float(res.json()["observations"][0]["value"])
+        if val > 0:
+            db.update_state(cache_key, val)
+            db.update_state(cache_date_key, today_str)
+            logger.info(f"FRED HY spread updated: {val:.2f}%")
+            return round(val, 2)
+    except Exception as e:
+        logger.warning(f"FRED HY spread fetch failed: {e}")
+    # Fall back to last cached value; if none, use 4.5 (old hardcoded default)
+    return float(db.get_state(cache_key) or 4.5)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NOTIFICATION RATE LIMITER (3-rule)
@@ -961,7 +1007,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     sec_shield = check_sec_edgar(session, ticker)
 
     # ── Macro/seasonal context (original)
-    credit_spread = float(db.get_state("credit_spread", 0.0))
+    credit_spread = fetch_hy_spread_live()  # FRED BAMLH0A0HYM2 — live, cached daily
     ex_div_near   = is_near_ex_dividend_window()
     ro_season     = is_ro_filing_season()
     crisis_day, vixy_price, vixy_z = check_crisis_amplification_risk(session)
@@ -1211,11 +1257,11 @@ def compute_cornerstone_reports():
 
     full_report = "\n\n".join(reports)
 
-    credit_spread = float(db.get_state("credit_spread", 0.0))
+    credit_spread = fetch_hy_spread_live()  # FRED BAMLH0A0HYM2 — live, cached daily
     if credit_spread > 4.5:
         full_report += (
             f"\n\n🚨 **SYSTEMIC MACRO OVERRIDE:** High Yield Credit Spreads elevated "
-            f"({credit_spread:.2f}%). CEFs face elevated NAV decay risk in this regime."
+            f"({credit_spread:.2f}% — FRED live). CEFs face elevated NAV decay risk in this regime."
         )
         if TIER_RANK["ELEVATED"] > TIER_RANK.get(worst_tier, 0):
             worst_tier = "ELEVATED"

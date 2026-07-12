@@ -377,7 +377,7 @@ INDEX_LABELS     = {"S&P 500", "Nasdaq 100", "Dow", "Russell 2000"}
 COMMODITY_LABELS = {"Crude Oil", "Gold", "Natural Gas"}
 
 
-def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, daily_levels=None):
+def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, daily_levels=None, fred_macro=None):
     """
     Compact futures board: price + % change + PDH/PDL context for index futures.
     Divergence and VIX tier appended as actionable signal lines.
@@ -437,6 +437,18 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
     # ── Economic calendar alert
     econ_line = f"┣ 📅 {econ_alert}\n" if econ_alert else ""
 
+    # ── FRED macro context — yield curve + Fed Funds (once per day, no extra API cost on cache hit)
+    fred_macro_line = ""
+    if fred_macro:
+        yc = fred_macro.get("yield_curve")
+        ff = fred_macro.get("fedfunds")
+        if yc:
+            spread_str = f"{yc['spread']:+.2f}%"
+            yc_label = yc.get("label", "")
+            fred_macro_line += f"┣ Yield Curve (T10-T2): {spread_str} — {yc_label}\n"
+        if ff:
+            fred_macro_line += f"┣ Fed Funds: {ff:.2f}% [FRED]\n"
+
     # ── Session bias from index breadth
     index_pcts = [q["percent_change"] for q in [es_q, nq_q, ym_q, rty_q] if q]
     bulls = sum(1 for p in index_pcts if p > 0)
@@ -458,12 +470,46 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
         f"{vix_line}"
         f"{divergence_line}"
         f"{econ_line}"
+        f"{fred_macro_line}"
         f"┗ Bias: {bias}"
     )
 
 BOARD_MIN_CHANGE_PCT = 0.05   # composite % move across the board required to re-dispatch
 BOARD_HEARTBEAT_HOURS = 4     # dispatch anyway after this long even if nothing moved, so the
                               # channel doesn't go fully dark — confirms the feed is still alive
+
+def _fetch_fred_board_macro() -> dict:
+    """
+    Yield curve (T10-T2) and Fed Funds rate from FRED — one call per series per day.
+    Returns {"yield_curve": dict|None, "fedfunds": float|None}.
+    Uses engine's existing cached helpers — zero extra FRED calls if fed.py or
+    analytics already fetched today.
+    """
+    result = {"yield_curve": None, "fedfunds": None}
+    if not engine.fred_api_key:
+        return result
+    try:
+        result["yield_curve"] = engine.fetch_yield_curve()
+    except Exception as e:
+        logger.warning(f"FRED yield curve fetch failed: {e}")
+    try:
+        cache_key_ff = "fred_fedfunds_value"
+        cache_date_ff = "fred_fedfunds_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if db.get_state(cache_date_ff) == today_str:
+            cached = db.get_state(cache_key_ff)
+            if cached:
+                result["fedfunds"] = float(cached)
+        else:
+            val = engine._fetch_fred_metric("FEDFUNDS")
+            if val and val > 0:
+                result["fedfunds"] = round(val, 2)
+                db.update_state(cache_key_ff, val)
+                db.update_state(cache_date_ff, today_str)
+    except Exception as e:
+        logger.warning(f"FRED Fed Funds fetch failed: {e}")
+    return result
+
 
 def run_futures_board():
     """
@@ -503,8 +549,14 @@ def run_futures_board():
     econ_alert    = get_economic_calendar_alert()
     daily_levels  = fetch_daily_levels(["SPY", "QQQ", "DIA", "IWM"])
 
+    # FRED macro context — yield curve + Fed Funds, cached daily via engine methods.
+    # fetch_yield_curve() and _fetch_fred_metric() each return quickly on cache hit;
+    # on a cache miss they make one FRED call each (two total per calendar day max).
+    fred_macro = _fetch_fred_board_macro()
+
     payload = build_board_payload(board, session_label, vix_regime=vix_regime,
-                                  econ_alert=econ_alert, daily_levels=daily_levels)
+                                  econ_alert=econ_alert, daily_levels=daily_levels,
+                                  fred_macro=fred_macro)
     send_essentials_embed(WEBHOOK_FUTURES, "FUTURES BOARD", payload, 0x00FFFF)
     db.update_state("futures_board_last_quotes", board)
     db.update_state("futures_board_last_dispatch", datetime.now().isoformat())
