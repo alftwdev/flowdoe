@@ -110,15 +110,50 @@ STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 ```
 **Premium income → margin paydown bucket**
 
-**Current data limitation:** IVR and delta are proxy-calculated (HV30-based). With Tradier ($10/mo), these become real options chain values — accurate 0.20 delta strikes, real bid/ask spread check, real OI/volume for liquidity confirmation. Build 52-week IVR by storing daily IV in DB; after 252 days it's a full historical rank.
+**Current data limitation:** IVR and delta are proxy-calculated (HV30-based). With Tradier ($10/mo), these become real options chain values — accurate 0.20 delta strikes, real bid/ask spread check, real OI/volume for liquidity confirmation. Build 52-week IVR by storing daily IV in DB; after 252 days it's a full historical rank. **IVR tracker is live** (`scheduler.py --mode store_daily_iv`, runs daily at 21:30 UTC) — accumulating IV data now, usable baseline in ~30 days.
 
-### TQQQ Sniper (BTO Calls + Puts)
-**Calls (directional, bullish):**
-- QQQ above 21 EMA + VIX < 20
-- Strike: 10–15% OTM | DTE: 90–180 days
-- Size: max 5% of portfolio | Scale: 50% entry → add 50% on confirmation
-- Exit: 100% gain OR 14 DTE | Stop: 40% loss → close
-- **With Tradier:** replace HV×1.15 IV proxy with real ATM IV from TQQQ chain; require volume > 100 contracts and OI > 500 at target strike
+### TQQQ LEAP Desk — Bidirectional (tqqq.py)
+
+Three independent strategies run in tqqq.py:
+1. **Directional Sniper** — short-dated QQQ/TQQQ options, gated on regime
+2. **LEAP CALL Desk** — BTO deep ITM TQQQ calls on red days / bearish cycles (bottom-hunting)
+3. **LEAP PUT Desk** — BTO deep ITM QQQ puts on green days / bullish cycles (top-hunting)
+4. **Insurance put renewal clock** — 30 DTE SPY/QQQ puts, rolls at 14 DTE
+
+**LEAP CALL constants:**
+```python
+LEAP_DTE_MIN = 270          # 9 months minimum
+LEAP_DTE_MAX = 540          # 18 months maximum
+LEAP_DELTA_TARGET = 0.72    # deep ITM
+LEAP_COOLDOWN_HOURS = 2     # re-evaluates bottom on continued downtrends
+LEAP_TP1_PCT = 50.0         # scale 50% out
+LEAP_TP2_PCT = 100.0        # close remainder
+```
+
+**LEAP PUT constants (QQQ puts, NOT TQQQ — better liquidity + lower theta decay):**
+```python
+LEAP_PUT_DTE_MIN = 180         # 6 months
+LEAP_PUT_DTE_MAX = 365         # 12 months
+LEAP_PUT_DELTA_TARGET = -0.72  # deep ITM put
+LEAP_PUT_COOLDOWN_HOURS = 2
+LEAP_PUT_SYMBOL = "QQQ"
+```
+
+**Cycle Position Scorer** (`calculate_cycle_score()`) — gates both desks:
+```python
+CYCLE_BOTTOM_THRESHOLD = 55   # bottom_score >= this → CALL desk unlocks
+CYCLE_TOP_THRESHOLD = 55      # top_score >= this → PUT desk unlocks
+```
+Inputs: VIXY z-score (30pts), RSI14 (25pts), breadth (20pts), 52w drawdown (15pts),
+SPY P/C z-score (15pts), VIX term structure (12pts), CNN F&G (10pts), SMA200 (5pts), MACD (3pts).
+P/C ratio scored on 30-day rolling z-score (raw SPY ratio is structurally ~1.5+ due to institutional hedging — raw number is meaningless alone).
+VIX term structure via VIXY/VXZ ETF proxies (VIX9D/VIX3M unavailable at Twelve Data tier).
+**Actual VIX (FRED VIXCLS)** also fetched and shown in embed to confirm VIXY proxy reading.
+
+**CLI flags:**
+- `--test-leap` — clears `tqqq_last_leap_signal_ts` to 0, fires CALL desk
+- `--test-leap-put` — fires PUT desk
+- `--log-leap-put --strike X --expiration YYYY-MM-DD --premium X` — logs PUT position
 
 **Puts (insurance / margin protection — homeowners insurance model):**
 - Always 1 active put open — 30 DTE, rinse & repeat
@@ -136,9 +171,7 @@ Rule: run your current equity ratio → find max tolerable decline → set strik
 **Basis risk caveat:** SPY puts are used for liquidity (CLM/CRF have thin-to-no options markets).
 SPY protects against broad market crashes. It does NOT protect against CEF-specific events
 (distribution cut, rights offering, premium blowout) where CLM/CRF drops while SPY shrugs.
-This is real basis risk — "feels insured" ≠ "insured." monitor.py's EDGAR + dark pool + premium
-compression detection covers the CLM/CRF-specific risk that SPY puts cannot touch.
-Sequencing: Tier 2 diversification addresses concentration risk more than a SPY put would.
+monitor.py's EDGAR + dark pool + premium compression detection covers the CLM/CRF-specific risk.
 SPY puts are best applied at the ~$100K+ portfolio stage using your actual margin-buffer number.
 
 **Seasonal rules (March & September):**
@@ -155,13 +188,13 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 | #announcements | WEBHOOK_ANNOUNCEMENTS | announcements.py | Free tier scorecard/bait — conversion engine |
 | #cornerstone | WEBHOOK_CORNERSTONE_RO | monitor.py | CLM/CRF protection engine |
 | #market-analysis | WEBHOOK_MARKET_ANALYSIS | market_analysis.py | 0800 HST premarket command center |
-| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day: Asian close 07:00, US pre-market 12:45, cash open 14:00, mid-session 18:45 UTC) + IB breakout scanner. No conviction sync here — futures trade 23h/day, equity EOD labels are wrong context. |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day) + IB breakout scanner + yield curve/Fed Funds from FRED |
 | #crypto | WEBHOOK_CRYPTO | crypto.py | BTC/ETH spot, Fear & Greed, on-chain |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | options.py | Wheel strategy + TQQQ sniper signals |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode trending_plays`) | Social sentiment scanner (StockTwits + Reddit WSB + Finviz) → top 5 options plays with BTO setup when HIGH conviction |
-| #crypto | WEBHOOK_CRYPTO | scheduler.py (`--mode crypto_social`) | Fear & Greed + Reddit r/CryptoCurrency + BTC/ETH/SOL/AVAX/LINK/DOGE spot — foundation layer until crypto.py is built |
-| #futures-trading | WEBHOOK_FUTURES_TRADING | scheduler.py (`--mode futures_social`) | StockTwits + Reddit WSB filtered to energy/metals/rates/ag names — commodity rotation social overlay for cross_asset.py context |
-| #dividend-ccetfs | WEBHOOK_DIVIDEND_CCETFS | scheduler.py (`--mode income`) | Wheel Candidates v2 (dynamic RSI/BB/IVR scanner) + New CC ETF Screener (YieldMax/Roundhill/NEOS/TappAlpha) |
+| #crypto | WEBHOOK_CRYPTO | scheduler.py (`--mode crypto_social`) | Fear & Greed + spot prices + funding rates + Binance derivatives stack (OI/L/S/taker) |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | scheduler.py (`--mode futures_social`) | StockTwits + Reddit WSB filtered to energy/metals/rates/ag names |
+| #dividend-ccetfs | WEBHOOK_DIVIDEND_CCETFS | scheduler.py (`--mode income`) | Wheel Candidates v2 + New CC ETF Screener |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode wheel_signals`) | Tier 2 IV Rank screener + open wheel position DTE countdown |
 | #fed | WEBHOOK_FED | fed.py | Fed rate/macro signals |
 
@@ -172,6 +205,7 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 
 #crypto       ──Fear & Greed < 25─────── ► #market-analysis (risk-on signal)
               ──Extreme Fear──────────── ► #tqqq-sniper (TQQQ call cross-signal)
+              ──Binance L/S divergence──► LEAP CALL bottom signal cross-confirm
 
 #options-wheel──Premium collected──────► #market-analysis (cashflow log)
 
@@ -179,6 +213,7 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 
 #futures      ──/NQ overnight > +0.5%──► #market-analysis (bullish bias)
               ──/NQ overnight < -1%────► TQQQ put check reminder
+              ──Yield curve inverted───► LEAP PUT conviction booster
 
 #market-analysis ← synthesizes ALL feeds → ACTION ITEMS (single source of truth)
 ```
@@ -219,7 +254,7 @@ TQQQ entries/exits, full cashflow tracker, wheel tickers and strikes.
 **Status:** Updated, syntax verified, deployed to PythonAnywhere via git
 **Runs:** PythonAnywhere always-on task | 5-min loop tick | 0800 HST daily pulse
 
-### All Functions (✅ = original preserved | 🆕 = added this session)
+### All Functions (✅ = original preserved | 🆕 = added)
 ```
 ✅ check_sec_edgar()               — N-2 + SC 13D/G EDGAR watcher
                                      CIKs: CLM=0000814083 | CRF=0000033934
@@ -234,7 +269,10 @@ TQQQ entries/exits, full cashflow tracker, wheel tickers and strikes.
 ✅ run_monitor()                   — main loop, CLI: python monitor.py test|force
 
 🆕 fetch_time_series()            — shared TD helper, SPY fetched once/loop via cache
-🆕 detect_dark_pool_activity()    — price drop on below-avg public vol (Feb/Mar 2026 fix)
+🆕 fetch_hy_spread_live()         — FRED BAMLH0A0HYM2 live HY credit spread (replaces
+                                     hardcoded 4.5%). Cached to DB once/day; fallback
+                                     to last cached value if FRED unreachable.
+🆕 detect_dark_pool_activity()    — price drop on below-avg public vol
 🆕 detect_premium_compression()   — session-over-session premium collapse (CEF-specific)
 🆕 check_macro_correlation()      — CLM/CRF vs SPY: CEF-specific vs macro drag
 🆕 is_seasonal_caution_month()    — March / September flag
@@ -254,7 +292,7 @@ RO_SCORE_WEIGHTS = {
     "z_caution": 12,           # premium z-score ≥ 1.5σ
     "premium_extreme": 10,     # premium > 25%
     "whale_distribution": 15,  # rvol ≥ 1.8x + price drop
-    "credit_stress": 10,       # HY credit spread > 4.5%
+    "credit_stress": 10,       # HY credit spread > 4.5% (FRED live, not hardcoded)
     "ex_div_relief": -10,      # scheduled ex-div dip suppressor
     "ro_season": 8,            # mid-Feb to mid-Apr historical window
     "crisis_amplification": 12,# VIXY z-score ≥ 1.5σ
@@ -279,6 +317,7 @@ PREMIUM_COMPRESSION_THRESHOLD = -3.0   # % premium change in one session
 ALERT_MAX_PER_SECTOR = 3               # 3-notification rule cap
 ALERT_COOLDOWN_HOURS = 24
 margin_rate = 7.25                      # benchmark margin cost %
+FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 ```
 
 ---
@@ -287,53 +326,81 @@ margin_rate = 7.25                      # benchmark margin cost %
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `audit.py` | ✅ Live | Daily DB maintenance — prunes stale alert locks (>24h), caps audit_logs at 500 rows, runs VACUUM. Keeps 3-notification rule mathematically correct and DB lean. Runs once/day at 09:39 UTC via cron. |
-| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine |
+| `audit.py` | ✅ Live | Daily DB maintenance — prunes stale alert locks (>24h), caps audit_logs at 500 rows, runs VACUUM. Runs once/day at 09:39 UTC via cron. |
+| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Live HY spread via FRED (cached daily). |
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
-| `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC |
+| `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives |
 | `essentials_tools.py` | ✅ Live | Discord embed senders, chart generators |
 | `market_analysis.py` | 🔲 To build | 0800 HST premarket morning report |
-| `cross_asset.py` | ✅ Live | Futures board, ES/NQ market profile + CVD + structure, Initial Balance breakout scanner |
+| `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher — morning/eod/income/wheel_signals/wheel_position/iv_crush/trending_plays/macro/etc. `gex` and `options_flow` modes removed — `calculate_gex_profile()` returns 0.0 at current Twelve Data tier; all three options_flow runs fell through to fallback with GEX: UNKNOWN. Re-enable when Tradier is wired in. |
-| `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts, VIXY real-time price → DB for monitor.py. REST poller (StructuralBreakoutAgent) removed — was burning 2,880 API calls/day with no unique value vs tqqq.py. |
-| `tqqq.py` | ✅ Live | TQQQ directional sniper + standalone insurance-put renewal clock |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income. Removed: `gex` and `options_flow` (GEX returns 0.0 at current Twelve Data tier — re-enable when Tradier is wired). |
+| `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
+| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. |
+| `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
+| `tradier_client.py` | ✅ Live | Tradier options chain helper — used by LEAP desk for chain enrichment. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
-| `.env` | ✅ Live | All API keys + webhooks (never committed) |
+| `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY. |
 
 ---
 
-## 5b. Income Channel & Wheel Strategy Modules (added this session)
+## 6b. FRED Integration (live as of Jul 2026)
 
-**#dividend-ccetfs** (`python scheduler.py --mode income`) — 4 segments, all real-data, no static watchlist:
-1. CC ETF/dividend pulse (existing 10-fund universe — JEPI/JEPQ/DIVO/XYLD/QYLD/RYLD/SCHD/O/MAIN/ARCC)
-2. Dividend Wheel v2 screener (existing — RSI/BB/IVR/delta-filtered CSP setups)
-3. Ex-dividend radar (existing — 14-day countdown)
-4. 🆕 **New Income ETF Radar** — `generate_new_income_etf_screener()` in analytics.py. Scans a verified-real ticker universe across YieldMax (MSTY, NVDY, TSLY, CONY, GOOY, AMDY, YMAX), Roundhill (XDTE, QDTE, RDTE), NEOS (QQQI, SPYI, BTCI), TappAlpha (MAGY). Filters: yield > 10% (from real dividend history, not hardcoded), monthly/weekly pay, > 6 months trading history (proxy for fund age — Twelve Data has no inception-date field), AUM > $50M where Twelve Data reports it (otherwise shown as "N/A — verify," never fabricated).
+All FRED fetches are **cached to DB once per calendar day** — zero redundant API calls across the 5-min monitor loop ticks. Graceful fallback to last cached value on FRED unavailability.
 
-**Wheel signals** (`python scheduler.py --mode wheel_signals`) — runs every market session, dispatches to **WEBHOOK_DIVIDEND_CCETFS** (re-routed from trade-signals — wheeling these holdings for long-term income is income-channel content per operator direction, not separate "trading signal" content):
-1. **Module 1 — Tier 2 IV Rank Screener**: `generate_tier2_iv_rank_alerts()` polls MAIN/MLPI/GPIQ/KQQQ/TDAQ (GPIQ added, TDAQ retained as official Tier 2 even though deprioritized personally), fires when IVR proxy > 35%, includes bid/ask spread check, earnings-date filter (skipped not faked when absent), a concrete CSP setup (strike/DTE/delta/volume/OI), and real dividend yield/frequency/amount when the underlying pays one.
-2. **Module 2 — Wheel Position Tracker**: positions logged manually via `python scheduler.py --mode wheel_position --action open|close ...` (no brokerage link, so it never invents a position). DTE countdown at 21/14 days; closing adds premium to the `wheel_premium_collected_total` ledger.
+| Signal | FRED Series | Used In | Threshold |
+|--------|------------|---------|-----------|
+| HY Credit Spread | BAMLH0A0HYM2 | monitor.py RO composite score | > 4.5% = credit_stress +10pts |
+| Actual VIX | VIXCLS | tqqq.py cycle scorer + LEAP embed | Confirms VIXY proxy |
+| Yield Curve (T10-T2) | DGS10 − DGS2 | cross_asset.py futures board | Inverted = recession watch |
+| Fed Funds Rate | FEDFUNDS | cross_asset.py futures board | Context line |
 
-**#trade-signals** (`python tqqq.py`, runs continuously) — two independent legs:
-1. **Directional sniper** — gated on QQQ vs 21 EMA + SMA200/breadth/VIXY-z, with Black-Scholes risk/reward (premium vs ATR-projected move) already computed for every setup, live or monitoring-only. Now also: (a) never stacks a second LIVE entry while one is already open — downgrades to a quiet monitoring note instead, (b) hard 5-day cooldown between LIVE execution signals (`LIVE_SIGNAL_COOLDOWN_DAYS`) so entries fire roughly weekly, not daily, (c) dispatch payload now includes contract volume and OI range alongside strike/DTE/delta.
-2. **Insurance put renewal clock** — `check_insurance_put_renewal()`, fully separate from the sniper, fires at 14 DTE. Logged via `python tqqq.py --log-put --strike X --expiration YYYY-MM-DD --premium X`. The "buy the dip after a payout, then sell CCs on it" leg is still not automated — only the renewal clock exists.
-
-**LuxAlgo-style price action — already built, not new scope**: `market_structure.py` replicates the Smart Money Concepts toolkit (fair value gaps, liquidity sweeps, equal highs/lows clustering, composite structure classifier) from plain OHLCV math, already wired into the TQQQ sniper's dispatch as a confluence booster. True options-flow/dark-pool replication (LuxAlgo's or Unusual Whales' actual edge) needs Level 2/tape data Twelve Data's plan tier doesn't carry — not faked.
-
-**Vault formulas, now implemented** (`analytics.py`, `market_structure.py`, `cross_asset.py`):
-- `classify_vix_regime()` — 3-tier shield (NORMAL/ELEVATED/CRITICAL) keyed to VIXY z-score (real VIX unavailable at this plan tier), each tier carrying philo.txt's documented `rsi_shield_limit` and posture rule. Wired into the ES/NQ deep-dive and the IB breakout scanner's chase-filter.
-- `calculate_unified_conviction_score()` — base 50 ± Supertrend (new: `market_structure.calculate_supertrend()`) ± RSI ± institutional volume flow ± GEX, score >75/<25 = INSTITUTIONAL LOCK-IN. Wired into the ES/NQ deep-dive.
-- Initial Balance breakout scanner (`cross_asset.py: run_ib_breakout_scan()`) — IB window corrected to the professional-standard 60 min (9:30-10:30 ET, per Axia Futures methodology) rather than philo.txt's 30. Requires volume-delta confirmation (>55% buy/sell on the breakout bars), VIX-regime chase filter (skips if already >0.1% extended in ELEVATED/CRITICAL), stop at IB midpoint, 2:1 minimum R:R, breakeven-shift directive. Gated to one signal per symbol per day.
-- **Fixed a real bug while implementing this**: the futures board was dispatching every single cron tick regardless of whether SPY/QQQ/Dow/IWM quotes had actually moved — confirmed live, three consecutive RTH posts showed byte-identical prices for hours. Now gated on composite % change with a 4-hour heartbeat fallback so the channel doesn't go fully dark either.
-
-**Still open**: `/CL`/`/GC` have no deep-dive or breakout module (board only); true options-flow/dark-pool tape (the "Signal Filtering Logic for Options Flows" section of `vault/philo.txt`) still needs Level 2 data this plan tier doesn't carry.
-
-**Removed**: `stream.py`'s `run_wheel_discovery()` called a nonexistent `generate_wheel_candidates()` method and silently failed every run while duplicating the (working) Dividend Wheel v2 segment above to the same channel — deleted rather than fixed, since the v2 segment already covers this with richer output.
+`analytics.py` has shared FRED helpers: `_fetch_fred_metric()`, `fetch_real_vix()`, `fetch_yield_curve()`, `fetch_fred_macro_snapshot()`, `fetch_hy_spread()`.
 
 ---
 
-## 7. .env Webhook Registry
+## 6c. Binance Derivatives Stack (live as of Jul 2026)
+
+Added to `scheduler.py --mode crypto_social` → #crypto channel. All **free Binance FAPI public endpoints — no API key required**.
+
+```
+analytics.py: fetch_binance_derivatives()
+  → BTC + ETH per symbol:
+    • open_interest (USD)
+    • global_ls  (retail long/short account ratio)
+    • top_ls     (top-trader long/short ratio — smart money)
+    • taker_buy_pct (% of taker volume that is buys)
+
+Smart-money divergence signal fires when:
+  top_ls > 1.1 AND global_ls < 1.0 → smart money diverging long (bullish cross-signal)
+  top_ls < 0.9 AND global_ls > 1.1 → smart money diverging short (bearish cross-signal)
+```
+
+OI + taker direction cross-signals into LEAP CALL bottom_score context (retail panic-shorting while smart money absorbs = dual-asset capitulation signal).
+
+---
+
+## 7. Income Channel & Wheel Strategy Modules
+
+**#dividend-ccetfs** (`python scheduler.py --mode income`) — 4 segments, all real-data:
+1. CC ETF/dividend pulse (JEPI/JEPQ/DIVO/XYLD/QYLD/RYLD/SCHD/O/MAIN/ARCC)
+2. Dividend Wheel v2 screener (RSI/BB/IVR/delta-filtered CSP setups)
+3. Ex-dividend radar (14-day countdown)
+4. **New Income ETF Radar** — `generate_new_income_etf_screener()` in analytics.py. Scans YieldMax (MSTY, NVDY, TSLY, CONY, GOOY, AMDY, YMAX), Roundhill (XDTE, QDTE, RDTE), NEOS (QQQI, SPYI, BTCI), TappAlpha (MAGY). Filters: yield > 10%, monthly/weekly pay, > 6 months trading history, AUM > $50M where available.
+
+**Wheel signals** (`python scheduler.py --mode wheel_signals`) → **WEBHOOK_DIVIDEND_CCETFS**:
+1. **Tier 2 IV Rank Screener** — `generate_tier2_iv_rank_alerts()`, fires when IVR proxy > 35%
+2. **Wheel Position Tracker** — logged manually via `python scheduler.py --mode wheel_position --action open|close ...`
+
+**IVR Tracker** (`python scheduler.py --mode store_daily_iv`, daily at 21:30 UTC):
+- Stores daily ATM IV per symbol in DB
+- ~30 days = usable rolling IVR baseline
+- 252 trading days = full 52-week rank (replaces HV30 proxy permanently)
+- **Status:** Live and accumulating since Jul 11 2026 (stored=22 skipped=4 on first run)
+
+---
+
+## 8. .env Webhook Registry + API Keys
 ```
 WEBHOOK_MARKET_ANALYSIS=
 WEBHOOK_TRADE_SIGNALS=       # options-wheel + tqqq-sniper
@@ -344,19 +411,33 @@ WEBHOOK_FUTURES_TRADING=
 WEBHOOK_CRYPTO=
 WEBHOOK_FED=
 WEBHOOK_FOREX=               # key retained, channel deprecated
+
+# API Keys
+TWELVE_DATA_API_KEY=         # commercially licensed
+FRED_API_KEY=                # free — FRED/STLOUISFED, confirmed in .env
+TRADIER_API_KEY=             # $10/mo — options chain enrichment (live)
 ```
 
 ---
 
-## 8. Infrastructure & Workflow
-- **Data source:** Twelve Data (commercially licensed) — price, OHLCV, RSI, time series, EDGAR
-- **Planned add:** Tradier ($10/mo) — full options chains with real IV, delta, OI, bid/ask per strike
+## 9. Infrastructure & Workflow
+- **Data source:** Twelve Data (commercially licensed) — price, OHLCV, RSI, time series
+- **Macro data:** FRED API (free) — VIX, HY spread, yield curve, Fed Funds, M2
+- **Crypto derivatives:** Binance FAPI (free public) — OI, L/S, taker volume, funding rates
+- **Options chains:** Tradier ($10/mo) — real IV, delta, OI, bid/ask per strike (live)
 - **Runtime:** PythonAnywhere always-on task or tmux session
 - **Notification stack:** Discord webhooks + Pushover + Gmail SMTP (personal + work)
 - **Local dev:** MacBook + tmux + neovim
 - **Deploy:** `git push origin main` → PythonAnywhere `git pull origin main`
 - **Test:** `python monitor.py test` (fires once, skips date gate)
 - **Force:** `python monitor.py force` (same as test)
+
+### PythonAnywhere CPU / Thread Safety Rules
+- **No TDClient SDK** — spawns WebSocket threads on every instantiation, exhausts OS thread limit. All Twelve Data calls use plain `requests.get()` REST only.
+- `market_structure.py` Supertrend: REST-only, no SDK. Direction derived by comparing price to supertrend level (REST endpoint doesn't return trend field).
+- `monitor.py` RVOL: REST-only.
+- All FRED fetches: cached to DB once/day — 5-min monitor loop never hits FRED more than 1×/day.
+- `stream.py`: WebSocket-only for BTC/USD + equities (RTH only). REST poller removed (was 2,880 calls/day with no unique value).
 
 ### Data Source Gap Map
 | Need | Current | With Tradier |
@@ -365,18 +446,19 @@ WEBHOOK_FOREX=               # key retained, channel deprecated
 | Delta at strike | Formula approximation ⚠️ | Real chain delta ✅ |
 | Bid/ask spread check | Estimated ⚠️ | Real market prices ✅ |
 | OI / volume confirmation | Proxy range ⚠️ | Real per-strike OI ✅ |
-| IV Rank (52-week) | Not available ❌ | Build by storing daily IV in DB ✅ |
+| IV Rank (52-week) | Accumulating in DB 🟡 | Full rank after 252 days ✅ |
 | GEX (SPY dealer flow) | Returns 0.0 — disabled ❌ | Real strike-by-strike OI → real GEX ✅ |
 | CLM/CRF options | N/A (CEF, thin market) | N/A — monitor.py covers via EDGAR ✅ |
+| HY Credit Spread | FRED BAMLH0A0HYM2 ✅ | — |
+| Actual VIX | FRED VIXCLS ✅ | — |
+| Yield Curve | FRED DGS10−DGS2 ✅ | — |
+| Crypto OI + L/S | Binance FAPI free ✅ | — |
 
-**GEX note:** `calculate_gex_profile()` was disabled (returns 0.0 at Twelve Data tier). With Tradier
-providing real SPY OI per strike, GEX becomes a genuine signal: when spot crosses the gamma flip,
-dealer hedging switches from suppressing volatility to amplifying it — early warning for CLM/CRF
-premium compression events. Re-enable once Tradier is wired in.
+**GEX note:** `calculate_gex_profile()` disabled (returns 0.0 at Twelve Data tier). Re-enable once Tradier OI is wired — gamma flip is an early warning for CLM/CRF premium compression events.
 
 ---
 
-## 9. SaaS Pricing Model (Discord subscription tiers)
+## 10. SaaS Pricing Model (Discord subscription tiers)
 
 | Tier | Price | Access |
 |------|-------|--------|
@@ -391,7 +473,7 @@ premium compression events. Re-enable once Tradier is wired in.
 
 ---
 
-## 10. Stress Test Scenarios
+## 11. Stress Test Scenarios
 
 | Scenario | Key Risk | Protection |
 |----------|---------|------------|
@@ -400,10 +482,11 @@ premium compression events. Re-enable once Tradier is wired in.
 | Margin rate spike | Higher interest cost | Tier 2 divs absorb increase; reduce draw if rate > div yield |
 | Dark pool exit | Unexplained price drop | detect_dark_pool_activity() flags low-vol price drops |
 | CEF premium collapse | Fast premium compression | detect_premium_compression() flags intra-session spread collapse |
+| Credit crunch | HY spread spike | FRED live spread → RO score reacts in real time (was hardcoded) |
 
 ---
 
-## 11. 10-Year Financial Freedom Roadmap
+## 12. 10-Year Financial Freedom Roadmap
 
 | Year | CLM/CRF | Tier 2 | Monthly Cash | Milestone |
 |------|---------|--------|-------------|-----------|
@@ -422,20 +505,20 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 
 ---
 
-## 12. Next Priorities for Claude Code Sessions
+## 13. Next Priorities for Claude Code Sessions
 
 ### Data Infrastructure
-- [ ] **Tradier integration ($10/mo)** — wire bearer token into `.env`, build `tradier_client.py` helper; replace HV30 IV proxy in `analytics.py` with real chain data; unlock real delta/OI for wheel scanner and TQQQ sniper; re-enable `gex` mode in `market_scheduler.py` once real SPY OI available
-- [ ] **IVR tracker** — store daily ATM IV per symbol in DB; after 30 days = usable IVR; after 252 days = full 52-week rank; replaces current proxy permanently
+- [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline in ~30 days, full 52-week rank after 252 trading days
+- [ ] **GEX re-enable** — wire `calculate_gex_profile()` back in once Tradier OI is confirmed stable; gamma flip = early CEF premium compression warning
 
 ### Scripts to Build
 - [ ] `market_analysis.py` — 0800 HST premarket report aggregating all channel feeds
-- [ ] `crypto.py` — BTC/ETH + Fear & Greed + funding rates + NVDA/BTC correlation tracker
+- [ ] `crypto.py` — dedicated BTC/ETH channel script (currently served by scheduler.py `--mode crypto_social`)
 - [ ] `announcements.py` — weekly accuracy scorecard, prediction vs actual grader
 - [ ] `/CL` `/GC` deep-dive/breakout module — futures channel currently board-only for commodities; ES/NQ have full profile via `cross_asset.py`
 
 ### Options & Automation
-- [ ] **SPY put insurance implementation** — log puts via `tqqq.py --log-put`; strike distance tied to live margin utilization ratio (not fixed 10%); re-evaluate at ~$100K portfolio stage
+- [ ] **SPY put insurance implementation** — log puts via `tqqq.py --log-put`; strike distance tied to live margin utilization ratio; re-evaluate at ~$100K portfolio stage
 - [ ] TQQQ insurance leg: automate "put pays out → buy TQQQ at discount → sell CCs on it" (only 14 DTE renewal clock exists now)
 - [ ] Wheel position entry still manual-only (`scheduler.py --mode wheel_position`) — no brokerage API
 
