@@ -1405,29 +1405,26 @@ def send_daily_pulse(is_test=False):
 
     full_report, worst_tier = compute_cornerstone_reports()
 
-    # Append GEX context line (uses 1-hour DB cache — zero extra API calls in the loop)
+    # SPY GEX macro context — negative gamma = dealers amplify volatility = elevated CEF premium risk.
+    # P/C OI removed from this channel: CLM/CRF have no options market so put/call ratios have no
+    # CLM/CRF-specific meaning. P/C is handled by tqqq.py's cycle scorer where it belongs.
+    # Note: calculate_gex_profile() returns UNKNOWN at current Twelve Data tier (no real OI data).
+    # This block only activates once Tradier OI is wired — safe to leave in place.
     try:
         from analytics import HighFidelityAnalyticsEngine
         gex = HighFidelityAnalyticsEngine().calculate_gex_profile("SPY")
         if gex.get("market_state", "UNKNOWN") != "UNKNOWN":
             flip = gex.get("flip_strike", 0.0)
-            pc = gex.get("pc_oi_ratio", 1.0)
             gex_total = gex.get("gex_total")
             is_neg = "NEGATIVE" in gex.get("market_state", "")
             gex_note = (
-                f"dealers amplify moves — volatility risk elevated for CLM/CRF premium" if is_neg else
-                "dealers suppress moves — stable environment for premium/CEF positioning"
-            )
-            pc_note = (
-                "options market leaning bearish — watch for CLM/CRF premium compression" if "PUT-HEAVY" in gex.get("pc_tag","") else
-                ("options market leaning bullish — premium expansion likely" if "CALL-HEAVY" in gex.get("pc_tag","") else
-                 "options market neutral")
+                "dealers amplify moves — volatility risk elevated for CLM/CRF premium" if is_neg else
+                "dealers suppress moves — stable CEF premium environment"
             )
             gex_line = (
                 f"┣ SPY GEX: {gex['market_state']} | Flip ${flip:,.0f}"
                 + (f" | Net {gex_total:+.1f}B" if gex_total is not None else "")
                 + f" — {gex_note}\n"
-                + f"┣ P/C OI: {pc} — {gex['pc_tag']} | {pc_note}\n"
             )
             full_report = gex_line + full_report
     except Exception:
