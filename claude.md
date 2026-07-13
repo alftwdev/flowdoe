@@ -1,5 +1,157 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
+*Last updated: Jul 2026*
+
+---
+
+## 0. The 3 Personal Strategies (Real Funds — This Is The System)
+
+These are the three live strategies running with actual capital. All ecosystem scripts
+exist to serve, protect, and inform these three tracks. Nothing else matters.
+
+---
+
+### Strategy 1 — CLM/CRF Snowball Engine (Core Wealth Builder)
+
+**The thesis:** CEF DRIP at NAV = structural alpha. Every distribution reinvested buys
+shares below market price. Margin is velocity — borrowed equity buys more equity,
+with Tier 2 dividends covering the interest cost so the loan is effectively free
+once yield > margin rate. Simplifi tracks paycheck surplus so every dollar of
+idle cash gets deployed immediately rather than sitting in checking.
+
+**The mechanic:**
+```
+$500/wk auto-deposit + monthly W2 surplus (Simplifi by Quicken monitors leftover)
+  → E*TRADE cash buffer
+  → Bills paid via E*TRADE Bill Pay (treats portfolio as business operating account)
+  → Surplus + Tier 2 dividends (MAIN/MLPI/TDAQ/KQQQ) → margin paydown
+  → Margin freed → reborrow conservatively (never exceed 25% of portfolio value)
+  → Buy more CLM/CRF on margin + buy more MAIN/MLPI with cash (preferred)
+  → CLM/CRF DRIP at NAV → shares issued below market = built-in alpha every month
+  → Tier 2 dividends cover margin interest → loan is structurally free
+  → Rinse, repeat → compounding snowball effect
+```
+
+**The edge:**
+- DRIP at NAV: shares issued at intrinsic value, not inflated market premium
+- Rights Offering dodge: sell 99% on N-2 detection → rebuy post-dip → net MORE shares than participants
+- Timed DCA: March and September seasonal weakness = deliberate accumulation zones
+- Margin arbitrage: borrowing at ~7.25% against 19–21% blended yield = positive carry
+
+**What monitor.py protects:**
+- SEC EDGAR N-2 watcher (Rights Offering early warning)
+- Dark pool detection (unexplained price drop = off-exchange exit)
+- CEF premium compression (fast intra-session collapse)
+- VIXY crisis overlay (market vol spike = CEF premium risk)
+- Live HY credit spread from FRED (not hardcoded — reacts to real credit stress)
+
+**Guardrails:**
+- Margin never exceeds 25% of portfolio value
+- Internal red line: portfolio drops 15% → stop new margin draws
+- Keep ~$2k cash buffer (1 month of bills) at all times
+
+---
+
+### Strategy 2 — Options Wheel + CC ETF Income Arb
+
+**The thesis:** Sell time premium on high-IV names. Collect cash. Pay down margin.
+If assigned, you own shares at a discount AND potentially collect dividends while
+waiting for the covered call to be exercised. Two parallel sub-tracks.
+
+**Track A — Wheel on high-IV names (HIMS, SOFI, PLTR, COIN, etc.):**
+```
+Sell CSP (0.20 delta, 30–45 DTE) on high-IV names
+  → Collect premium → margin paydown bucket
+  → If assigned: own shares at strike - premium (below market cost basis)
+  → BONUS: if ticker pays dividends → collect those too while holding
+  → Sell CC against assigned shares (ATM/slight OTM, 21–30 DTE)
+  → Exit: CC called away (profit realized) OR buy-back at 50% gain
+  → Premium collected → margin paydown → rinse, repeat
+```
+
+**Dividend bonus rule:** When screening wheel candidates, prefer names that pay
+dividends. If assigned, premium income + dividend income while running the CC.
+Examples: SOFI (growing dividend), MAIN (if ever wheeled), O (monthly REIT).
+
+**Track B — CC ETF income arb (TDAQ/KQQQ/MLPI hold-and-collect):**
+```
+Hold TDAQ / KQQQ / MLPI as Tier 2 long positions
+  → Monthly distributions (~12–17% annualized) → margin paydown
+  → These ARE packaged wheels — no manual execution needed
+  → Can also wheel the CC ETFs themselves if IV is temporarily elevated
+```
+
+**Wheel universe (scheduler.py screens these):**
+```python
+WHEEL_UNIVERSE = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",  # CORE
+    "SCHD", "JEPI", "JEPQ", "O", "ARCC",                      # INCOME
+    "TSLA", "COIN", "SOFI", "PLTR", "HIMS",                   # GROWTH/HIGH-IV
+    "SPY", "QQQ", "IWM", "GLD", "XLE",                        # SECTOR
+]
+```
+
+**Entry filter (scheduler.py --mode wheel_signals):**
+```
+IVR > 35% | bid-ask spread < 10% of mid | no earnings within 45 days
+Premium ≥ 1% of strike | delta ~0.20 | 30–45 DTE
+```
+
+**Capital rule:** Max 30% of available margin in wheel positions at any time.
+
+---
+
+### Strategy 3 — TQQQ LEAP Desk (Calculated Time-Buying)
+
+**The thesis:** On red days / bearish trends, buy TIME via deep ITM long-dated calls.
+Recovery on a 3× Nasdaq ETF over a 9–18 month horizon is near-certain historically.
+You are not predicting the exact bottom — you are buying enough time for the bounce
+to come to you. Defined risk = premium paid only. Same logic inverted for tops.
+
+**CALL desk — bottom-hunting (red days, bearish cycles):**
+```
+Cycle Position Scorer fires when bottom_score ≥ 55/100:
+  Inputs: VIXY z-score (30pts) + RSI14 (25pts) + breadth (20pts) +
+          52w drawdown (15pts) + SPY P/C z-score (15pts) +
+          VIX term structure backwardation (12pts) + CNN F&G fear (10pts) +
+          below SMA200 (5pts) + MACD (3pts) + actual VIX via FRED (confirmation)
+  → BTO deep ITM TQQQ CALL: delta ~0.72, 270–540 DTE (9–18 months)
+  → TP1: close 50% at +50% gain
+  → TP2: close remainder at +100% gain
+  → 2-hour cooldown: re-evaluates on continued downtrend (not a hard lockout)
+```
+
+**PUT desk — top-hunting (extended green days, overbought cycles):**
+```
+top_score ≥ 55/100 → BTO deep ITM QQQ PUT (NOT TQQQ — better liquidity at long DTE)
+  Delta ~-0.72 | 180–365 DTE (6–12 months)
+  Same TP1/TP2 structure as CALL desk
+```
+
+**Insurance put (always-on margin protection):**
+```
+Always 1 active SPY/QQQ put open — 30 DTE, rolls at 14 DTE regardless of P&L
+Budget: ≤ 0.5% of portfolio/month
+If VIX > 30 → close put at profit → rotate into TQQQ calls (fear peak = call entry)
+Strike distance tied to live margin utilization (not fixed %):
+  < 15% margin → 10% OTM | 15–25% → 7% OTM | 25%+ → 5% OTM
+```
+
+**Universe beyond TQQQ (open to expansion):**
+| Ticker | Why | Notes |
+|--------|-----|-------|
+| TQQQ | 3× QQQ, deep ITM calls liquid | Primary CALL desk underlying |
+| QQQ | Best PUT liquidity at long DTE | Primary PUT desk underlying |
+| SPY | Most liquid options market globally | Lower leverage = more entries |
+| NVDA | High IV, massive OI, AI cycle | AI cycle tops/bottoms predictable |
+| PLTR | High retail + institutional, big IV swings | Good 6-9mo calls on dips |
+| COIN | Tracks crypto cycle, extreme fear-day IV | Pairs with BTC F&G signal |
+| SOFI | High IV fintech, dual-use (also wheel candidate) | Wheel + LEAP crossover |
+| Social momentum names | GME/AMC-style when Reddit WSB + StockTwits conviction HIGH | `--mode trending_plays` already screens for these |
+
+**Screener for next NVDA:** `scheduler.py --mode trending_plays` watches StockTwits +
+Reddit WSB + Finviz for emerging high-conviction names with high IVR + liquid OI.
+When social conviction AND options setup align → BTO LEAP alert.
 
 ---
 
@@ -198,24 +350,59 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode wheel_signals`) | Tier 2 IV Rank screener + open wheel position DTE countdown |
 | #fed | WEBHOOK_FED | fed.py | Fed rate/macro signals |
 
+### #market-analysis — The Command Center (Most Vital Channel)
+
+This is the single source of truth for daily decision-making. Every other channel
+feeds into it. The morning brief and EOD brief from this channel are relied on
+heavily — they set the bias, posture, and conviction level for the day.
+
+**What it synthesizes:**
+- Pre-market: /ES /NQ overnight levels, VIX regime, yield curve, macro backdrop
+- Intraday: unusual moves, cross-asset signals, breadth deterioration
+- EOD: recap of what fired, what to watch tomorrow, any strategy adjustments
+- Cross-signals from #cornerstone (RO alerts), #crypto (F&G extremes), #futures (bias)
+
+**Still to build:** `market_analysis.py` — the dedicated 0800 HST premarket aggregator
+that pulls all feed data and produces a structured morning brief to this channel.
+
+### #futures-trading and #crypto — Intelligence / Conviction Channels
+
+These channels don't drive direct trades — they sharpen conviction and provide
+macro context that informs all three strategies.
+
+**#futures-trading** (cross_asset.py + scheduler.py futures_social):
+- /ES /NQ /CL /GC overnight and session moves → bias for the day
+- Yield curve (T10-T2 from FRED) → recession watch, LEAP PUT conviction
+- Fed Funds rate → margin cost context
+- IB breakout scanner → early session momentum confirmation
+- Commodity moves → macro rotation signal
+
+**#crypto** (scheduler.py crypto_social):
+- BTC/ETH Fear & Greed → cross-signal for LEAP CALL bottom-hunting
+- Binance OI + L/S ratio + taker volume → smart money vs retail divergence
+- When retail is panic-shorting + smart money is net long = dual-asset capitulation
+  → adds conviction to TQQQ CALL entry when equities are also red
+- Funding rates → crowded trade detection
+
 ### Cross-Channel Data Flow (Unity Map)
 ```
 #cornerstone  ──RO Alert──────────────────► #market-analysis (action item)
-              ──Dip watch countdown──────► #tqqq-sniper (call entry signal)
+              ──Dip watch countdown──────► #options-wheel (call entry signal)
 
 #crypto       ──Fear & Greed < 25─────── ► #market-analysis (risk-on signal)
-              ──Extreme Fear──────────── ► #tqqq-sniper (TQQQ call cross-signal)
+              ──Extreme Fear──────────── ► #options-wheel (TQQQ call cross-signal)
               ──Binance L/S divergence──► LEAP CALL bottom signal cross-confirm
 
 #options-wheel──Premium collected──────► #market-analysis (cashflow log)
 
-#tqqq-sniper  ──Put profit realized────► rotate to TQQQ calls (same channel SOP)
+#options-wheel──Put profit realized────► rotate to TQQQ calls (same channel SOP)
 
 #futures      ──/NQ overnight > +0.5%──► #market-analysis (bullish bias)
               ──/NQ overnight < -1%────► TQQQ put check reminder
               ──Yield curve inverted───► LEAP PUT conviction booster
 
-#market-analysis ← synthesizes ALL feeds → ACTION ITEMS (single source of truth)
+#market-analysis ← synthesizes ALL feeds → MORNING BRIEF + EOD BRIEF + INTRADAY ALERTS
+                   (single source of truth for daily posture and conviction)
 ```
 
 ### 3-Notification Rule
@@ -525,3 +712,115 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 ### Monetization
 - [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #announcements
 - [ ] Subscriber tier gating — lock premium channels, route free tier to #announcements only
+
+---
+
+## 14. Honest Gap Analysis & Ideas to Harden the System
+
+### What's Working Well (Keep and Protect)
+- CLM/CRF N-2 EDGAR watcher is genuinely rare — no retail tool does this automatically
+- DRIP at NAV + RO dodge is a real structural edge most CLM/CRF holders don't execute
+- Bidirectional LEAP desk with a composite cycle scorer > any single-indicator approach
+- Binance smart money divergence as a LEAP cross-signal is institutional-grade thinking
+- Yield curve + HY spread in the futures board gives macro context most Discord servers skip
+
+### Gaps in the Current System
+
+**Gap 1 — market_analysis.py is the most critical missing piece**
+Every strategy depends on morning conviction. Without a structured 0800 HST brief that
+synthesizes #cornerstone + #futures + #crypto + macro into a single actionable posture,
+the data sits in separate channels and requires manual synthesis. Build this first.
+
+**Gap 2 — No earnings calendar awareness on wheel positions**
+The wheel scanner filters out earnings within 45 days, but there's no active alert
+when an earnings date approaches on an OPEN wheel position. A name can be safe at
+entry and then have earnings announced 2 weeks later. Add earnings proximity alert
+to `scheduler.py --mode wheel_signals` for open positions.
+
+**Gap 3 — No position sizing calculator**
+The system knows what to buy but not how much. A Kelly Criterion-inspired sizer using
+win rate (from the accuracy ledger), average gain/loss, and current margin utilization
+would turn signal quality into a specific contract/share count. Reduces both
+under-sizing (leaving money on the table) and over-sizing (margin call risk).
+
+**Gap 4 — CLM/CRF premium z-score baseline needs more history**
+The z-score compares current premium to a rolling mean/sigma stored in DB. If the DB
+is relatively new, the baseline may not reflect the full historical premium range
+(CLM/CRF trade anywhere from -5% discount to +40% premium across market cycles).
+Consider seeding the DB with historical NAV/price data from CEFConnect or SEC filings
+to give the z-score a proper multi-year anchor.
+
+**Gap 5 — No volatility regime filter on wheel entries**
+High VIX = high IV = high premium = good for selling. But if VIX is elevated because
+of a genuine macro breakdown, assignment risk spikes. The wheel scanner should
+cross-reference the VIX regime from `classify_vix_regime()` and either:
+  - Reduce delta to 0.15 in ELEVATED/CRITICAL VIX (less probability of assignment)
+  - Flag it explicitly in the signal output so the human can decide
+
+**Gap 6 — Crypto cycle has no exit signal**
+Tier 3 holdings (BITA, YBTC) are supposed to exit when the crypto cycle peaks, but
+there's no defined exit trigger. Add a structured exit rule: when BTC dominance drops
+below 40% AND F&G enters Extreme Greed for 3+ consecutive days AND funding rates
+annualize above 50%+ → Tier 3 exit signal fires to #market-analysis.
+
+### Ideas to Explore (Hardening, Not Scope Creep)
+
+**Idea 1 — Dividend reinvestment timing optimizer**
+CLM/CRF ex-div falls mid-month. NAV-based DRIP shares are issued at NAV, not market
+price, but the market price often dips slightly on ex-div day. Tracking the exact
+ex-div date and comparing the premium compression pattern around it could reveal
+a consistent 1–3 day accumulation window before the price recovers. monitor.py
+already has the ex-div window heuristic — refine it with actual historical data.
+
+**Idea 2 — Margin rate vs dividend yield spread alert**
+When the Fed raises rates, E*TRADE margin rate rises. If margin rate ever approaches
+blended Tier 2 yield (~13–15%), the positive carry disappears. Add a live spread
+monitor: `(blended_tier2_yield - margin_rate)` → alert to #market-analysis if spread
+drops below 5%. Data: FRED FEDFUNDS (already fetched) + live Tier 2 prices.
+
+**Idea 3 — LEAP desk seasonal calendar**
+The LEAP CALL desk already has March/September seasonal rules. Extend this to a full
+12-month seasonal calendar based on QQQ/TQQQ historical drawdown/rally patterns:
+Jan (post-tax selling recovery), Apr-May (sell in May watch), Aug (summer chop),
+Oct (historically the best LEAP CALL entry month of the year). Bakes the seasonal
+edge into the cycle scorer as a calendar-weight modifier.
+
+**Idea 4 — Correlation monitor: CLM/CRF premium vs VIX**
+Historical data shows CLM/CRF premium compresses during VIX spikes. Quantify this
+relationship: when VIX rises X%, premium historically drops Y%. This gives a
+predicted premium level during a market shock, which informs whether to hold through
+or dodge early. Buildable from existing time series data in DB + FRED VIX history.
+
+**Idea 5 — Weekly premium harvest scorecard (personal)**
+A private (non-Discord) weekly summary: total wheel premium collected vs target,
+CLM/CRF DRIP shares added this month, margin utilization trend, carry spread.
+Feeds the accuracy scorecard and gives a clear picture of whether the snowball
+is accelerating or stalling. Currently tracked manually in Simplifi — automate it.
+
+### Competitive Assessment (If Going Public Eventually)
+
+**Strengths vs existing Discord finance servers:**
+
+| What you have | Why it's rare |
+|---------------|---------------|
+| Automated N-2 EDGAR watcher for CLM/CRF | No other retail bot does this |
+| NAV-based DRIP optimization + RO dodge | Unique strategy, zero competitors |
+| Bidirectional LEAP cycle scorer (composite 8-signal) | Most servers just say "buy the dip" |
+| Binance smart money L/S divergence cross-signal | Institutional signal, retail price |
+| Live HY spread + yield curve in futures board | Most servers ignore macro entirely |
+| Twelve Data commercial license | Legal edge vs scrapers |
+
+**What you'll need before going public:**
+1. `market_analysis.py` built and polished — the morning brief is the flagship product
+2. `announcements.py` accuracy scorecard running for at least 60 days with real predictions
+3. Subscriber gating implemented — free tier must see enough to want more, not everything
+4. A clear track record: "our LEAP CALL desk fired on [date], TQQQ was at $X, now $Y"
+5. CLM/CRF RO dodge documentation — this is the hook that no other server offers
+
+**Honest competitive reality:**
+The system is differentiated, not just technically but strategically. The CLM/CRF
+focus + margin arbitrage + LEAP desk combination targets a specific underserved audience:
+W2 employees who want to build wealth systematically without day-trading. That niche
+exists and has money. The weak point right now is that the analysis is siloed across
+channels — `market_analysis.py` is the glue that makes it feel like one coherent
+intelligence system rather than five separate bots. Build that first.
