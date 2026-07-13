@@ -1183,6 +1183,15 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     db.update_state(f"{ticker.lower()}_last_premium",   round(premium, 3))
     db.update_state(f"{ticker.lower()}_last_ro_tier",   ro_tier)
 
+    # ── Log daily premium for z-score calibration (replaces retired CEFConnect API)
+    # INSERT OR IGNORE — only the first call per calendar day writes; subsequent
+    # 5-min loop ticks skip silently. Builds rolling 252-day empirical baseline.
+    try:
+        if nav > 0 and price > 0:
+            db.store_cef_premium(ticker, nav, price, premium)
+    except Exception:
+        pass
+
     return report_text, ro_tier, ro_score
 
 # ─────────────────────────────────────────────────────────────────────────────

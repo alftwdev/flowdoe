@@ -119,6 +119,22 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
 
+                # CEF daily premium log — accumulates from monitor.py runs.
+                # Replaces CEFConnect dependency (API retired). After 30+ trading days
+                # this table provides a real empirical baseline for z-score calibration.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS cef_premium_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker TEXT NOT NULL,
+                        log_date TEXT NOT NULL,
+                        nav REAL NOT NULL,
+                        price REAL NOT NULL,
+                        premium_pct REAL NOT NULL,
+                        UNIQUE(ticker, log_date)
+                    )
+                """)
+                conn.commit()
+
                 # Graceful column migrations — try each; OperationalError means already exists.
                 for col_sql in [
                     # Lot-engine (session 1)
@@ -533,3 +549,45 @@ class EcosystemDatabase:
         ivr = round(max(0.0, min(100.0, ivr)), 1)
         tag = "LOW IVR" if ivr < 35 else ("ELEVATED IVR" if ivr > 60 else "MID IVR")
         return {"ivr": ivr, "days_history": days, "reliable": days >= 30, "tag": tag, "current_iv": current}
+
+    def store_cef_premium(self, ticker: str, nav: float, price: float, premium_pct: float,
+                          log_date: str = None) -> bool:
+        """
+        Log today's CEF premium observation (upsert — safe to call every monitor.py tick).
+        Builds up the rolling history that replaces the retired CEFConnect API.
+        Returns True on new insert, False if the date already existed (skipped).
+        """
+        date_str = log_date or datetime.now().strftime("%Y-%m-%d")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR IGNORE INTO cef_premium_log (ticker, log_date, nav, price, premium_pct) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (ticker.upper(), date_str, nav, price, round(premium_pct, 4)),
+                )
+                inserted = cursor.rowcount > 0
+                conn.commit()
+                return inserted
+        except Exception as e:
+            logger.error(f"store_cef_premium failed for {ticker}: {e}")
+            return False
+
+    def get_cef_premium_history(self, ticker: str, days: int = 252) -> list:
+        """
+        Return stored CEF premium observations newest-first, up to `days` rows.
+        Each row is a dict: {log_date, nav, price, premium_pct}.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT log_date, nav, price, premium_pct FROM cef_premium_log "
+                    "WHERE ticker = ? ORDER BY log_date DESC LIMIT ?",
+                    (ticker.upper(), days),
+                )
+                cols = ["log_date", "nav", "price", "premium_pct"]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"get_cef_premium_history failed for {ticker}: {e}")
+            return []

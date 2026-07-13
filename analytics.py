@@ -3572,75 +3572,52 @@ class HighFidelityAnalyticsEngine:
 
         return {"score": score, "label": label, "signals": signals}
 
-    # ── CEF PREMIUM HISTORY (CEFConnect internal API) ─────────────────────────
-    # CEFConnect.com has a free internal JSON API with years of daily NAV/price/premium
-    # history for CLM and CRF. Seeding this anchors the z-score baseline in monitor.py
-    # with real empirical data instead of the hardcoded mu=15.0 / sigma=4.0 defaults.
-
-    def fetch_cef_premium_history(self, ticker: str, days: int = 252) -> list:
-        """
-        CEFConnect internal API — returns daily price/NAV/premium history.
-        No API key required. Returns list of dicts sorted newest-first.
-        Each dict: {date, price, nav, premium_pct}.
-        """
-        url = f"https://www.cefconnect.com/api/v3/fund/{ticker.upper()}/priceandnavhistory"
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-                "Accept":     "application/json",
-                "Referer":    f"https://www.cefconnect.com/fund/{ticker.upper()}",
-            }
-            r = requests.get(url, headers=headers, timeout=15)
-            r.raise_for_status()
-            raw     = r.json()
-            history = []
-            for row in raw:
-                try:
-                    date_str = str(row.get("Date", ""))[:10]
-                    price    = float(row.get("MarketPrice", 0) or 0)
-                    nav      = float(row.get("NAV", 0) or 0)
-                    if nav > 0 and date_str:
-                        prem = (price - nav) / nav * 100
-                        history.append({
-                            "date":        date_str,
-                            "price":       price,
-                            "nav":         nav,
-                            "premium_pct": round(prem, 3),
-                        })
-                except Exception:
-                    continue
-            history.sort(key=lambda x: x["date"], reverse=True)
-            return history[:days]
-        except Exception as e:
-            logger.error(f"[CEFConnect] {ticker} history fetch failed: {e}")
-            return []
-
     def calibrate_cef_premium_zscore(self, ticker: str) -> dict:
         """
-        Pulls 252-day CEFConnect premium history, computes mean and std,
-        and updates the DB state keys used by monitor.py's z-score calculation.
-        Also stores the last premium value so monitor.py's compression detector
-        has a valid previous-session anchor on first run.
+        Calibrates monitor.py's z-score using locally accumulated daily premium data
+        (written by monitor.py each loop tick via db.store_cef_premium).
 
-        Returns {"mu": float, "sigma": float, "n": int, "ticker": str}.
-        Safe to re-run daily — always updates to latest 252-day window.
+        CEFConnect API was deprecated — all v3 endpoints return 404.
+        This function now reads from the DB cef_premium_log table, which
+        accumulates one row per trading day automatically.
+
+        Priors when DB data is thin (< 20 days):
+          CLM: mu=19.5, sigma=7.5 (derived from 5-year historical range 0–38%)
+          CRF: mu=18.0, sigma=7.0 (similar fund, slightly tighter historical range)
+          These are meaningfully better than the hardcoded 15/4 defaults.
+        After 30+ trading days the empirical data takes over automatically.
+
+        Returns {"mu": float, "sigma": float, "n": int, "source": str, "ticker": str}.
         """
-        history = self.fetch_cef_premium_history(ticker, days=252)
-        if len(history) < 20:
-            logger.warning(f"[CEFCalibrate] {ticker}: only {len(history)} rows — insufficient for calibration.")
-            return {}
-        prems = [h["premium_pct"] for h in history]
-        n     = len(prems)
-        mu    = round(sum(prems) / n, 4)
-        variance = sum((p - mu) ** 2 for p in prems) / n
-        sigma = round(variance ** 0.5, 4)
+        # Informed priors — based on CLM/CRF historical premium range (0–38%, avg ~18–20%)
+        PRIORS = {
+            "CLM": {"mu": 19.5, "sigma": 7.5},
+            "CRF": {"mu": 18.0, "sigma": 7.0},
+        }
+        defaults = PRIORS.get(ticker.upper(), {"mu": 18.0, "sigma": 7.0})
+
+        history = self.db.get_cef_premium_history(ticker, days=252)
+        n       = len(history)
+
+        if n < 20:
+            mu    = defaults["mu"]
+            sigma = defaults["sigma"]
+            source = f"prior ({n}/20 days accumulated)"
+            logger.info(f"[CEFCalibrate] {ticker}: using informed prior — {source}")
+        else:
+            prems    = [h["premium_pct"] for h in history]
+            mu       = round(sum(prems) / n, 4)
+            variance = sum((p - mu) ** 2 for p in prems) / n
+            sigma    = round(max(variance ** 0.5, 1.0), 4)  # floor at 1% to avoid division issues
+            source   = f"empirical ({n} trading days)"
+            logger.info(f"[CEFCalibrate] {ticker}: mu={mu:.2f}% sigma={sigma:.2f}% — {source}")
+
         self.db.update_state(f"{ticker}_premium_mu",    mu)
         self.db.update_state(f"{ticker}_premium_sigma", sigma)
-        # Anchor the compression detector to the most recent session premium
         if history:
             self.db.update_state(f"{ticker}_premium_prev", history[0]["premium_pct"])
-        logger.info(f"[CEFCalibrate] {ticker}: mu={mu:.2f}% sigma={sigma:.2f}% n={n}")
-        return {"mu": mu, "sigma": sigma, "n": n, "ticker": ticker}
+
+        return {"mu": round(mu, 4), "sigma": round(sigma, 4), "n": n, "source": source, "ticker": ticker}
 
     # ── NVDA / BTC CORRELATION ────────────────────────────────────────────────
     # 30-day Pearson correlation on daily log returns.
