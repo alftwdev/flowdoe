@@ -49,9 +49,9 @@ TWELVE_DATA_API_KEY     = os.getenv("TWELVE_DATA_API_KEY")
 
 # Fire times (UTC hour, minute) and their DB dedup keys
 FIRE_SCHEDULE = [
-    (18,  0, "ma_morning",   "morning"),
-    (20, 20, "ma_intraday",  "intraday"),
-    (23, 40, "ma_eod",       "eod"),
+    (12,  0, "ma_morning",   "morning"),   # 08:00 ET pre-market | 02:00 HST
+    (17,  0, "ma_intraday",  "intraday"),  # 13:00 ET mid-session | 07:00 HST
+    (21, 30, "ma_eod",       "eod"),       # 17:30 ET after close | 11:30 HST
 ]
 FIRE_WINDOW_MIN = 2   # ± minutes around target time
 
