@@ -71,7 +71,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -671,6 +671,65 @@ def main():
             except Exception as e:
                 logger.error(f"Wheel IV environment post failed: {e}")
 
+            # ── MODULE 4: VIX-ADJUSTED ENTRY PARAMETERS ───────────────────────
+            # Tells members WHICH delta and DTE to use TODAY based on VIX regime.
+            try:
+                real_vix = engine.fetch_real_vix() or 20.0
+                vix_params = engine.get_vix_adjusted_params(real_vix)
+                tier = vix_params["tier"]
+                tier_color = {"LOW": 0x2ecc71, "NORMAL": 0x3498db, "ELEVATED": 0xf1c40f, "PANIC": 0xe74c3c}.get(tier, 0x95a5a6)
+                vix_payload = (
+                    f"VIX Regime: **{tier}** (VIX `{real_vix:.1f}` [FRED])\n\n"
+                    f"┣ Target Delta: `{vix_params['delta_target']:.2f}` "
+                    f"({int(vix_params['delta_target']*100)}% OTM probability)\n"
+                    f"┣ DTE Window: `{vix_params['dte_min']}–{vix_params['dte_max']} days`\n"
+                    f"┣ Size Scalar: `{vix_params['size_scalar']:.0%}` of normal position\n"
+                    f"┗ Rationale: {'Low vol = can go closer to ATM for more premium.' if tier == 'LOW' else 'Elevated vol = go further OTM, tastytrade data shows 95% OTM expiry at this delta.' if tier == 'ELEVATED' else 'Panic regime = min size, max OTM. Wait for VIX < 25 before entering new positions.' if tier == 'PANIC' else 'Standard parameters apply.'}"
+                )
+                if WEBHOOK_INCOME:
+                    send_essentials_embed(WEBHOOK_INCOME, "📐 WHEEL PARAMS | VIX-Adjusted Entry Guide", vix_payload, tier_color)
+                    logger.info(f"VIX-adjusted params dispatched: {tier} regime (VIX {real_vix:.1f}).")
+            except Exception as e:
+                logger.error(f"VIX-adjusted params post failed: {e}")
+
+            # ── MODULE 5: EARNINGS PROXIMITY SCANNER ──────────────────────────
+            # Flags wheel universe symbols with earnings within 21 DTE.
+            # Thetagang rule: never hold a short option through an earnings event.
+            try:
+                from tradier_client import TradierClient
+                tc_earn = TradierClient()
+                if tc_earn.api_key:
+                    WHEEL_UNIVERSE = [
+                        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+                        "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+                        "TSLA", "COIN", "SOFI", "PLTR",
+                        "SPY", "QQQ", "IWM", "GLD", "XLE",
+                    ]
+                    earn_map = tc_earn.get_earnings_proximity(WHEEL_UNIVERSE, days_ahead=30)
+                    flagged_force  = [(s, d) for s, d in earn_map.items() if d["flag"] == "FORCE_CLOSE"]
+                    flagged_review = [(s, d) for s, d in earn_map.items() if d["flag"] == "REVIEW"]
+                    if flagged_force or flagged_review:
+                        earn_payload = "Earnings Proximity Scan — Wheel Universe\n\n"
+                        if flagged_force:
+                            earn_payload += "🔴 **FORCE CLOSE** (≤ 7 days to earnings)\n"
+                            for sym, d in sorted(flagged_force, key=lambda x: x[1]["days_to_earnings"]):
+                                earn_payload += f"┣ **{sym}** — earnings `{d['date']}` ({d['days_to_earnings']}d) — **EXIT NOW**\n"
+                            earn_payload += "\n"
+                        if flagged_review:
+                            earn_payload += "🟡 **REVIEW** (≤ 21 days to earnings)\n"
+                            for sym, d in sorted(flagged_review, key=lambda x: x[1]["days_to_earnings"]):
+                                earn_payload += f"┣ **{sym}** — earnings `{d['date']}` ({d['days_to_earnings']}d) — no new entries\n"
+                            earn_payload += "\n"
+                        earn_payload += "┗ Rule: close or roll before earnings — IV crush post-earnings destroys premium value."
+                        color = 0xe74c3c if flagged_force else 0xf1c40f
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "📅 EARNINGS WATCH | Wheel Universe", earn_payload, color)
+                            logger.info(f"Earnings proximity: {len(flagged_force)} force-close, {len(flagged_review)} review.")
+                    else:
+                        logger.info("Earnings proximity: all wheel universe symbols clear (>21 DTE to any earnings).")
+            except Exception as e:
+                logger.error(f"Earnings proximity scanner failed: {e}")
+
         elif args.mode == "wheel_position":
             if args.action == "open":
                 if not all([args.symbol, args.position_type, args.strike, args.expiration, args.premium]):
@@ -995,9 +1054,35 @@ def main():
                 except Exception as e:
                     logger.warning(f"Binance derivatives fetch failed: {e}")
 
+                # ── Crypto Cycle Top Score ──────────────────────────────────────
+                try:
+                    cycle_top = engine.calculate_crypto_top_score()
+                    ct_score  = cycle_top["score"]
+                    ct_label  = cycle_top["label"]
+                    ct_sigs   = cycle_top.get("signals", {})
+                    dom       = ct_sigs.get("btc_dominance", 0.0)
+                    streak    = ct_sigs.get("fg_extreme_streak", 0)
+                    sm_div    = ct_sigs.get("sm_divergence", "None")
+                    # Color: green = safe, yellow = caution, orange = reduce, red = exit
+                    cycle_color_text = (
+                        "🟢 No top signal" if ct_score < 40
+                        else "🟡 Late-cycle caution" if ct_score < 65
+                        else "🟠 Reduce Tier 3" if ct_score < 80
+                        else "🔴 EXIT Tier 3"
+                    )
+                    payload += (
+                        f"**Cycle Top Score: `{ct_score}/100` — {cycle_color_text}**\n"
+                        f"┣ {ct_label}\n"
+                        f"┣ BTC Dominance: `{dom:.1f}%` | "
+                        f"Extreme Greed Streak: `{streak}d`\n"
+                        f"┗ Smart Money: {sm_div}\n\n"
+                    )
+                except Exception as e:
+                    logger.warning(f"Crypto cycle top score failed: {e}")
+
                 payload += (
                     "─────────────────────────\n"
-                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · Twelve Data\n"
+                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · CoinGecko · Twelve Data\n"
                     "Not financial advice — for informational/educational use only."
                 )
 
@@ -1140,6 +1225,24 @@ def main():
                             logger.info(f"SPX income condor dispatched: credit ${condor['credit']:.2f}, R:R 1:{rr}")
             except Exception as e:
                 logger.error(f"SPX income mode failed: {e}")
+
+        # ── CEF PREMIUM Z-SCORE CALIBRATION — 22:30 UTC daily ────────────────
+        # Pulls 252-day premium history from CEFConnect and updates monitor.py's
+        # z-score baseline (mu/sigma) in DB. Safe to re-run — always overwrites
+        # with latest rolling 252-day window.
+        elif args.mode == "cef_calibrate":
+            try:
+                for ticker in ["CLM", "CRF"]:
+                    result = engine.calibrate_cef_premium_zscore(ticker)
+                    if result:
+                        logger.info(
+                            f"CEF calibrate {ticker}: mu={result['mu']:.2f}% "
+                            f"sigma={result['sigma']:.2f}% n={result['n']}"
+                        )
+                    else:
+                        logger.warning(f"CEF calibrate {ticker}: failed — DB unchanged.")
+            except Exception as e:
+                logger.error(f"cef_calibrate failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

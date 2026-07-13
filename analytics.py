@@ -3395,6 +3395,253 @@ class HighFidelityAnalyticsEngine:
                 logger.warning(f"[Binance Derivatives] {binance_sym} failed: {e}")
         return results
 
+    # ── VIX-ADJUSTED WHEEL PARAMETERS ────────────────────────────────────────
+    # Tastytrade empirical: at 16 VIX the market implies ~1% daily move.
+    # Higher VIX → sell further OTM to maintain edge; scale down size.
+
+    def get_vix_adjusted_params(self, vix: float) -> dict:
+        """
+        Four-tier VIX framework for wheel entry parameterization.
+        Returns delta_target, dte range, size_scalar, and tier label.
+        At VIX > 20 tastytrade data shows 95% OTM expiry at 0.16 delta — use that,
+        not the standard 0.20, to avoid assignment in fast-moving markets.
+        """
+        if vix < 15:
+            return {"delta_target": 0.28, "dte_min": 30, "dte_max": 45, "size_scalar": 1.0,  "tier": "LOW"}
+        elif vix < 20:
+            return {"delta_target": 0.20, "dte_min": 30, "dte_max": 45, "size_scalar": 0.85, "tier": "NORMAL"}
+        elif vix < 30:
+            return {"delta_target": 0.16, "dte_min": 21, "dte_max": 35, "size_scalar": 0.65, "tier": "ELEVATED"}
+        else:
+            return {"delta_target": 0.10, "dte_min": 14, "dte_max": 21, "size_scalar": 0.40, "tier": "PANIC"}
+
+    # ── POSITION SIZER (Half-Kelly + VIX Scalar) ─────────────────────────────
+
+    def kelly_position_size(self, portfolio_value: float, vix: float,
+                            win_rate: float = 0.65, avg_win_pct: float = 1.0,
+                            avg_loss_pct: float = 1.0, max_pct: float = 0.06) -> dict:
+        """
+        Half-Kelly position sizing with a VIX scalar cap.
+        Bootstrap prior: 65% win rate, 1:1 payoff until 50 closed trades in DB.
+        VIX scalar = min(1.0, 15/VIX) — panic-shrinks size in high-vol regimes.
+        Max position: 6% of portfolio (5-7% thetagang standard per underlying).
+        """
+        sample = 0
+        try:
+            dist = self.db.get_wheel_outcome_distribution(lookback_days=730)
+            total_trades = sum(d["count"] for d in dist)
+            if total_trades >= 50:
+                wins = sum(d["count"] for d in dist if d["outcome"] in ("CLOSED", "EXPIRED"))
+                if wins > 0 and total_trades > 0:
+                    win_rate = wins / total_trades
+                    win_premium = sum(d["retained_premium"] for d in dist if d["outcome"] in ("CLOSED", "EXPIRED"))
+                    loss_premium = abs(sum(d["retained_premium"] for d in dist if d["outcome"] not in ("CLOSED", "EXPIRED")))
+                    if wins > 0:
+                        avg_win_pct = (win_premium / wins) / (portfolio_value * 0.05) if portfolio_value > 0 else 1.0
+                    if (total_trades - wins) > 0:
+                        avg_loss_pct = (loss_premium / (total_trades - wins)) / (portfolio_value * 0.05) if portfolio_value > 0 else 1.0
+                sample = total_trades
+        except Exception:
+            pass
+
+        b = avg_win_pct / avg_loss_pct if avg_loss_pct > 0 else 1.0
+        kelly_f = (win_rate * b - (1 - win_rate)) / b if b > 0 else 0.0
+        half_kelly = max(0.0, kelly_f / 2)
+        vix_scalar = min(1.0, 15.0 / max(float(vix), 10.0))
+        final_pct = min(half_kelly * vix_scalar, max_pct)
+        return {
+            "position_pct":      round(final_pct * 100, 2),
+            "position_dollars":  round(portfolio_value * final_pct, 0),
+            "kelly_f":           round(kelly_f, 4),
+            "vix_scalar":        round(vix_scalar, 3),
+            "win_rate":          round(win_rate, 3),
+            "sample_trades":     sample,
+            "using_empirical":   sample >= 50,
+        }
+
+    # ── BTC DOMINANCE (CoinGecko — free, no key) ──────────────────────────────
+
+    def fetch_btc_dominance(self) -> float:
+        """
+        BTC market cap as % of total crypto market cap.
+        Above 65% → alt-season exhausted, distribution phase starting.
+        1-hour cache to avoid hammering the free CoinGecko endpoint.
+        """
+        cache_key    = "btc_dominance_pct"
+        cache_ts_key = "btc_dominance_ts"
+        try:
+            last_ts = float(self.db.get_state(cache_ts_key) or 0)
+            if (datetime.now().timestamp() - last_ts) < 3600:
+                cached = self.db.get_state(cache_key)
+                if cached:
+                    return float(cached)
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/global",
+                timeout=10
+            ).json()
+            dom = float(r["data"]["market_cap_percentage"].get("btc", 0.0))
+            self.db.update_state(cache_key, dom)
+            self.db.update_state(cache_ts_key, datetime.now().timestamp())
+            return round(dom, 2)
+        except Exception as e:
+            logger.warning(f"[BTC Dominance] CoinGecko failed: {e}")
+            return float(self.db.get_state(cache_key) or 0.0)
+
+    # ── CRYPTO CYCLE TOP SCORER ───────────────────────────────────────────────
+
+    def calculate_crypto_top_score(self) -> dict:
+        """
+        Composite Tier 3 crypto cycle exit signal. Score 0–100.
+        ≥ 80 → EXIT signal. ≥ 65 → REDUCE. ≥ 40 → CAUTION.
+
+        Inputs: BTC dominance (30 pts), Fear & Greed Extreme Greed streak (25 pts),
+        global L/S crowding (20 pts), smart-money short divergence (20 pts),
+        perp funding rate (20 pts — capped so total stays ≤ 100).
+        """
+        score   = 0
+        signals = {}
+
+        # ── BTC dominance ─────────────────────────────────────────────────────
+        dom = self.fetch_btc_dominance()
+        signals["btc_dominance"] = dom
+        if dom >= 65:
+            score += 30
+        elif dom >= 60:
+            score += 15
+
+        # ── Fear & Greed + Extreme Greed streak ───────────────────────────────
+        try:
+            fg_raw   = requests.get("https://api.alternative.me/fng/", timeout=8).json()
+            fg_value = int(fg_raw["data"][0]["value"])
+            fg_class = fg_raw["data"][0]["value_classification"]
+            signals["fear_greed"]    = fg_value
+            signals["fg_class"]      = fg_class
+            if fg_value >= 80:
+                streak = int(self.db.get_state("fg_extreme_greed_streak") or 0) + 1
+                self.db.update_state("fg_extreme_greed_streak", streak)
+                score += 25 if streak >= 7 else (12 if streak >= 4 else 5)
+            else:
+                streak = 0
+                self.db.update_state("fg_extreme_greed_streak", 0)
+            signals["fg_extreme_streak"] = streak
+        except Exception as e:
+            logger.warning(f"[CryptoTopScore] F&G fetch failed: {e}")
+            signals["fear_greed"] = 50
+
+        # ── Binance derivatives: retail crowding + smart-money divergence ──────
+        try:
+            deriv   = self.fetch_binance_derivatives()
+            btc_d   = deriv.get("BTC", {})
+            global_ls = btc_d.get("global_ls", 1.0)
+            top_ls    = btc_d.get("top_ls",    1.0)
+            signals["global_ls"] = global_ls
+            signals["top_ls"]    = top_ls
+            if global_ls > 1.5:
+                score += 20
+            elif global_ls > 1.3:
+                score += 10
+            # Smart money diverging short while retail is long = distribution signal
+            if top_ls < 0.9 and global_ls > 1.1:
+                score += 20
+                signals["sm_divergence"] = "SHORT — institutions distributing"
+            else:
+                signals["sm_divergence"] = "None"
+        except Exception as e:
+            logger.warning(f"[CryptoTopScore] Binance L/S failed: {e}")
+
+        # ── Perp funding: >50% annualized = overheated longs ──────────────────
+        try:
+            funding = self.fetch_funding_rates()
+            btc_f   = next((f for f in funding if f["symbol"] == "BTC"), None)
+            if btc_f:
+                ann = btc_f["rate_ann"]
+                signals["funding_ann"] = ann
+                score += 20 if ann > 100 else (10 if ann > 50 else 0)
+        except Exception as e:
+            logger.warning(f"[CryptoTopScore] Funding rate failed: {e}")
+
+        score = min(score, 100)
+        if score >= 80:
+            label = "EXIT — strong distribution signal"
+        elif score >= 65:
+            label = "REDUCE — cycle top proximity high"
+        elif score >= 40:
+            label = "CAUTION — late cycle indicators building"
+        else:
+            label = "HOLD — no top signal"
+
+        return {"score": score, "label": label, "signals": signals}
+
+    # ── CEF PREMIUM HISTORY (CEFConnect internal API) ─────────────────────────
+    # CEFConnect.com has a free internal JSON API with years of daily NAV/price/premium
+    # history for CLM and CRF. Seeding this anchors the z-score baseline in monitor.py
+    # with real empirical data instead of the hardcoded mu=15.0 / sigma=4.0 defaults.
+
+    def fetch_cef_premium_history(self, ticker: str, days: int = 252) -> list:
+        """
+        CEFConnect internal API — returns daily price/NAV/premium history.
+        No API key required. Returns list of dicts sorted newest-first.
+        Each dict: {date, price, nav, premium_pct}.
+        """
+        url = f"https://www.cefconnect.com/api/v3/fund/{ticker.upper()}/priceandnavhistory"
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                "Accept":     "application/json",
+                "Referer":    f"https://www.cefconnect.com/fund/{ticker.upper()}",
+            }
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            raw     = r.json()
+            history = []
+            for row in raw:
+                try:
+                    date_str = str(row.get("Date", ""))[:10]
+                    price    = float(row.get("MarketPrice", 0) or 0)
+                    nav      = float(row.get("NAV", 0) or 0)
+                    if nav > 0 and date_str:
+                        prem = (price - nav) / nav * 100
+                        history.append({
+                            "date":        date_str,
+                            "price":       price,
+                            "nav":         nav,
+                            "premium_pct": round(prem, 3),
+                        })
+                except Exception:
+                    continue
+            history.sort(key=lambda x: x["date"], reverse=True)
+            return history[:days]
+        except Exception as e:
+            logger.error(f"[CEFConnect] {ticker} history fetch failed: {e}")
+            return []
+
+    def calibrate_cef_premium_zscore(self, ticker: str) -> dict:
+        """
+        Pulls 252-day CEFConnect premium history, computes mean and std,
+        and updates the DB state keys used by monitor.py's z-score calculation.
+        Also stores the last premium value so monitor.py's compression detector
+        has a valid previous-session anchor on first run.
+
+        Returns {"mu": float, "sigma": float, "n": int, "ticker": str}.
+        Safe to re-run daily — always updates to latest 252-day window.
+        """
+        history = self.fetch_cef_premium_history(ticker, days=252)
+        if len(history) < 20:
+            logger.warning(f"[CEFCalibrate] {ticker}: only {len(history)} rows — insufficient for calibration.")
+            return {}
+        prems = [h["premium_pct"] for h in history]
+        n     = len(prems)
+        mu    = round(sum(prems) / n, 4)
+        variance = sum((p - mu) ** 2 for p in prems) / n
+        sigma = round(variance ** 0.5, 4)
+        self.db.update_state(f"{ticker}_premium_mu",    mu)
+        self.db.update_state(f"{ticker}_premium_sigma", sigma)
+        # Anchor the compression detector to the most recent session premium
+        if history:
+            self.db.update_state(f"{ticker}_premium_prev", history[0]["premium_pct"])
+        logger.info(f"[CEFCalibrate] {ticker}: mu={mu:.2f}% sigma={sigma:.2f}% n={n}")
+        return {"mu": mu, "sigma": sigma, "n": n, "ticker": ticker}
+
     # ── NVDA / BTC CORRELATION ────────────────────────────────────────────────
     # 30-day Pearson correlation on daily log returns.
     # NVDA and BTC both track AI/tech risk sentiment but decouple in

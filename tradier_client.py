@@ -472,6 +472,70 @@ class TradierClient:
         }
 
 
+    def get_earnings_proximity(self, symbols: list, days_ahead: int = 30) -> dict:
+        """
+        Tradier /markets/calendar — find earnings dates within days_ahead for each symbol.
+        Returns dict keyed by symbol: {"days_to_earnings": int, "date": str, "flag": str}.
+        flag: "FORCE_CLOSE" if ≤ 7 DTE to earnings, "REVIEW" if ≤ 21 DTE, "CLEAR" otherwise.
+        Uses Tradier's earnings calendar endpoint (included in $10/mo plan).
+        """
+        if not self.api_key:
+            return {}
+        today    = datetime.now().date()
+        end_date = today + timedelta(days=days_ahead)
+        results  = {}
+        try:
+            # Tradier calendar returns event data including earnings per date range
+            r = self._get("/markets/calendar", {
+                "month": today.month,
+                "year":  today.year,
+            })
+            days_data = r.get("calendar", {}).get("days", {}).get("day", [])
+            if isinstance(days_data, dict):
+                days_data = [days_data]
+
+            # Build a lookup: symbol → nearest earnings date
+            earnings_map: dict = {}
+            for day in days_data:
+                date_str = day.get("date", "")
+                try:
+                    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if event_date < today or event_date > end_date:
+                    continue
+                # Earnings entries live under day["earnings"]["earning"] (list or dict)
+                earning_items = day.get("earnings", {}).get("earning", [])
+                if isinstance(earning_items, dict):
+                    earning_items = [earning_items]
+                for item in earning_items:
+                    sym = str(item.get("symbol", "")).upper()
+                    if sym and sym not in earnings_map:
+                        earnings_map[sym] = date_str
+
+            for sym in symbols:
+                sym_upper = sym.upper()
+                if sym_upper in earnings_map:
+                    days_left = (datetime.strptime(earnings_map[sym_upper], "%Y-%m-%d").date() - today).days
+                    if days_left <= 7:
+                        flag = "FORCE_CLOSE"
+                    elif days_left <= 21:
+                        flag = "REVIEW"
+                    else:
+                        flag = "CLEAR"
+                    results[sym_upper] = {
+                        "days_to_earnings": days_left,
+                        "date":             earnings_map[sym_upper],
+                        "flag":             flag,
+                    }
+                else:
+                    results[sym_upper] = {"days_to_earnings": None, "date": None, "flag": "CLEAR"}
+
+        except Exception as e:
+            logger.warning(f"[EarningsProximity] Tradier calendar fetch failed: {e}")
+        return results
+
+
 def _gex_empty(symbol):
     return {
         "flip_strike": 0.0,

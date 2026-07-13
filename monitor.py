@@ -1178,6 +1178,11 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     db.update_state(f"{ticker}_acc_status", acc["status"])
     db.update_state(f"{ticker}_acc_detail", acc["detail"])
 
+    # ── Persist key metrics for cross-script reads (market_analysis.py morning brief)
+    db.update_state(f"{ticker.lower()}_last_z_premium", round(z_premium, 3))
+    db.update_state(f"{ticker.lower()}_last_premium",   round(premium, 3))
+    db.update_state(f"{ticker.lower()}_last_ro_tier",   ro_tier)
+
     return report_text, ro_tier, ro_score
 
 # ─────────────────────────────────────────────────────────────────────────────

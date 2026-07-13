@@ -95,6 +95,10 @@ SCHEDULE = [
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),
     (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
+    # CEF premium z-score calibration — 22:30 UTC daily, after US cash close.
+    # Pulls 252-day premium history from CEFConnect → updates mu/sigma in DB
+    # so monitor.py's z-score uses empirical data, not hardcoded defaults.
+    (22, 30, "cef_calibrate",      "scheduler",    ["--mode", "cef_calibrate"],   True),
     # weekly_scorecard fires Friday only — gated here, not inside the script.
     # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
 ]

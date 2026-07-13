@@ -1332,6 +1332,10 @@ class TQQQTacticalSniper:
             "ema21_pct": ema21_pct,
             "real_vix": ext.get("real_vix"),  # FRED VIXCLS — None if unavailable
         }
+        # Persist scores to DB for cross-script reads (market_analysis.py morning brief)
+        db.update_state("tqqq_bottom_score", bottom_score)
+        db.update_state("tqqq_top_score",    top_score)
+
         return {"bottom_score": bottom_score, "top_score": top_score, "signals": signals}
 
     # =========================================================================
