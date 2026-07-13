@@ -518,14 +518,15 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
 | `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives |
 | `essentials_tools.py` | ✅ Live | Discord embed senders, chart generators |
-| `market_analysis.py` | 🔲 To build | 0800 HST premarket morning report |
+| `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 0800 HST morning brief + 10:20 HST intraday pulse + 13:40 HST EOD recap → #market-analysis. 8-flag bias scorer (BULLISH/NEUTRAL/BEARISH). Synthesizes FRED + VIXY + SPY/QQQ + F&G + CLM/CRF z-score + TQQQ cycle + wheel positions. |
 | `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income. Removed: `gex` and `options_flow` (GEX returns 0.0 at current Twelve Data tier — re-enable when Tradier is wired). |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income/cef_calibrate. Removed: `gex` and `options_flow`. wheel_signals now includes VIX-adjusted params (Module 4) + earnings proximity scanner (Module 5). crypto_social now includes cycle top score. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
-| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. |
+| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Now writes bottom_score/top_score to DB for market_analysis.py. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
-| `tradier_client.py` | ✅ Live | Tradier options chain helper — used by LEAP desk for chain enrichment. |
+| `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
+| `seed_cef_premiums.py` | ✅ One-time tool | Run once on PA to seed CLM/CRF z-score mu/sigma from 252-day CEFConnect premium history. Replaces hardcoded defaults (mu=15, sigma=4) with empirical data. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
 | `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY. |
 
@@ -694,15 +695,30 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 
 ## 13. Next Priorities for Claude Code Sessions
 
+### Completed in Jul 2026 Sessions ✅
+- [x] FRED integration (HY spread, real VIX, yield curve, Fed Funds)
+- [x] Binance derivatives (OI, L/S, taker volume, smart money divergence)
+- [x] `market_analysis.py` — 0800/10:20/13:40 HST synthesis brief, 8-flag bias scorer (✅ Jul 12)
+- [x] CEFConnect premium calibration — `calibrate_cef_premium_zscore()` + `seed_cef_premiums.py` (✅ Jul 12)
+- [x] VIX-adjusted wheel params — `get_vix_adjusted_params()` + wheel_signals Module 4 (✅ Jul 12)
+- [x] Earnings proximity scanner — `get_earnings_proximity()` + wheel_signals Module 5 (✅ Jul 12)
+- [x] Crypto cycle top scorer — `calculate_crypto_top_score()` wired into crypto_social (✅ Jul 12)
+- [x] Position sizer — `kelly_position_size()` (half-Kelly + VIX scalar) in analytics.py (✅ Jul 12)
+
+### Deployment Checklist (next PA session)
+1. `git pull origin main` on PythonAnywhere
+2. Run `python seed_cef_premiums.py` once — seeds CLM/CRF z-score mu/sigma from CEFConnect
+3. Add `market_analysis.py` as 6th always-on task on PythonAnywhere
+4. `market_scheduler.py` already wires `cef_calibrate` at 22:30 UTC — no cron change needed
+
 ### Data Infrastructure
-- [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline in ~30 days, full 52-week rank after 252 trading days
+- [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline ~Aug 11, full 52-week rank after 252 trading days
 - [ ] **GEX re-enable** — wire `calculate_gex_profile()` back in once Tradier OI is confirmed stable; gamma flip = early CEF premium compression warning
 
-### Scripts to Build
-- [ ] `market_analysis.py` — 0800 HST premarket report aggregating all channel feeds
+### Scripts Still to Build
 - [ ] `crypto.py` — dedicated BTC/ETH channel script (currently served by scheduler.py `--mode crypto_social`)
 - [ ] `announcements.py` — weekly accuracy scorecard, prediction vs actual grader
-- [ ] `/CL` `/GC` deep-dive/breakout module — futures channel currently board-only for commodities; ES/NQ have full profile via `cross_asset.py`
+- [ ] `/CL` `/GC` deep-dive/breakout module — futures channel board-only for commodities; ES/NQ have full profile
 
 ### Options & Automation
 - [ ] **SPY put insurance implementation** — log puts via `tqqq.py --log-put`; strike distance tied to live margin utilization ratio; re-evaluate at ~$100K portfolio stage
