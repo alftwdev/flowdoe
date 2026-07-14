@@ -1419,28 +1419,31 @@ def send_daily_pulse(is_test=False):
 
     full_report, worst_tier = compute_cornerstone_reports()
 
-    # SPY GEX macro context — negative gamma = dealers amplify volatility = elevated CEF premium risk.
-    # P/C OI removed from this channel: CLM/CRF have no options market so put/call ratios have no
-    # CLM/CRF-specific meaning. P/C is handled by tqqq.py's cycle scorer where it belongs.
+    # SPY GEX macro context — fires as its own bite-size embed BEFORE the CLM/CRF flowstate.
+    # Kept separate so the main flowstate stays clean and readable on mobile.
+    # Discord-only (no Pushover/email) — it's context, not an alert.
     # Note: calculate_gex_profile() returns UNKNOWN at current Twelve Data tier (no real OI data).
     # This block only activates once Tradier OI is wired — safe to leave in place.
     try:
         from analytics import HighFidelityAnalyticsEngine
         gex = HighFidelityAnalyticsEngine().calculate_gex_profile("SPY")
-        if gex.get("market_state", "UNKNOWN") != "UNKNOWN":
-            flip = gex.get("flip_strike", 0.0)
+        if gex.get("market_state", "UNKNOWN") != "UNKNOWN" and HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+            flip      = gex.get("flip_strike", 0.0)
             gex_total = gex.get("gex_total")
-            is_neg = "NEGATIVE" in gex.get("market_state", "")
-            gex_note = (
+            is_neg    = "NEGATIVE" in gex.get("market_state", "")
+            gex_note  = (
                 "dealers amplify moves — volatility risk elevated for CLM/CRF premium" if is_neg else
                 "dealers suppress moves — stable CEF premium environment"
             )
-            gex_line = (
-                f"┣ SPY GEX: {gex['market_state']} | Flip ${flip:,.0f}"
-                + (f" | Net {gex_total:+.1f}B" if gex_total is not None else "")
-                + f" — {gex_note}\n"
+            gex_snippet = (
+                f"┣ State: `{gex['market_state']}`\n"
+                f"┣ Flip Level: `${flip:,.0f}`"
+                + (f" | Net GEX: `{gex_total:+.1f}B`" if gex_total is not None else "")
+                + f"\n┗ {gex_note}"
             )
-            full_report = gex_line + full_report
+            gex_color = 0xe74c3c if is_neg else 0x2ecc71
+            gex_title = "📊 SPY GEX | Macro Context" + (" 🧪" if is_test else "")
+            send_essentials_embed(WEBHOOK_CORNERSTONE, gex_title, gex_snippet, gex_color)
     except Exception:
         pass
 
