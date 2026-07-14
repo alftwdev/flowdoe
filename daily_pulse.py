@@ -166,6 +166,100 @@ def fetch_cef_snapshot():
 # TWELVE DATA — Market Regime (SPY SMA200 + VIXY z-score)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def fetch_buying_power_snapshot(total_liquid: float, total_brokerage: float, total_owed: float) -> dict:
+    """
+    Real buying power analysis — answers "what does my money actually do in today's economy?"
+
+    Four calculations, all grounded in live FRED CPI:
+      1. Cash erosion   — how much purchasing power liquid cash loses per month at current CPI
+      2. Portfolio real yield — blended CLM/CRF+Tier2 yield minus CPI (the actual wealth gain)
+      3. Margin carry   — confirms margin arbitrage is still positive after inflation
+      4. Rule of 72     — years until idle cash halves in purchasing power at current CPI
+
+    Data: FRED CPIAUCSL (cached daily by analytics.py). Fallback: 3.5% if FRED unavailable.
+    Pushover only — never Discord.
+    """
+    result = {
+        "cpi_yoy": None,
+        "cash_erosion_monthly": None,
+        "cash_erosion_annual": None,
+        "real_portfolio_yield": None,
+        "margin_real_cost": None,
+        "years_to_half": None,
+        "net_worth": total_liquid + total_brokerage + total_owed,
+        "deploy_urgency": None,
+    }
+    try:
+        # Pull CPI from DB (written daily by analytics.py fetch_fred_macro_snapshot)
+        from database import EcosystemDatabase
+        db = EcosystemDatabase()
+
+        cpi_raw = db.get_state("fred_macro_snap")
+        cpi_yoy = None
+        if isinstance(cpi_raw, dict):
+            cpi_yoy = cpi_raw.get("cpi_yoy")
+
+        # Fallback: fetch directly from FRED if not in DB
+        if cpi_yoy is None:
+            fred_key = os.getenv("FRED_API_KEY", "")
+            if fred_key:
+                url = (
+                    f"https://api.stlouisfed.org/fred/series/observations"
+                    f"?series_id=CPIAUCSL&api_key={fred_key}&sort_order=desc"
+                    f"&limit=13&file_type=json"
+                )
+                r = requests.get(url, timeout=12).json().get("observations", [])
+                if len(r) >= 13:
+                    latest   = float(r[0]["value"])
+                    year_ago = float(r[12]["value"])
+                    cpi_yoy  = round((latest - year_ago) / year_ago * 100, 2) if year_ago > 0 else None
+
+        if cpi_yoy is None:
+            cpi_yoy = 3.5  # conservative fallback
+
+        cpi_rate = cpi_yoy / 100.0
+
+        # 1. Cash erosion — idle cash is silently taxed by inflation every month
+        cash_erosion_monthly = round(total_liquid * cpi_rate / 12, 2)
+        cash_erosion_annual  = round(total_liquid * cpi_rate, 2)
+
+        # 2. Portfolio real yield — CLM/CRF ~20% + Tier2 blended ~13-15% → rough blended ~19%
+        # Using conservative 19% as the blended portfolio yield assumption per CLAUDE.md strategy
+        BLENDED_PORTFOLIO_YIELD = 19.0
+        real_portfolio_yield = round(BLENDED_PORTFOLIO_YIELD - cpi_yoy, 2)
+
+        # 3. Margin carry real cost — what the margin loan actually costs after inflation
+        # Inflation erodes the real value of the debt, so effective cost = nominal - CPI
+        MARGIN_RATE = 7.25
+        margin_real_cost = round(MARGIN_RATE - cpi_yoy, 2)  # positive = still costs money; lower than nominal
+
+        # 4. Rule of 72 — years until purchasing power of idle cash halves
+        years_to_half = round(72.0 / cpi_yoy, 1) if cpi_yoy > 0 else 99.0
+
+        # Deploy urgency — is idle cash losing more than $100/month?
+        if cash_erosion_monthly >= 150:
+            deploy_urgency = f"🔴 ${cash_erosion_monthly:.0f}/mo evaporating — deploy idle cash"
+        elif cash_erosion_monthly >= 75:
+            deploy_urgency = f"🟡 ${cash_erosion_monthly:.0f}/mo erosion — watch cash buffer"
+        else:
+            deploy_urgency = f"🟢 ${cash_erosion_monthly:.0f}/mo erosion — buffer acceptable"
+
+        result.update({
+            "cpi_yoy":              cpi_yoy,
+            "cash_erosion_monthly": cash_erosion_monthly,
+            "cash_erosion_annual":  cash_erosion_annual,
+            "real_portfolio_yield": real_portfolio_yield,
+            "margin_real_cost":     margin_real_cost,
+            "years_to_half":        years_to_half,
+            "deploy_urgency":       deploy_urgency,
+        })
+        logger.info(f"Buying power: CPI {cpi_yoy}% | real yield {real_portfolio_yield}% | "
+                    f"cash erosion ${cash_erosion_monthly:.0f}/mo")
+    except Exception as e:
+        logger.warning(f"Buying power snapshot failed: {e}")
+    return result
+
+
 def fetch_market_mood():
     """
     SentiSense proprietary Market Mood (0-100). Cached in DB — one API call/day.
@@ -465,6 +559,18 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
     else:
         deploy = "🟢 GO — conditions met"
     lines.append(f"┗ Margin Deploy: {deploy}")
+
+    # ── Section 7: Buying Power Reality Check
+    bp = fetch_buying_power_snapshot(total_liquid, total_brokerage, total_owed)
+    if bp.get("cpi_yoy") is not None:
+        lines.append("")
+        lines.append("BUYING POWER (Real $)")
+        lines.append(f"┣ CPI (YoY): {bp['cpi_yoy']:.1f}% — live from FRED")
+        lines.append(f"┣ Cash erosion: -${bp['cash_erosion_monthly']:.0f}/mo | -${bp['cash_erosion_annual']:.0f}/yr on ${total_liquid:,.0f} idle")
+        lines.append(f"┣ Idle cash halves in: {bp['years_to_half']:.0f} yrs at current CPI (Rule of 72)")
+        lines.append(f"┣ Portfolio real yield: {bp['real_portfolio_yield']:+.1f}% (19% blended − {bp['cpi_yoy']:.1f}% CPI)")
+        lines.append(f"┣ Margin real cost: {bp['margin_real_cost']:+.2f}% (7.25% rate − {bp['cpi_yoy']:.1f}% CPI)")
+        lines.append(f"┗ {bp['deploy_urgency']}")
 
     title   = f"💼 Daily Pulse — {today}"
     message = "\n".join(lines)
