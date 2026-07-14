@@ -436,21 +436,45 @@ def main():
                         "new_income_etf_screener_daily", state_str,
                         sum(e['ann_yield'] for e in new_etfs), max_broadcasts=2, threshold_pct=0.05
                     ):
-                        new_payload = "Trending Weekly/Monthly Income ETF Discovery — YieldMax / Roundhill / NEOS / TappAlpha\n\n"
+                        # SentiSense sentiment for each ETF's underlying (not the ETF itself —
+                        # YieldMax/Roundhill ETFs aren't tracked directly; use the underlying ticker
+                        # the ETF is based on to gauge whether the strategy is in a good window).
+                        ss_map = {}
+                        try:
+                            import sentisense_client as ss
+                            underlying_map = {
+                                "MSTY": "MSTR", "NVDY": "NVDA", "TSLY": "TSLA",
+                                "CONY": "COIN", "GOOY": "GOOGL", "AMDY": "AMD",
+                                "YMAX": "QQQ",  "XDTE": "SPY",  "QDTE": "QQQ",
+                                "RDTE": "IWM",  "QQQI": "QQQ",  "SPYI": "SPY",
+                                "BTCI": "BTC",  "MAGY": "META",
+                            }
+                            for e in new_etfs[:8]:
+                                ul = underlying_map.get(e["symbol"])
+                                if ul and ul != "BTC":
+                                    sent = ss.get_sentiment(engine.db, ul)
+                                    if sent:
+                                        ss_map[e["symbol"]] = sent
+                        except Exception:
+                            pass
+
+                        new_payload = ""
                         for e in new_etfs[:8]:
+                            sent = ss_map.get(e["symbol"])
+                            ss_line = ""
+                            if sent:
+                                score_str = f"`{sent['score']:+.0f}` {sent['lean']}"
+                                ss_line = f"┣ Underlying sentiment: {score_str} ({sent['mentions']} mentions)\n"
                             new_payload += (
                                 f"**{e['symbol']}** | {e['family']} | {e['freq']}\n"
                                 f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
-                                f"┣ Trading History: `{e['trading_days']}` sessions\n"
-                                f"┗ Next Est. Pay Date: `{e['next_ex_date']}`\n\n"
+                                f"┣ Trading: `{e['trading_days']}` sessions | Next pay: `{e['next_ex_date']}`\n"
+                                f"{ss_line}"
+                                f"┗ Filters: yield >10% | pay freq confirmed | >6mo history\n\n"
                             )
-                        new_payload += (
-                            "Filters: yield > 10% (real div history) | monthly/weekly pay | "
-                            "> 6mo trading history | AUM > $50M (where Twelve Data reports it)\n"
-                            "Directive: Research-stage only — confirm distribution sustainability before adding to wheel universe."
-                        )
+                        new_payload = new_payload.rstrip()
                         if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "NEW INCOME ETF RADAR | Trending CC ETF Discovery", new_payload, 0x9b59b6)
+                            send_essentials_embed(WEBHOOK_INCOME, "CC INCOME RADAR | Weekly/Monthly Pay ETFs", new_payload, 0x9b59b6)
                             logger.info(f"New income ETF screener dispatched: {len(new_etfs)} candidates.")
 
                         # Cache top result for weekly scorecard income spotlight
