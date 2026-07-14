@@ -652,10 +652,11 @@ def main():
                 for sym in sample_universe:
                     try:
                         hv30 = engine.calculate_historical_volatility(sym, lookback=30)
-                        iv_est = hv30 * 1.15
-                        ivr_proxy = min(iv_est * 100, 99)
+                        # hv30 is already in % (e.g. 42.4 = 42.4% annualized vol)
+                        iv_est = hv30 * 1.15          # IV estimate in %
+                        ivr_proxy = min(iv_est, 99)   # already in %, no ×100
                         bar = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
-                        ivr_lines.append(f"┣ {bar} **{sym}** IVR est `{ivr_proxy:.0f}%` (HV30 `{hv30*100:.1f}%`)")
+                        ivr_lines.append(f"┣ {bar} **{sym}** IVR est `{ivr_proxy:.0f}%` (HV30 `{hv30:.1f}%`)")
                     except Exception:
                         pass
 
