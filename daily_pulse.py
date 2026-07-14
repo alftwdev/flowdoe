@@ -166,6 +166,24 @@ def fetch_cef_snapshot():
 # TWELVE DATA — Market Regime (SPY SMA200 + VIXY z-score)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def fetch_market_mood():
+    """
+    SentiSense proprietary Market Mood (0-100). Cached in DB — one API call/day.
+    Returns (score: int, label: str, signal: str) or (None, None, None) on failure.
+    Pushover-only; never sent to Discord.
+    """
+    try:
+        from database import EcosystemDatabase
+        import sentisense_client as ss
+        db = EcosystemDatabase()
+        mood = ss.get_market_mood(db)
+        if mood:
+            return mood["score"], mood["label"], mood["signal"]
+    except Exception as e:
+        logger.warning(f"SentiSense Market Mood fetch failed: {e}")
+    return None, None, None
+
+
 def fetch_market_regime():
     """
     Returns (spy_price, bull_regime, vixy_z, vixy_label).
@@ -364,7 +382,7 @@ def _portfolio_deltas(current_total, state):
     return " | ".join(parts)
 
 
-def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None):
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None):
     today     = date.today().strftime("%b %d, %Y")
     spy_price, bull, vixy_z, vixy_label = regime
     lines     = []
@@ -420,14 +438,32 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
     else:
         lines.append("┗ EDGAR status unavailable")
 
-    # ── Section 6: Market Regime
+    # ── Section 6: Market Regime + SentiSense Mood
     lines.append("")
     lines.append("MARKET REGIME")
     regime_str = "Bull — above 200 SMA" if bull else ("Bear — below 200 SMA" if bull is False else "Unknown")
     lines.append(f"┣ SPY: ${spy_price:,.2f} — {regime_str}")
     lines.append(f"┣ VIXY z: {vixy_z:+.1f}σ ({vixy_label})")
-    deploy = ("🟢 GO — conditions met" if (bull and vixy_z < 1.5)
-              else ("🔴 HOLD — bear regime" if not bull else "⚠️ CAUTION — fear elevated"))
+
+    # SentiSense Market Mood — third regime input.
+    # Catches sentiment/price divergence: SPY above SMA200 (price says GO)
+    # but sentiment at Extreme Fear (crowd says danger ahead) → CAUTION.
+    mood_score, mood_label, mood_signal = (market_mood or (None, None, None))
+    if mood_score is not None:
+        lines.append(f"┣ Market Mood: {mood_score} · {mood_label} — {mood_signal}")
+
+    # Deploy gate: all three inputs must align for full GO
+    sentiment_fear = mood_score is not None and mood_score <= 25
+    if bull and vixy_z < 1.5 and not sentiment_fear:
+        deploy = "🟢 GO — price + vol + sentiment aligned"
+    elif not bull:
+        deploy = "🔴 HOLD — bear regime (SPY below 200 SMA)"
+    elif vixy_z >= 1.5:
+        deploy = "⚠️ CAUTION — fear spike (VIXY elevated)"
+    elif sentiment_fear:
+        deploy = "⚠️ CAUTION — price bullish but sentiment at extreme fear"
+    else:
+        deploy = "🟢 GO — conditions met"
     lines.append(f"┗ Margin Deploy: {deploy}")
 
     title   = f"💼 Daily Pulse — {today}"
@@ -476,8 +512,9 @@ def run_daily_pulse(force=False, debug=False):
         return
 
     liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
-    regime    = fetch_market_regime()
-    ro_status = fetch_ro_status()
+    regime      = fetch_market_regime()
+    ro_status   = fetch_ro_status()
+    market_mood = fetch_market_mood()  # SentiSense — cached in DB, 1 call/day
 
     # ── Low balance check — fires independently, never gates the daily pulse
     total_liquid = sum(a["balance"] for a in liquid)
@@ -488,7 +525,7 @@ def run_daily_pulse(force=False, debug=False):
             priority=1,
         )
 
-    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, regime, state, ro_status)
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, regime, state, ro_status, market_mood)
     success = push_to_pushover(title, message, priority=0)
 
     if success:

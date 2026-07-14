@@ -469,7 +469,45 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"┗ Synthesized from: #cornerstone · #crypto · #futures · #options-wheel\n"
     )
 
-    description = macro_section + equity_section + signals_section + directives_section
+    # ── SENTISENSE CONFLUENCE BLOCK ───────────────────────────────────────────
+    # Market Mood + Congressional trades. One API call each (cached daily).
+    # Adds the "stars align" layer: when macro + market mood + insider/political
+    # activity all converge, it reinforces the posture with external data.
+    ss_section = ""
+    try:
+        import sentisense_client as ss
+
+        # Market Mood — proprietary equity-native fear/greed (not crypto-origin)
+        mood = ss.get_market_mood(db)
+        if mood:
+            mood_emoji = "🔴" if mood["score"] <= 25 else ("🟢" if mood["score"] >= 75 else "🟡")
+            mood_line  = f"┣ Market Mood: {mood_emoji} `{mood['score']}` · {mood['label']} — {mood['signal']}\n"
+        else:
+            mood_line = ""
+
+        # Congressional trades — top 4 most recent disclosures
+        trades = ss.get_congressional_trades(db, limit=4)
+        trade_lines = ""
+        if trades:
+            trade_lines = "┣ Congressional trades (STOCK Act):\n"
+            for t in trades:
+                party_tag = f"({t['party']}-{t['state']})" if t.get("party") and t.get("state") else ""
+                trade_lines += (
+                    f"  ┣ {t['politician']} {party_tag}: "
+                    f"{t['action']} **{t['ticker']}** {t['amount']} ({t['date']})\n"
+                )
+
+        if mood_line or trade_lines:
+            ss_section = (
+                "\n**MARKET INTELLIGENCE (SentiSense)**\n"
+                + mood_line
+                + trade_lines
+                + "┗ Source: SentiSense API — sentiment + STOCK Act filings\n"
+            )
+    except Exception as e:
+        logger.warning(f"Morning: SentiSense section failed: {e}")
+
+    description = macro_section + equity_section + signals_section + ss_section + directives_section
     title = f"MORNING BRIEF — {now_label}"
     return title, description, bias["color"]
 

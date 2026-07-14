@@ -1264,6 +1264,26 @@ class TQQQTacticalSniper:
         # MACD bearish (max 3) — tie-breaker, not a primary signal
         if macd_hist < 0: b += 3
 
+        # Insider cluster buy on QQQ heavyweights (max 10) — SentiSense Form 4 signal
+        # When NVDA/AAPL/MSFT/META/GOOGL insiders cluster-buy during a downturn,
+        # that's internal conviction rarely wrong on a 9-18 month LEAP horizon.
+        try:
+            import sentisense_client as ss
+            _qqq_heavyweights = ["NVDA", "AAPL", "MSFT", "META", "GOOGL"]
+            _insider_buys = 0
+            for _sym in _qqq_heavyweights:
+                _ins = ss.get_insights(db, _sym)
+                if _ins and _ins.get("cluster_buy"):
+                    _insider_buys += 1
+            if _insider_buys >= 3:
+                b += 10
+            elif _insider_buys >= 2:
+                b += 7
+            elif _insider_buys >= 1:
+                b += 4
+        except Exception:
+            pass  # SentiSense unavailable — scorer continues without this signal
+
         bottom_score = min(b, 100)
 
         # ── TOP SCORE ──────────────────────────────────────────────────────────
@@ -1320,6 +1340,26 @@ class TQQQTacticalSniper:
         # MACD bullish (max 3)
         if macd_hist > 0: t += 3
 
+        # Insider cluster sell on QQQ heavyweights (max 10) — SentiSense Form 4 signal
+        # When insiders at QQQ's largest components cluster-sell into a rally,
+        # that's a meaningful top confirmation for the PUT desk.
+        try:
+            import sentisense_client as ss
+            _qqq_heavyweights = ["NVDA", "AAPL", "MSFT", "META", "GOOGL"]
+            _insider_sells = 0
+            for _sym in _qqq_heavyweights:
+                _ins = ss.get_insights(db, _sym)
+                if _ins and _ins.get("cluster_sell"):
+                    _insider_sells += 1
+            if _insider_sells >= 3:
+                t += 10
+            elif _insider_sells >= 2:
+                t += 7
+            elif _insider_sells >= 1:
+                t += 4
+        except Exception:
+            pass  # SentiSense unavailable — scorer continues without this signal
+
         top_score = min(t, 100)
 
         signals = {
@@ -1331,6 +1371,8 @@ class TQQQTacticalSniper:
             "pct_vs_sma200": pct_vs_sma200,
             "ema21_pct": ema21_pct,
             "real_vix": ext.get("real_vix"),  # FRED VIXCLS — None if unavailable
+            "insider_buys": _insider_buys if "_insider_buys" in dir() else None,
+            "insider_sells": _insider_sells if "_insider_sells" in dir() else None,
         }
         # Persist scores to DB for cross-script reads (market_analysis.py morning brief)
         db.update_state("tqqq_bottom_score", bottom_score)

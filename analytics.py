@@ -2944,20 +2944,45 @@ class HighFidelityAnalyticsEngine:
         st_map     = {t["symbol"]: t for t in st_list}
         wsb_set    = set(wsb_dict.keys())
 
+        # SentiSense scored sentiment — 4th source, replaces raw StockTwits/WSB lean
+        # when available. Score ≥ 7.0 on a name already in 1 source upgrades to HIGH.
+        ss_scores = {}
+        try:
+            import sentisense_client as ss
+            all_candidates = set(st_map.keys()) | wsb_set | finviz_set
+            for _sym in list(all_candidates)[:15]:  # cap at 15 to stay API-lean
+                _sent = ss.get_sentiment(self.db, _sym)
+                if _sent:
+                    ss_scores[_sym] = _sent
+        except Exception:
+            pass  # SentiSense unavailable — existing 3-source scoring continues
+
         candidates = []
         for sym in set(st_map.keys()) | wsb_set | finviz_set:
-            in_st     = sym in st_map
-            in_wsb    = sym in wsb_set
-            in_finviz = sym in finviz_set
+            in_st      = sym in st_map
+            in_wsb     = sym in wsb_set
+            in_finviz  = sym in finviz_set
+            in_ss_high = ss_scores.get(sym, {}).get("score", 0) >= 30.0  # signed float; ≥30 = strong bullish
             score = sum([in_st, in_wsb, in_finviz])
             if score == 0:
                 continue
+
+            # SentiSense score ≥ 7.0 counts as a second source (upgrades NEUTRAL → HIGH)
+            effective_score = score + (1 if in_ss_high and score == 1 else 0)
+
+            # Lean from SentiSense when available (more reliable than raw StockTwits direction)
+            ss_lean = ss_scores.get(sym, {}).get("lean")
+            lean    = ss_lean or (st_map[sym]["lean"] if in_st else "Mixed")
+
             candidates.append({
-                "symbol":  sym,
-                "meter":   "HIGH" if score >= 2 else "NEUTRAL",
-                "lean":    st_map[sym]["lean"] if in_st else "Mixed",
-                "is_meme": sym in self._MEME_WATCHLIST,
-                "score":   score,
+                "symbol":        sym,
+                "meter":         "HIGH" if effective_score >= 2 else "NEUTRAL",
+                "lean":          lean,
+                "is_meme":       sym in self._MEME_WATCHLIST,
+                "score":         effective_score,
+                "ss_score":      ss_scores.get(sym, {}).get("score"),
+                "ss_mentions":   ss_scores.get(sym, {}).get("mentions"),
+                "ss_dominance":  ss_scores.get(sym, {}).get("dominance"),
             })
         # HIGH before NEUTRAL; meme tickers sorted last within each tier
         candidates.sort(key=lambda x: (-x["score"], x["is_meme"]))
@@ -3028,15 +3053,18 @@ class HighFidelityAnalyticsEngine:
                     }
 
                 results.append({
-                    "symbol":    sym,
-                    "spot":      spot,
-                    "chg_5d":   chg_5d,
-                    "vol_ratio": vol_ratio,
-                    "rsi":       rsi,
-                    "meter":     c["meter"],
-                    "lean":      c["lean"],
-                    "verdict":   verdict,
-                    "bto_setup": bto_setup,
+                    "symbol":       sym,
+                    "spot":         spot,
+                    "chg_5d":      chg_5d,
+                    "vol_ratio":    vol_ratio,
+                    "rsi":          rsi,
+                    "meter":        c["meter"],
+                    "lean":         c["lean"],
+                    "verdict":      verdict,
+                    "bto_setup":    bto_setup,
+                    "ss_score":     c.get("ss_score"),
+                    "ss_mentions":  c.get("ss_mentions"),
+                    "ss_dominance": c.get("ss_dominance"),
                 })
             except Exception as e:
                 logger.error(f"[Social Scanner] Twelve Data check failed for {sym}: {e}")

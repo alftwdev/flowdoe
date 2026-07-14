@@ -730,6 +730,69 @@ def main():
             except Exception as e:
                 logger.error(f"Earnings proximity scanner failed: {e}")
 
+            # ── MODULE 6: SENTISENSE CONVICTION LAYER ─────────────────────────
+            # Institutional 13F flows + Insider Form 4 cluster signals for the
+            # top-9 highest-IVR names from the wheel universe.
+            # Adds the "stars align" cross-confirmation layer missing from pure
+            # technical screens — when IVR qualifies AND institutions accumulate
+            # AND insiders cluster-buy, conviction is at its highest.
+            try:
+                import sentisense_client as ss
+                # Only scan the higher-priority core names to stay CPU/API lean.
+                CONVICTION_UNIVERSE = [
+                    "NVDA", "AAPL", "TSLA", "META", "MSFT",
+                    "AMZN", "GOOGL", "AMD", "PLTR", "COIN",
+                ]
+                flows_map   = ss.batch_institutional_flows(engine.db, CONVICTION_UNIVERSE)
+                insights_map = ss.batch_insights(engine.db, CONVICTION_UNIVERSE)
+
+                conviction_lines = []
+                for sym in CONVICTION_UNIVERSE:
+                    flow    = flows_map.get(sym)
+                    insight = insights_map.get(sym)
+                    if not flow and not insight:
+                        continue
+
+                    # Build conviction tags
+                    tags = []
+                    flow_dir = flow["net_direction"] if flow else None
+                    if flow_dir == "ACCUMULATING":
+                        tags.append(f"🏦 inst ACCUM ({flow['filer_count']} filers, {flow['net_shares']:+,.0f} sh)")
+                    elif flow_dir == "DISTRIBUTING":
+                        tags.append(f"🏦 inst DIST ({flow['filer_count']} filers, {flow['net_shares']:+,.0f} sh)")
+
+                    if insight and insight.get("cluster_buy"):
+                        tags.append(f"👤 insider cluster BUY ({insight['insider_count']} filings)")
+                    elif insight and insight.get("cluster_sell"):
+                        tags.append(f"👤 insider cluster SELL ({insight['insider_count']} filings)")
+
+                    if not tags:
+                        continue
+
+                    stars = len([t for t in tags if "ACCUM" in t or "BUY" in t])
+                    align_emoji = "⭐" * stars if stars else ""
+                    line = f"┣ **{sym}** {align_emoji}  " + " | ".join(tags)
+                    conviction_lines.append((stars, line))
+
+                if conviction_lines:
+                    conviction_lines.sort(key=lambda x: x[0], reverse=True)
+                    conv_payload = (
+                        "Cross-confirms wheel signals with real institutional + insider data.\n\n"
+                        + "\n".join(line for _, line in conviction_lines)
+                        + "\n\n┗ ⭐ = institutional + insider confluence — highest conviction entry"
+                    )
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            "🔭 CONVICTION LAYER | Inst Flows + Insider Signals",
+                            conv_payload, 0x8e44ad
+                        )
+                        logger.info(f"SentiSense conviction layer dispatched: {len(conviction_lines)} symbols.")
+                else:
+                    logger.info("SentiSense conviction layer: no notable institutional/insider signals today.")
+            except Exception as e:
+                logger.error(f"SentiSense conviction layer failed: {e}")
+
         elif args.mode == "wheel_position":
             if args.action == "open":
                 if not all([args.symbol, args.position_type, args.strike, args.expiration, args.premium]):
@@ -955,11 +1018,18 @@ def main():
                                 f"┣ Target +100% (~${bto['target']:.2f}) | Stop -50% (~${bto['stop']:.2f})\n"
                                 f"┣ R/R 2:1\n"
                             )
+                        # SentiSense enrichment line (shown only when available)
+                        ss_line = ""
+                        if p.get("ss_score") is not None:
+                            dom_str = f" · {p['ss_dominance']:.2f}% share of voice" if p.get("ss_dominance") else ""
+                            men_str = f" · {p['ss_mentions']:,} mentions" if p.get("ss_mentions") else ""
+                            ss_line = f"┣ SentiSense: `{p['ss_score']:.1f}/10` {p['lean']}{men_str}{dom_str}\n"
                         payload += (
                             f"**{p['symbol']}** `${p['spot']:.2f}`  "
                             f"{chg_arrow} {abs(p['chg_5d']):.1f}% (5D)\n"
                             f"┣ Buzz: {p['meter']} · {p['lean']}\n"
                             f"┣ Vol: {p['vol_ratio']:.1f}x avg · RSI {p['rsi']:.0f}\n"
+                            f"{ss_line}"
                             f"{bto_block}"
                             f"┗ {p['verdict']}\n\n"
                         )
