@@ -3179,6 +3179,133 @@ class HighFidelityAnalyticsEngine:
         "TLT", "TBT", "IEF",
     }
 
+    # ── CC INCOME ETF SOCIAL BUZZ SCANNER ────────────────────────────────────
+    # Scans r/dividends, r/ETFs, r/thetagang, r/Bogleheads, and StockTwits for
+    # CC income ETF ticker mentions. These are the actual communities where
+    # YieldMax/Roundhill/NEOS products are discussed — not WSB or r/CryptoCurrency.
+    # Returns a ranked list of ETFs by social momentum, with source breakdown.
+
+    _CC_INCOME_TICKERS = {
+        # YieldMax
+        "MSTY", "NVDY", "TSLY", "CONY", "GOOY", "AMDY", "YMAG", "YMAX",
+        "PLTY", "AMZY", "METY", "JPMY", "MRNY", "BITO", "OARK",
+        # Roundhill
+        "XDTE", "QDTE", "RDTE", "MAGY",
+        # NEOS
+        "QQQI", "SPYI", "BTCI", "JEPQ", "JEPI",
+        # Broad CC / income
+        "SCHD", "DIVO", "XYLD", "QYLD", "RYLD", "SVOL", "FEPI",
+        # TappAlpha / Kurv
+        "TDAQ", "KQQQ",
+    }
+
+    _CC_INCOME_SUBREDDITS = [
+        "dividends",
+        "ETFs",
+        "thetagang",
+        "Bogleheads",
+        "investing",
+    ]
+
+    def _fetch_stocktwits_ccincome_stream(self, tickers: list) -> dict:
+        """
+        Fetches StockTwits symbol stream for each CC income ETF.
+        Returns {ticker: {"msg_count": N, "bullish": N, "bearish": N, "bull_pct": float}}
+        Uses the per-symbol stream endpoint (no auth required, 30 most recent messages).
+        Reddit public JSON is 403-blocked site-wide as of 2024 — StockTwits is the
+        reliable free alternative for niche CC ETF community sentiment.
+        """
+        results = {}
+        headers = {"User-Agent": "RockefellerEcosystem/1.0"}
+        for sym in tickers:
+            try:
+                r = requests.get(
+                    f"https://api.stocktwits.com/api/2/streams/symbol/{sym}.json",
+                    headers=headers, timeout=8
+                )
+                if r.status_code != 200:
+                    continue
+                msgs = r.json().get("messages", [])
+                if not msgs:
+                    continue
+                bulls = sum(
+                    1 for m in msgs
+                    if m.get("entities", {}).get("sentiment", {}) and
+                    m["entities"]["sentiment"].get("basic") == "Bullish"
+                )
+                bears = sum(
+                    1 for m in msgs
+                    if m.get("entities", {}).get("sentiment", {}) and
+                    m["entities"]["sentiment"].get("basic") == "Bearish"
+                )
+                tagged = bulls + bears
+                bull_pct = round(bulls / tagged * 100) if tagged > 0 else 0
+                results[sym] = {
+                    "msg_count": len(msgs),
+                    "bullish":   bulls,
+                    "bearish":   bears,
+                    "bull_pct":  bull_pct,
+                }
+            except Exception as e:
+                logger.warning(f"[CC Income Social] StockTwits stream {sym} failed: {e}")
+        return results
+
+    def scan_ccincome_social_buzz(self, top_n: int = 6) -> list:
+        """
+        Ranks CC income ETFs by StockTwits community activity and sentiment.
+        Buzz score = total messages × bull/bear conviction weight.
+        Returns ranked list of dicts, highest activity first.
+
+        Note: Reddit public JSON is 403-blocked site-wide (Reddit API lockdown 2024).
+        StockTwits individual symbol streams remain reliably accessible and give
+        richer data — per-message bullish/bearish tags from the investing community.
+        """
+        # Scan the full CC income universe (30 msgs per ticker, ~1s each)
+        all_tickers = list(self._CC_INCOME_TICKERS)
+        st_data = self._fetch_stocktwits_ccincome_stream(all_tickers)
+
+        results = []
+        for sym, data in st_data.items():
+            msg_count = data["msg_count"]
+            if msg_count < 3:  # skip tickers with almost no activity
+                continue
+
+            bulls = data["bullish"]
+            bears = data["bearish"]
+            bull_pct = data["bull_pct"]
+
+            # Buzz score: message volume × sentiment conviction
+            # High volume + high bull% = highest score
+            conviction = (bull_pct / 100) if bulls > bears else (-(100 - bull_pct) / 100)
+            buzz_score = round(msg_count * (1 + abs(conviction)), 1)
+
+            lean = (
+                "BULLISH"    if bull_pct >= 70 else
+                "BEARISH"    if bull_pct <= 30 else
+                "MIXED"
+            )
+            label = (
+                "HIGH BUZZ" if msg_count >= 20 else
+                "TRENDING"  if msg_count >= 10 else
+                "WATCHING"
+            )
+            family, freq = self.NEW_INCOME_ETF_UNIVERSE.get(sym, ("Unknown", "?"))
+            results.append({
+                "symbol":     sym,
+                "family":     family,
+                "freq":       freq,
+                "msg_count":  msg_count,
+                "bullish":    bulls,
+                "bearish":    bears,
+                "bull_pct":   bull_pct,
+                "lean":       lean,
+                "buzz_score": buzz_score,
+                "label":      label,
+            })
+
+        results.sort(key=lambda x: x["buzz_score"], reverse=True)
+        return results[:top_n]
+
     def generate_futures_social_snapshot(self) -> dict:
         """
         Merges StockTwits trending + Reddit WSB mentions filtered to futures-adjacent

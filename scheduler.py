@@ -494,6 +494,50 @@ def main():
             except Exception as e:
                 logger.error(f"New income ETF screener segment failed: {e}")
 
+            # ── CC INCOME SOCIAL BUZZ SCANNER ─────────────────────────────────
+            # Scans r/dividends / r/ETFs / r/thetagang / r/Bogleheads for CC income
+            # ETF mentions — surfaces what the income community is actually talking
+            # about, not just what passes the yield filter. Fires as a separate embed
+            # so it has its own pulse even on quiet screener days.
+            try:
+                buzz = engine.scan_ccincome_social_buzz(top_n=6)
+                if buzz:
+                    buzz_payload = ""
+                    for b in buzz:
+                        freq_str   = b["freq"]   if b["freq"]   != "?" else ""
+                        family_str = b["family"] if b["family"] != "Unknown" else ""
+                        meta = " | ".join(filter(None, [family_str, freq_str]))
+                        lean_emoji = "🟢" if b["lean"] == "BULLISH" else ("🔴" if b["lean"] == "BEARISH" else "🟡")
+                        sentiment_line = (
+                            f"┣ Sentiment: {lean_emoji} {b['lean']} — "
+                            f"`{b['bullish']}` bull / `{b['bearish']}` bear "
+                            f"(`{b['bull_pct']}%` bullish)\n"
+                        ) if b["bullish"] + b["bearish"] > 0 else ""
+                        buzz_payload += (
+                            f"**{b['symbol']}**  `{b['label']}`"
+                            + (f"  {meta}" if meta else "") + "\n"
+                            f"┣ StockTwits: `{b['msg_count']}` recent messages\n"
+                            + sentiment_line
+                            + f"┗ Buzz score: `{b['buzz_score']}`\n\n"
+                        )
+                    buzz_payload = buzz_payload.rstrip()
+                    buzz_payload += (
+                        "\n\n─────────────────────────\n"
+                        "Source: StockTwits symbol streams (Reddit public API blocked site-wide)\n"
+                        "Buzz ≠ fundamentals — verify yield/AUM before adding to your universe."
+                    )
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            "📡 CC INCOME SOCIAL BUZZ | What the Community Is Watching",
+                            buzz_payload, 0x1abc9c
+                        )
+                        logger.info(f"CC income social buzz dispatched: {len(buzz)} tickers.")
+                else:
+                    logger.info("CC income social buzz: no CC income tickers trending today.")
+            except Exception as e:
+                logger.error(f"CC income social buzz scanner failed: {e}")
+
         elif args.mode == "wheel_signals":
             # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
             # — wheeling these Tier 2 holdings (MAIN/MLPI/GPIQ/KQQQ/TDAQ) for long-term income is
