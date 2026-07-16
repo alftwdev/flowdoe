@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Jul 2026*
+*Last updated: Jul 15 2026*
 
 ---
 
@@ -26,7 +26,7 @@ $500/wk auto-deposit + monthly W2 surplus (Simplifi by Quicken monitors leftover
   → Bills paid via E*TRADE Bill Pay (treats portfolio as business operating account)
   → Surplus + Tier 2 dividends (MAIN/MLPI/TDAQ/KQQQ) → margin paydown
   → Margin freed → reborrow conservatively (never exceed 25% of portfolio value)
-  → Buy more CLM/CRF on margin + buy more MAIN/MLPI with cash (preferred)
+  → Buy more CLM/CRF on margin + buy more MLPI with cash (preferred — see Tier 2 note)
   → CLM/CRF DRIP at NAV → shares issued below market = built-in alpha every month
   → Tier 2 dividends cover margin interest → loan is structurally free
   → Rinse, repeat → compounding snowball effect
@@ -72,6 +72,30 @@ Sell CSP (0.20 delta, 30–45 DTE) on high-IV names
 **Dividend bonus rule:** When screening wheel candidates, prefer names that pay
 dividends. If assigned, premium income + dividend income while running the CC.
 Examples: SOFI (growing dividend), MAIN (if ever wheeled), O (monthly REIT).
+
+**Defined Risk Mode (put credit spread as wheel substitute — NOT a 4th strategy):**
+Credit spreads are NOT a standalone strategy. They are a capital-efficiency toggle
+inside Track A. Use a put credit spread INSTEAD of a naked CSP when:
+- Stock price > $100 (100-share assignment commitment is too capital-heavy at current portfolio stage)
+- IVR > 55% AND stock is at/near technical support (IV crush opportunity)
+- Want to preserve more margin headroom for CLM/CRF accumulation (primary goal)
+
+Decision tree when wheel_signals fires:
+```
+Stock price ≤ $100 AND margin headroom comfortable → naked CSP (standard wheel)
+Stock price > $100 OR margin is tight            → put credit spread instead
+  → Sell short put at 0.20 delta, buy long put 5 points below, same DTE
+  → Same premium income → same margin paydown bucket
+  → No assignment path (defined max loss = spread width minus credit)
+  → Stop-loss: close if spread value = 2× credit collected
+  → Never roll if you'd pay a debit to do so — just close and move on
+Iron condor: only AFTER put side has decayed 75%+ AND stock has moved favorably
+             → add call credit spread above current price, conservative delta (0.15–0.20)
+```
+
+Credit spreads were the personal strategy that funded retirement before this system.
+That edge is preserved as a tool, not expanded into a competing engine. The CLM/CRF
+snowball + margin headroom stays the priority. Spreads serve it, not the other way around.
 
 **Track B — CC ETF income arb (TDAQ/KQQQ/MLPI hold-and-collect):**
 ```
@@ -219,14 +243,28 @@ Margin freed → reborrow → buy more CLM/CRF or Tier 2
 **Blended Tier 2 yield:** ~13–15%
 **All Tier 2 dividends → margin paydown (never reinvested)**
 
+**MLPI cash-buy strategy (current focus):**
+Buy MLPI with available cash (not margin). As MLPI equity grows, the portfolio's
+overall margin capacity expands → use that expanded headroom to buy more CLM/CRF on
+margin. MLPI's ~15% monthly distributions also accelerate margin paydown directly.
+This makes each MLPI cash purchase a dual-action: income + unlocks more CLM/CRF buying power.
+Entry signal: `scheduler.py --mode mlpi_entry` watches XLE ≤ -1.5% or DGS10 +8bps
+intraday AND MLPI ≤ -0.5% → Pushover alert + Discord embed (red days = best buy window).
+
 ### Tier 3 — Opportunistic (cycle-dependent, small allocation)
 | Ticker | Underlying | Use Case |
 |--------|-----------|----------|
 | BITA | Bitcoin (BlackRock covered call) | Crypto bull cycle income |
 | YBTC | Bitcoin (Roundhill covered call) | Weekly crypto income |
-| CHPY | Semiconductor basket | AI momentum phases only |
+| CHPY | Semiconductor basket | AI momentum phases only — under consideration |
 
 **Tier 3 rule:** Extract cash weekly → margin paydown. Exit when crypto/AI cycle peaks.
+
+**CHPY consideration:** Semiconductor/AI basket covered call. Under consideration for
+small allocation during AI momentum phases. NOT a long-term hold — 12–18 month frame
+maximum, cash-only entry (no margin), exit when AI cycle shows exhaustion signals
+(SentiSense leaderboard AI names deteriorating + NVDA/AMD breadth rolling over).
+Decision pending — do not add until margin headroom is comfortable post-MLPI purchases.
 
 ### Deprecated / Removed from Active Scope
 - GOOW, NVII — too volatile, NAV decay risk too high for margin paydown role
@@ -362,8 +400,7 @@ heavily — they set the bias, posture, and conviction level for the day.
 - EOD: recap of what fired, what to watch tomorrow, any strategy adjustments
 - Cross-signals from #cornerstone (RO alerts), #crypto (F&G extremes), #futures (bias)
 
-**Still to build:** `market_analysis.py` — the dedicated 0800 HST premarket aggregator
-that pulls all feed data and produces a structured morning brief to this channel.
+**Built and live:** `market_analysis.py` — 0800/10:20/13:40 HST briefs with 8-flag bias scorer. Writes `market_analysis_bias` to DB for cross-script consumption.
 
 ### #futures-trading and #crypto — Intelligence / Conviction Channels
 
@@ -449,7 +486,7 @@ TQQQ entries/exits, full cashflow tracker, wheel tickers and strikes.
 ✅ detect_whale_flow_direction()   — direction-aware (accum. vs distribution)
 ✅ check_crisis_amplification_risk()— VIXY z-score overlay (threshold: 1.5σ)
 ✅ calculate_ro_risk_score()       — composite 0–100 RO risk score
-✅ build_cornerstone_chart()       — 60D price vs NAV rebased chart
+✅ build_cornerstone_chart()       — 60D dark-theme matplotlib chart (candlesticks + SMA20/50 + volume). Replaced Finviz URL fetch Jul 15 (Finviz dark mode is paid Elite only).
 ✅ dispatch_cornerstone_alert()    — Discord + Pushover + personal + work email
 ✅ send_daily_pulse()              — 0800 HST gate, deduped via DB, ledger sweep
 ✅ check_and_escalate_if_critical()— 5-min loop, tier-transition debounced
@@ -521,14 +558,15 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 0800 HST morning brief + 10:20 HST intraday pulse + 13:40 HST EOD recap → #market-analysis. 8-flag bias scorer (BULLISH/NEUTRAL/BEARISH). Synthesizes FRED + VIXY + SPY/QQQ + F&G + CLM/CRF z-score + TQQQ cycle + wheel positions. |
 | `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income/cef_calibrate. Removed: `gex` and `options_flow`. wheel_signals now includes VIX-adjusted params (Module 4) + earnings proximity scanner (Module 5). crypto_social now includes cycle top score. |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income/cef_calibrate/mlpi_entry. Removed: `gex` and `options_flow`. wheel_signals: VIX-adjusted params (Module 4) + earnings proximity (Module 5). crypto_social: cycle top score. trending_plays: SS leaderboard as 4th source. mlpi_entry: XLE/MLPI dip signal → Pushover + Discord. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
 | `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Now writes bottom_score/top_score to DB for market_analysis.py. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
 | `seed_cef_premiums.py` | ✅ One-time tool | Run once on PA to seed CLM/CRF z-score mu/sigma from 252-day CEFConnect premium history. Replaces hardcoded defaults (mu=15, sigma=4) with empirical data. |
+| `sentisense_client.py` | ✅ Live | SentiSense API client with full DB caching. Trackers added Jul 15: get_reddit_picks (7-day cache), get_sentiment_movers (daily), get_sentiment_leaderboard (daily). Wired into analytics.py trending_plays + futures_social as additional discovery sources. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
-| `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY. |
+| `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY + SENTISENSE_API_KEY. |
 
 ---
 
@@ -568,6 +606,39 @@ OI + taker direction cross-signals into LEAP CALL bottom_score context (retail p
 
 ---
 
+## 6d. SentiSense Integration (live as of Jul 15 2026)
+
+All SentiSense fetches are **cached to DB** — zero redundant API calls across cron runs.
+
+| Function | Endpoint | Cache | Used In |
+|----------|----------|-------|---------|
+| `get_market_mood()` | `/market/mood` | daily | monitor.py RO score (sentiment_fear flag) |
+| `get_sentiment(ticker)` | `/stocks/{SYM}/sentiment` | daily per ticker | trending_plays, wheel_signals |
+| `get_insights(ticker)` | `/insights/stock/{SYM}` | daily per ticker | wheel_signals insider cluster signal |
+| `get_institutional_flows(ticker)` | `/institutional/flows` | daily per ticker | wheel_signals 13F flow overlay |
+| `get_congressional_trades()` | `/politicians/activity` | daily | scheduler.py (available) |
+| `get_reddit_picks()` | `/trackers/reddit-picks` | 7-day (monthly refresh) | analytics.py `_fetch_reddit_wsb_mentions()` — primary source, replaces 403-prone Reddit scrape |
+| `get_sentiment_movers()` | `/trackers/sentiment-movers` | daily | analytics.py `generate_futures_social_snapshot()` — energy/metals movers |
+| `get_sentiment_leaderboard()` | `/trackers/sentiment-leaderboard` | daily | analytics.py `generate_trending_options_plays()` — 4th discovery source (bullish side) |
+
+**monitor.py RO score cross-signals from SentiSense:**
+```python
+"yield_steepen": 5   # yield curve spread moved >0.20 in one day (DB: fred_yield_spread/prev)
+"sentiment_fear": 5  # ss_market_mood score ≤ 25 (Extreme Fear overlay on CLM/CRF risk)
+```
+
+**Trending plays source hierarchy (generate_trending_options_plays):**
+```
+1. StockTwits trending (real-time)
+2. Reddit WSB → SentiSense reddit-picks tracker (primary, 7-day cache, no 403 risk)
+              → raw Reddit JSON (fallback, may 403 on PA IPs)
+3. Finviz top gainers + unusual volume (CSV export, free)
+4. SentiSense Sentiment Leaderboard — bullish side (daily, curated by score)
+Per-symbol SS score ≥ 30 also counts as +1 source (upgrades NEUTRAL → HIGH)
+```
+
+---
+
 ## 7. Income Channel & Wheel Strategy Modules
 
 **#dividend-ccetfs** (`python scheduler.py --mode income`) — 4 segments, all real-data:
@@ -599,11 +670,13 @@ WEBHOOK_FUTURES_TRADING=
 WEBHOOK_CRYPTO=
 WEBHOOK_FED=
 WEBHOOK_FOREX=               # key retained, channel deprecated
+WEBHOOK_INCOME=              # used by mlpi_entry mode
 
 # API Keys
 TWELVE_DATA_API_KEY=         # commercially licensed
 FRED_API_KEY=                # free — FRED/STLOUISFED, confirmed in .env
 TRADIER_API_KEY=             # $10/mo — options chain enrichment (live)
+SENTISENSE_API_KEY=          # SentiSense — sentiment, trackers, congressional trades
 ```
 
 ---
@@ -704,12 +777,18 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 - [x] Earnings proximity scanner — `get_earnings_proximity()` + wheel_signals Module 5 (✅ Jul 12)
 - [x] Crypto cycle top scorer — `calculate_crypto_top_score()` wired into crypto_social (✅ Jul 12)
 - [x] Position sizer — `kelly_position_size()` (half-Kelly + VIX scalar) in analytics.py (✅ Jul 12)
+- [x] 8 cross-script data flows wired (yield curve → monitor.py, CLM/CRF z-score → tqqq.py, bias DB → scheduler.py Module 4, MLPI entry signal, etc.) (✅ Jul 15)
+- [x] Dark-theme cornerstone chart — matplotlib dark candlestick chart replaces Finviz URL (✅ Jul 15)
+- [x] Ex-div display line removed from daily pulse embed (✅ Jul 15)
+- [x] SentiSense Tracker API — reddit-picks / sentiment-movers / sentiment-leaderboard wired into analytics.py (✅ Jul 15)
+- [x] Reddit 403 fix — SentiSense reddit-picks tracker now primary source for WSB mentions (✅ Jul 15)
 
 ### Deployment Checklist (next PA session)
 1. `git pull origin main` on PythonAnywhere
 2. Run `python seed_cef_premiums.py` once — seeds CLM/CRF z-score mu/sigma from CEFConnect
 3. Add `market_analysis.py` as 6th always-on task on PythonAnywhere
-4. `market_scheduler.py` already wires `cef_calibrate` at 22:30 UTC — no cron change needed
+4. Add `scheduler.py --mode mlpi_entry` to cron: 10:30 HST + 14:00 HST
+5. `market_scheduler.py` already wires `cef_calibrate` at 22:30 UTC — no cron change needed
 
 ### Data Infrastructure
 - [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline ~Aug 11, full 52-week rank after 252 trading days
