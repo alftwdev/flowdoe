@@ -490,6 +490,15 @@ def _fetch_fred_board_macro() -> dict:
         return result
     try:
         result["yield_curve"] = engine.fetch_yield_curve()
+        # Write spread to DB so monitor.py can detect rapid steepening without a separate FRED call.
+        if result["yield_curve"]:
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if db.get_state("fred_yield_spread_date") != today_str:
+                prev_spread = db.get_state("fred_yield_spread")
+                if prev_spread is not None:
+                    db.update_state("fred_yield_spread_prev", prev_spread)
+                db.update_state("fred_yield_spread",      result["yield_curve"]["spread"])
+                db.update_state("fred_yield_spread_date", today_str)
     except Exception as e:
         logger.warning(f"FRED yield curve fetch failed: {e}")
     try:

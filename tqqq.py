@@ -1284,6 +1284,19 @@ class TQQQTacticalSniper:
         except Exception:
             pass  # SentiSense unavailable — scorer continues without this signal
 
+        # CLM/CRF premium z-score cross-signal (max 8) — monitor.py writes these daily.
+        # When both CEF premiums compress simultaneously, it reflects broad market stress —
+        # the same stress that creates LEAP CALL entry opportunities.
+        try:
+            clm_z = float(db.get_state("clm_last_z_premium") or 0.0)
+            crf_z = float(db.get_state("crf_last_z_premium") or 0.0)
+            if clm_z <= -1.5 and crf_z <= -1.5:
+                b += 8   # both CEFs showing premium compression = systemic stress
+            elif clm_z <= -1.0 and crf_z <= -1.0:
+                b += 4
+        except Exception:
+            pass  # DB unavailable — scorer continues without this signal
+
         bottom_score = min(b, 100)
 
         # ── TOP SCORE ──────────────────────────────────────────────────────────

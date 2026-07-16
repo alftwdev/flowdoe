@@ -347,6 +347,18 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     now_label = datetime.now().strftime("%a %b %-d | %H:%M HST")
 
     bias = _calculate_bias_score(engine, db)
+
+    # Write daily bias to DB — scheduler.py wheel_signals Module 4 reads this to
+    # layer directional posture on top of VIX-adjusted delta parameters.
+    try:
+        db.update_state("market_analysis_bias", {
+            "label": bias["label"],
+            "score": bias["bias_score"],
+            "date":  datetime.now().strftime("%Y-%m-%d"),
+        })
+    except Exception:
+        pass
+
     sigs = bias["signals"]
 
     # ── MACRO ENVIRONMENT ─────────────────────────────────────────────────────
@@ -398,15 +410,17 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
 
     # ── CROSS-CHANNEL SIGNALS ─────────────────────────────────────────────────
     try:
-        clm_z   = float(db.get_state("clm_last_z_premium") or 0.0)
-        crf_z   = float(db.get_state("crf_last_z_premium") or 0.0)
-        clm_ro  = db.get_state("clm_last_ro_tier") or "LOW"
-        crf_ro  = db.get_state("crf_last_ro_tier") or "LOW"
-        clm_prem = float(db.get_state("clm_last_premium") or 0.0)
-        crf_prem = float(db.get_state("crf_last_premium") or 0.0)
+        clm_z     = float(db.get_state("clm_last_z_premium") or 0.0)
+        crf_z     = float(db.get_state("crf_last_z_premium") or 0.0)
+        clm_ro    = db.get_state("clm_last_ro_tier") or "LOW"
+        crf_ro    = db.get_state("crf_last_ro_tier") or "LOW"
+        clm_prem  = float(db.get_state("clm_last_premium") or 0.0)
+        crf_prem  = float(db.get_state("crf_last_premium") or 0.0)
+        clm_score = int(db.get_state("clm_last_ro_score") or 0)
+        crf_score = int(db.get_state("crf_last_ro_score") or 0)
         cef_line = (
-            f"CLM z:`{clm_z:+.1f}σ` prem:`{clm_prem:.1f}%` ({clm_ro}) | "
-            f"CRF z:`{crf_z:+.1f}σ` prem:`{crf_prem:.1f}%` ({crf_ro})"
+            f"CLM z:`{clm_z:+.1f}σ` prem:`{clm_prem:.1f}%` RO:`{clm_score}/100` ({clm_ro}) | "
+            f"CRF z:`{crf_z:+.1f}σ` prem:`{crf_prem:.1f}%` RO:`{crf_score}/100` ({crf_ro})"
         )
     except Exception:
         cef_line = "CLM/CRF: data pending monitor.py pulse"
@@ -424,6 +438,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         open_pos     = db.get_open_wheel_positions()
         pos_count    = len(open_pos)
         nearest_exp  = None
+        notional     = 0.0
         if open_pos:
             today = datetime.now().date()
             exps  = []
@@ -433,20 +448,59 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
                     exps.append((d - today).days)
                 except Exception:
                     pass
+                try:
+                    notional += float(p.get("strike", 0)) * int(p.get("contracts", 1)) * 100
+                except Exception:
+                    pass
             if exps:
                 nearest_exp = min(exps)
+        notional_str = f" | Notional: `${notional:,.0f}`" if notional > 0 else ""
         wheel_line = (
             f"{pos_count} open position{'s' if pos_count != 1 else ''}"
             + (f" | Nearest exp: {nearest_exp}d" if nearest_exp is not None else "")
+            + notional_str
         ) if pos_count > 0 else "No open positions"
     except Exception:
         wheel_line = "Wheel: DB read pending"
+
+    # MLPI entry signal — uses price data already fetched for bias scorer (no extra API calls).
+    # Fires when energy sector (XLE) drops ≥ 1.5% OR yield curve steepened ≥ 20bps,
+    # AND MLPI itself is also down (better entry price). All reads from cached DB values.
+    mlpi_entry_line = ""
+    try:
+        xle_data  = engine._execute_query("price", {"symbol": "XLE"})
+        mlpi_data = engine._execute_query("price", {"symbol": "MLPI"})
+        xle_chg   = float((xle_data  or {}).get("percent_change", 0.0))
+        mlpi_chg  = float((mlpi_data or {}).get("percent_change", 0.0))
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        yc_spread = db.get_state("fred_yield_spread")
+        yc_prev   = db.get_state("fred_yield_spread_prev")
+        yc_date   = db.get_state("fred_yield_spread_date")
+        rate_spike = (
+            yc_date == today_str
+            and yc_spread is not None and yc_prev is not None
+            and (float(yc_spread) - float(yc_prev)) >= 0.20
+        )
+        energy_red = xle_chg <= -1.5
+        mlpi_down  = mlpi_chg <= -0.5
+        if (energy_red or rate_spike) and mlpi_down:
+            triggers = []
+            if energy_red:  triggers.append(f"XLE {xle_chg:+.1f}%")
+            if rate_spike:  triggers.append(f"T10-T2 +{float(yc_spread)-float(yc_prev):.2f}% rate spike")
+            mlpi_entry_line = (
+                f"┣ 🛢️ MLPI ENTRY WINDOW — {' | '.join(triggers)} | MLPI {mlpi_chg:+.1f}% — "
+                f"Accumulation conditions. Cash buy (no new margin).\n"
+            )
+    except Exception:
+        pass
 
     signals_section = (
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"┣ TQQQ: {tqqq_line}\n"
-        f"┗ Wheel: {wheel_line}\n"
+        f"┣ Wheel: {wheel_line}\n"
+        f"{mlpi_entry_line}"
+        f"┗ Synthesized: #cornerstone · #crypto · #futures · #options-wheel\n"
     )
 
     # ── BIAS + DIRECTIVES ─────────────────────────────────────────────────────
@@ -465,8 +519,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     directives_section = (
         f"\n**TODAY'S POSTURE: {bias['label']} (Score: {score_sign})**\n"
         f"┣ Bias: {directive_label}\n"
-        f"┣ Wheel params: {wheel_directive}\n"
-        f"┗ Synthesized from: #cornerstone · #crypto · #futures · #options-wheel\n"
+        f"┗ Wheel params: {wheel_directive}\n"
     )
 
     # ── SENTISENSE CONFLUENCE BLOCK ───────────────────────────────────────────

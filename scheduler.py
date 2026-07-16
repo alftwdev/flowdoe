@@ -71,7 +71,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate", "mlpi_entry"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -741,23 +741,56 @@ def main():
                 logger.error(f"Wheel IV environment post failed: {e}")
 
             # ── MODULE 4: VIX-ADJUSTED ENTRY PARAMETERS ───────────────────────
-            # Tells members WHICH delta and DTE to use TODAY based on VIX regime.
+            # Tells members WHICH delta and DTE to use TODAY based on VIX regime,
+            # cycle scores (from tqqq.py), and daily bias (from market_analysis.py).
+            # All reads from DB — zero new API calls.
             try:
-                real_vix = engine.fetch_real_vix() or 20.0
+                real_vix   = engine.fetch_real_vix() or 20.0
                 vix_params = engine.get_vix_adjusted_params(real_vix)
-                tier = vix_params["tier"]
+                tier       = vix_params["tier"]
                 tier_color = {"LOW": 0x2ecc71, "NORMAL": 0x3498db, "ELEVATED": 0xf1c40f, "PANIC": 0xe74c3c}.get(tier, 0x95a5a6)
+
+                # Cross-script inputs: tqqq.py cycle scores + market_analysis.py daily bias
+                bottom_score = int(engine.db.get_state("tqqq_bottom_score") or 0)
+                top_score    = int(engine.db.get_state("tqqq_top_score")    or 0)
+                bias_data    = engine.db.get_state("market_analysis_bias") or {}
+                bias_label   = bias_data.get("label", "NEUTRAL") if isinstance(bias_data, dict) else "NEUTRAL"
+                bias_date    = bias_data.get("date",  "") if isinstance(bias_data, dict) else ""
+
+                # Compute enhanced delta directive layering all three inputs:
+                # VIX regime is the foundation; cycle score and daily bias refine it.
+                base_delta = vix_params["delta_target"]
+                if bottom_score >= 65 and bias_label == "BEARISH":
+                    # High fear + bearish regime: IV is elevated, go closer to ATM for premium
+                    adj_delta   = round(min(base_delta + 0.05, 0.30), 2)
+                    delta_note  = f"⬆️ raised to `{adj_delta:.2f}` — high bottom_score ({bottom_score}) + BEARISH bias = thick premium"
+                elif top_score >= 65 or bias_label == "BEARISH":
+                    # Market stretched or bearish: go further OTM to reduce assignment risk
+                    adj_delta   = round(max(base_delta - 0.05, 0.15), 2)
+                    delta_note  = f"⬇️ reduced to `{adj_delta:.2f}` — {'top_score ' + str(top_score) + ' ' if top_score >= 65 else ''}{'BEARISH bias' if bias_label == 'BEARISH' else ''} = reduce assignment risk"
+                elif bias_label == "BULLISH" and tier in ("LOW", "NORMAL"):
+                    # Bullish + calm vol: standard delta, size up slightly
+                    adj_delta  = round(base_delta, 2)
+                    delta_note = f"✅ standard `{adj_delta:.2f}` — BULLISH bias + {tier} VIX"
+                else:
+                    adj_delta  = round(base_delta, 2)
+                    delta_note = f"✅ standard `{adj_delta:.2f}` — NEUTRAL bias"
+
+                today_str  = datetime.now().strftime("%Y-%m-%d")
+                bias_fresh = "✅" if bias_date == today_str else "⚠️ stale"
                 vix_payload = (
                     f"VIX Regime: **{tier}** (VIX `{real_vix:.1f}` [FRED])\n\n"
-                    f"┣ Target Delta: `{vix_params['delta_target']:.2f}` "
-                    f"({int(vix_params['delta_target']*100)}% OTM probability)\n"
+                    f"┣ Base Delta (VIX): `{base_delta:.2f}`\n"
+                    f"┣ Cycle Scores: bottom `{bottom_score}` | top `{top_score}`\n"
+                    f"┣ Daily Bias: `{bias_label}` {bias_fresh}\n"
+                    f"┣ **Final Delta: {delta_note}**\n"
                     f"┣ DTE Window: `{vix_params['dte_min']}–{vix_params['dte_max']} days`\n"
                     f"┣ Size Scalar: `{vix_params['size_scalar']:.0%}` of normal position\n"
-                    f"┗ Rationale: {'Low vol = can go closer to ATM for more premium.' if tier == 'LOW' else 'Elevated vol = go further OTM, tastytrade data shows 95% OTM expiry at this delta.' if tier == 'ELEVATED' else 'Panic regime = min size, max OTM. Wait for VIX < 25 before entering new positions.' if tier == 'PANIC' else 'Standard parameters apply.'}"
+                    f"┗ Rationale: {'Low vol — can go closer to ATM for premium.' if tier == 'LOW' else 'Elevated vol — go further OTM to reduce assignment risk.' if tier == 'ELEVATED' else 'Panic regime — min size, max OTM. Wait for VIX < 25.' if tier == 'PANIC' else 'Standard parameters.'}"
                 )
                 if WEBHOOK_INCOME:
-                    send_essentials_embed(WEBHOOK_INCOME, "📐 WHEEL PARAMS | VIX-Adjusted Entry Guide", vix_payload, tier_color)
-                    logger.info(f"VIX-adjusted params dispatched: {tier} regime (VIX {real_vix:.1f}).")
+                    send_essentials_embed(WEBHOOK_INCOME, "📐 WHEEL PARAMS | VIX + Cycle + Bias-Adjusted", vix_payload, tier_color)
+                    logger.info(f"VIX-adjusted params dispatched: {tier} (VIX {real_vix:.1f}) | bias={bias_label} | adj_delta={adj_delta:.2f}.")
             except Exception as e:
                 logger.error(f"VIX-adjusted params post failed: {e}")
 
@@ -1382,6 +1415,93 @@ def main():
                         logger.warning(f"CEF calibrate {ticker}: failed — DB unchanged.")
             except Exception as e:
                 logger.error(f"cef_calibrate failed: {e}")
+
+        elif args.mode == "mlpi_entry":
+            # ── MLPI ENTRY SIGNAL ─────────────────────────────────────────────
+            # Fires when energy sector (XLE) drops ≥ 1.5% OR yield curve steepens
+            # ≥ 20bps in one session, AND MLPI itself is down ≥ 0.5%.
+            # Both conditions produce the same outcome: MLPI cheaper than yesterday.
+            # Notification: Pushover (personal alert) + Discord #dividend-ccetfs.
+            # Runs 2× per RTH day (10:30 HST + 14:00 HST). 24h dedupe via DB.
+            try:
+                dedupe_key = f"mlpi_entry_fired_{datetime.now().strftime('%Y-%m-%d')}"
+                if engine.db.get_state(dedupe_key):
+                    logger.info("MLPI entry: already fired today — skipping.")
+                else:
+                    xle_data  = engine._execute_query("price", {"symbol": "XLE"})
+                    mlpi_data = engine._execute_query("price", {"symbol": "MLPI"})
+                    xle_chg   = float((xle_data  or {}).get("percent_change", 0.0))
+                    mlpi_chg  = float((mlpi_data or {}).get("percent_change", 0.0))
+                    xle_price = float((xle_data  or {}).get("price", 0.0))
+                    mlpi_price = float((mlpi_data or {}).get("price", 0.0))
+
+                    # XLE RSI for oversold confirmation
+                    xle_rsi = None
+                    try:
+                        rsi_data = engine._execute_query("rsi", {"symbol": "XLE", "interval": "1day", "time_period": 14})
+                        xle_rsi  = float((rsi_data or {}).get("rsi", 50.0))
+                    except Exception:
+                        pass
+
+                    # Yield curve steepening from cached DB value (cross_asset.py writes daily)
+                    today_str  = datetime.now().strftime("%Y-%m-%d")
+                    yc_spread  = engine.db.get_state("fred_yield_spread")
+                    yc_prev    = engine.db.get_state("fred_yield_spread_prev")
+                    yc_date    = engine.db.get_state("fred_yield_spread_date")
+                    rate_spike = (
+                        yc_date == today_str
+                        and yc_spread is not None and yc_prev is not None
+                        and (float(yc_spread) - float(yc_prev)) >= 0.20
+                    )
+                    energy_red = xle_chg <= -1.5
+                    mlpi_down  = mlpi_chg <= -0.5
+
+                    if (energy_red or rate_spike) and mlpi_down:
+                        triggers = []
+                        if energy_red:
+                            triggers.append(f"XLE {xle_chg:+.1f}%")
+                        if rate_spike:
+                            bps = (float(yc_spread) - float(yc_prev)) * 100
+                            triggers.append(f"T10-T2 +{bps:.0f}bps rate spike")
+                        rsi_note = f" | XLE RSI `{xle_rsi:.0f}` {'🟢 oversold' if xle_rsi and xle_rsi < 40 else ''}" if xle_rsi else ""
+
+                        payload = (
+                            f"Energy sector + rate conditions align for MLPI accumulation.\n\n"
+                            f"┣ Triggers: {' | '.join(triggers)}\n"
+                            f"┣ MLPI: `${mlpi_price:.2f}` ({mlpi_chg:+.1f}% session){rsi_note}\n"
+                            f"┣ XLE: `${xle_price:.2f}` ({xle_chg:+.1f}% session)\n"
+                            f"┣ Yield: `{float(yc_spread):.2f}%` T10-T2 spread\n"
+                            f"┣ Action: Cash buy only — no new margin for Tier 2 entries\n"
+                            f"┗ Sizing: 1 tranche. Watch for 3-session XLE weakness for full position."
+                        )
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(WEBHOOK_INCOME, "🛢️ MLPI ENTRY WINDOW | Accumulation Signal", payload, 0xe67e22)
+
+                        # Pushover personal alert (financial signal — direct notification)
+                        try:
+                            import requests as _req
+                            pushover_token = os.getenv("PUSHOVER_APP_TOKEN", "")
+                            pushover_user  = os.getenv("PUSHOVER_USER_KEY", "")
+                            if pushover_token and pushover_user:
+                                msg = f"🛢️ MLPI ENTRY — {' | '.join(triggers)} | MLPI ${mlpi_price:.2f} ({mlpi_chg:+.1f}%) — Cash buy window open."
+                                _req.post("https://api.pushover.net/1/messages.json", data={
+                                    "token": pushover_token, "user": pushover_user,
+                                    "message": msg, "title": "MLPI Accumulation Signal",
+                                    "priority": 1,
+                                }, timeout=10)
+                        except Exception as pe:
+                            logger.warning(f"MLPI Pushover alert failed: {pe}")
+
+                        engine.db.update_state(dedupe_key, True)
+                        logger.info(f"MLPI entry signal fired: {', '.join(triggers)} | MLPI {mlpi_chg:+.1f}%")
+                    else:
+                        conds = []
+                        if not energy_red:  conds.append(f"XLE {xle_chg:+.1f}% (need ≤ -1.5%)")
+                        if not rate_spike:  conds.append("no rate spike")
+                        if not mlpi_down:   conds.append(f"MLPI {mlpi_chg:+.1f}% (need ≤ -0.5%)")
+                        logger.info(f"MLPI entry: conditions not met — {' | '.join(conds)}")
+            except Exception as e:
+                logger.error(f"mlpi_entry mode failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

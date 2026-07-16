@@ -134,6 +134,9 @@ RO_SCORE_WEIGHTS = {
     "macro_underperform":  10,
     "crisis_amplification":12,
     "ro_season":            8,
+    # Cross-script signals (lightweight, cached-data reads — no new API calls)
+    "yield_steepen":       5,   # T10-T2 spread steepened > 20bps in a session (rate pressure on CEF)
+    "sentiment_fear":      5,   # SentiSense market mood ≤ 25 (extreme fear = CEF premium risk)
     # Suppressors
     "ex_div_relief":      -10,
 }
@@ -827,7 +830,8 @@ def calculate_ro_risk_score(
     ex_div_near, ro_season=False, crisis_day=False,
     dark_pool=False, premium_compressed=False,
     macro_underperform=False, holder_exit=False,
-    premium_30pct_watch=False
+    premium_30pct_watch=False,
+    yield_steepen=False, sentiment_fear=False,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -871,6 +875,10 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["13f_holder_exit"]
     if premium_30pct_watch:
         score += RO_SCORE_WEIGHTS["premium_30pct_watch"]
+    if yield_steepen:
+        score += RO_SCORE_WEIGHTS["yield_steepen"]
+    if sentiment_fear:
+        score += RO_SCORE_WEIGHTS["sentiment_fear"]
     if ex_div_near and score > 0:
         score += RO_SCORE_WEIGHTS["ex_div_relief"]   # negative weight — schedules dip, not dilution
 
@@ -1090,13 +1098,37 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         # Premium retreated below 25% — reset the watch so it can fire again next cycle
         db.update_state(watch_key, "")
 
+    # ── Cross-script signal flags (DB reads — zero new API calls) ─────────────
+    # Yield curve steepening: read spread written daily by cross_asset.py.
+    # Rapid steepening (> 20bps) pressures yield-sensitive CEF premiums.
+    yield_steepen = False
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if db.get_state("fred_yield_spread_date") == today_str:
+            cur_spread  = db.get_state("fred_yield_spread")
+            prev_spread = db.get_state("fred_yield_spread_prev")
+            if cur_spread is not None and prev_spread is not None:
+                yield_steepen = (float(cur_spread) - float(prev_spread)) > 0.20
+    except Exception:
+        pass
+
+    # SentiSense market mood ≤ 25 = extreme fear → CEF premium compression risk
+    sentiment_fear = False
+    try:
+        ss_mood = db.get_state("ss_market_mood")
+        if isinstance(ss_mood, dict):
+            sentiment_fear = int(ss_mood.get("score", 50)) <= 25
+    except Exception:
+        pass
+
     # ── RO composite risk score (upgraded with new signals)
     ro_score, ro_tier = calculate_ro_risk_score(
         sec_shield, z_premium, premium, whale_status, credit_spread,
         ex_div_near, ro_season=ro_season, crisis_day=crisis_day,
         dark_pool=is_dark_pool, premium_compressed=is_compressed,
         macro_underperform=macro_underperf, holder_exit=holder_exit,
-        premium_30pct_watch=premium_30pct_watch
+        premium_30pct_watch=premium_30pct_watch,
+        yield_steepen=yield_steepen, sentiment_fear=sentiment_fear,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
@@ -1182,6 +1214,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     db.update_state(f"{ticker.lower()}_last_z_premium", round(z_premium, 3))
     db.update_state(f"{ticker.lower()}_last_premium",   round(premium, 3))
     db.update_state(f"{ticker.lower()}_last_ro_tier",   ro_tier)
+    db.update_state(f"{ticker.lower()}_last_ro_score",  ro_score)  # numeric score for cross-script reads
 
     # ── Log daily premium for z-score calibration (replaces retired CEFConnect API)
     # INSERT OR IGNORE — only the first call per calendar day writes; subsequent
