@@ -2782,10 +2782,33 @@ class HighFidelityAnalyticsEngine:
 
     def _fetch_reddit_wsb_mentions(self) -> dict:
         """
-        Parses r/wallstreetbets hot posts for ticker mentions in titles.
-        Returns {ticker: mention_count}. No auth needed — public JSON endpoint.
-        Only returns tickers mentioned 2+ times to filter out single-post noise.
+        Returns {ticker: mention_count} for Reddit conviction names.
+
+        Primary: SentiSense reddit-picks tracker (curated, 7-day cache, no 403 risk).
+          peak_mentions used as count; BULLISH posture tickers weighted ×2.
+        Fallback: r/wallstreetbets hot.json scrape (403s on PA IPs intermittently).
         """
+        # ── Primary: SentiSense Reddit Picks tracker ──────────────────────────
+        try:
+            import sentisense_client as ss
+            picks = ss.get_reddit_picks(self.db)
+            if picks:
+                counts: dict = {}
+                for p in picks:
+                    ticker = p.get("ticker", "")
+                    if not ticker or ticker in self._SOCIAL_SCANNER_EXCLUDE:
+                        continue
+                    weight = 2 if p.get("posture") == "BULLISH" else 1
+                    # peak_mentions is the raw count but we need a value ≥ 2 to pass the filter
+                    raw_count = max(p.get("peak_mentions", 0), 2)
+                    counts[ticker] = raw_count * weight
+                if counts:
+                    logger.info(f"[Social Scanner] Reddit Picks via SentiSense: {len(counts)} tickers")
+                    return counts
+        except Exception as e:
+            logger.warning(f"[Social Scanner] SentiSense Reddit Picks failed: {e}")
+
+        # ── Fallback: raw Reddit scrape ───────────────────────────────────────
         try:
             import re
             r = requests.get(
@@ -2795,8 +2818,8 @@ class HighFidelityAnalyticsEngine:
             )
             if r.status_code != 200:
                 return {}
-            posts      = r.json().get("data", {}).get("children", [])
-            ticker_re  = re.compile(r'\$([A-Z]{1,5})|(?<!\w)([A-Z]{2,5})(?!\w)')
+            posts     = r.json().get("data", {}).get("children", [])
+            ticker_re = re.compile(r'\$([A-Z]{1,5})|(?<!\w)([A-Z]{2,5})(?!\w)')
             counts: dict = {}
             for post in posts:
                 title = post.get("data", {}).get("title", "")
@@ -2806,7 +2829,7 @@ class HighFidelityAnalyticsEngine:
                         counts[sym] = counts.get(sym, 0) + 1
             return {k: v for k, v in counts.items() if v >= 2}
         except Exception as e:
-            logger.error(f"[Social Scanner] Reddit WSB fetch failed: {e}")
+            logger.error(f"[Social Scanner] Reddit WSB fallback failed: {e}")
             return {}
 
     def _fetch_finviz_top_movers(self) -> set:
@@ -2944,8 +2967,8 @@ class HighFidelityAnalyticsEngine:
         st_map     = {t["symbol"]: t for t in st_list}
         wsb_set    = set(wsb_dict.keys())
 
-        # SentiSense scored sentiment — 4th source, replaces raw StockTwits/WSB lean
-        # when available. Score ≥ 7.0 on a name already in 1 source upgrades to HIGH.
+        # SentiSense per-symbol scored sentiment — confirms candidates from social feeds.
+        # Score ≥ 30.0 (strong bullish) counts as an additional source.
         ss_scores = {}
         try:
             import sentisense_client as ss
@@ -2957,17 +2980,35 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             pass  # SentiSense unavailable — existing 3-source scoring continues
 
+        # SentiSense Sentiment Leaderboard — 4th discovery source.
+        # Bullish tickers from the leaderboard that aren't in other feeds still surface
+        # as NEUTRAL candidates; those already in 1+ feeds get upgraded to HIGH.
+        ss_leaderboard_set: set = set()
+        try:
+            import sentisense_client as ss
+            lb_rows = ss.get_sentiment_leaderboard(self.db, side="bullish", limit=15)
+            if lb_rows:
+                for _r in lb_rows:
+                    _t = _r.get("ticker", "")
+                    if _t and _t not in self._SOCIAL_SCANNER_EXCLUDE:
+                        ss_leaderboard_set.add(_t)
+                logger.info(f"[Trending Plays] SS Leaderboard: {len(ss_leaderboard_set)} bullish tickers as 4th source")
+        except Exception:
+            pass
+
         candidates = []
-        for sym in set(st_map.keys()) | wsb_set | finviz_set:
-            in_st      = sym in st_map
-            in_wsb     = sym in wsb_set
-            in_finviz  = sym in finviz_set
-            in_ss_high = ss_scores.get(sym, {}).get("score", 0) >= 30.0  # signed float; ≥30 = strong bullish
-            score = sum([in_st, in_wsb, in_finviz])
+        all_pool = set(st_map.keys()) | wsb_set | finviz_set | ss_leaderboard_set
+        for sym in all_pool:
+            in_st         = sym in st_map
+            in_wsb        = sym in wsb_set
+            in_finviz     = sym in finviz_set
+            in_leaderboard = sym in ss_leaderboard_set
+            in_ss_high    = ss_scores.get(sym, {}).get("score", 0) >= 30.0
+            score = sum([in_st, in_wsb, in_finviz, in_leaderboard])
             if score == 0:
                 continue
 
-            # SentiSense score ≥ 7.0 counts as a second source (upgrades NEUTRAL → HIGH)
+            # Per-symbol SS score ≥ 30 counts as an extra source (upgrades NEUTRAL → HIGH if only 1)
             effective_score = score + (1 if in_ss_high and score == 1 else 0)
 
             # Lean from SentiSense when available (more reliable than raw StockTwits direction)
@@ -3320,7 +3361,20 @@ class HighFidelityAnalyticsEngine:
         st_map   = {t["symbol"]: t for t in st_list if t["symbol"] in self._FUTURES_ADJACENT}
         wsb_filt = {k: v for k, v in wsb_dict.items() if k in self._FUTURES_ADJACENT}
 
-        candidates = set(st_map.keys()) | set(wsb_filt.keys())
+        # SentiSense Sentiment Movers — improving names in futures-adjacent universe
+        ss_movers_set: set = set()
+        try:
+            import sentisense_client as ss
+            movers = ss.get_sentiment_movers(self.db, direction="improving", limit=20)
+            if movers:
+                for _m in movers:
+                    _t = _m.get("ticker", "")
+                    if _t in self._FUTURES_ADJACENT:
+                        ss_movers_set.add(_t)
+        except Exception:
+            pass
+
+        candidates = set(st_map.keys()) | set(wsb_filt.keys()) | ss_movers_set
         results = []
         for sym in candidates:
             try:
@@ -3336,7 +3390,9 @@ class HighFidelityAnalyticsEngine:
                 vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
                 in_st     = sym in st_map
                 in_wsb    = sym in wsb_filt
-                meter     = "HIGH" if (in_st and in_wsb) else "NEUTRAL"
+                in_movers = sym in ss_movers_set
+                source_count = sum([in_st, in_wsb, in_movers])
+                meter     = "HIGH" if source_count >= 2 else "NEUTRAL"
                 results.append({
                     "symbol":    sym,
                     "spot":      spot,

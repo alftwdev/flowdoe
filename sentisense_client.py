@@ -68,14 +68,22 @@ def _get(path: str, params: dict = None, timeout: int = 15) -> dict:  # Optional
     return None
 
 
-def _cache_load(db, key: str) -> dict:  # Optional[dict]
-    """Return cached payload if it was stored today, else None."""
+def _cache_load(db, key: str, cache_days: int = 1) -> dict:  # Optional[dict]
+    """Return cached payload if fresh (within cache_days), else None."""
     raw = db.get_state(key)
     if not isinstance(raw, dict):
         return None
-    if raw.get("date") != _today():
+    stored = raw.get("date")
+    if not stored:
         return None
-    return raw.get("data")
+    if cache_days == 1:
+        return raw.get("data") if stored == _today() else None
+    try:
+        from datetime import date as _date, timedelta
+        age = (_date.today() - _date.fromisoformat(stored)).days
+        return raw.get("data") if age < cache_days else None
+    except Exception:
+        return None
 
 
 def _cache_save(db, key: str, data: dict) -> None:
@@ -325,6 +333,204 @@ def get_congressional_trades(db, limit: int = 6) -> list:  # Optional[list]
 
     _cache_save(db, "ss_congressional", result)
     logger.info(f"[SentiSense] Congressional trades fetched: {len(result)} records")
+    return result[:limit]
+
+
+# ── Tracker API (pre-built, cached snapshots from SentiSense) ────────────────
+
+def _ticker_from_url(url: str) -> str:  # Optional[str]
+    """Extract ticker from tracker row URL: '/stocks/NVDA/sentiment' → 'NVDA'."""
+    try:
+        parts = (url or "").split("/")
+        if len(parts) >= 3 and parts[1] == "stocks":
+            return parts[2].upper()
+    except Exception:
+        pass
+    return None
+
+
+def _find_metric(metrics: list, label: str) -> dict:
+    """Return the first metric dict with matching label, or {}."""
+    for m in (metrics or []):
+        if m.get("label") == label:
+            return m
+    return {}
+
+
+def get_reddit_picks(db, limit: int = 10) -> list:  # Optional[list]
+    """
+    SentiSense Reddit Picks tracker — stocks with high Reddit conviction, curated
+    with entry date, return since entry, posture, and peak mention count.
+
+    Refresh interval: 30 days (monthly snapshot). Cached locally for 7 days.
+    Cache key: ss_tracker_reddit_picks
+    Returns list of:
+      {ticker, return_pct, posture, peak_mentions, entry_date, source_url}
+    """
+    cached = _cache_load(db, "ss_tracker_reddit_picks", cache_days=7)
+    if cached is not None:
+        return cached[:limit]
+
+    data = _get("/trackers/reddit-picks")
+    if not data:
+        return None
+
+    rows = (data.get("data") or {}).get("rows") or []
+    result = []
+    for row in rows:
+        ticker = (row.get("rowId") or "").upper()
+        if not ticker:
+            continue
+        metrics = row.get("metrics") or []
+        ret_m   = _find_metric(metrics, "Return since entry")
+        post_m  = _find_metric(metrics, "Posture")
+        peak_m  = _find_metric(metrics, "Peak mentions")
+        try:
+            return_pct = float(ret_m.get("value", 0))
+        except (TypeError, ValueError):
+            return_pct = 0.0
+        try:
+            peak_mentions = int(peak_m.get("value", 0))
+        except (TypeError, ValueError):
+            peak_mentions = 0
+        result.append({
+            "ticker":        ticker,
+            "return_pct":    return_pct,
+            "posture":       (post_m.get("value") or "NEUTRAL").upper(),
+            "peak_mentions": peak_mentions,
+            "entry_date":    ret_m.get("periodLabel") or row.get("asOf") or "",
+            "source_url":    post_m.get("sourceUrl") or ret_m.get("sourceUrl") or "",
+        })
+
+    _cache_save(db, "ss_tracker_reddit_picks", result)
+    logger.info(f"[SentiSense] Reddit Picks fetched: {len(result)} positions")
+    return result[:limit]
+
+
+def get_sentiment_movers(db, direction: str = "both", limit: int = 10) -> list:  # Optional[list]
+    """
+    SentiSense Sentiment Movers tracker — stocks with the biggest sentiment score
+    change over the past 7 days. Refreshes daily.
+
+    direction: "improving" | "deteriorating" | "both"
+    Cache key: ss_tracker_sentiment_movers
+    Returns list of:
+      {ticker, score, tone, score_change_7d, mentions_7d, category}
+    """
+    cached = _cache_load(db, "ss_tracker_sentiment_movers", cache_days=1)
+    if cached is not None:
+        rows = cached
+        if direction != "both":
+            rows = [r for r in rows if r.get("category") == direction]
+        return rows[:limit]
+
+    data = _get("/trackers/sentiment-movers")
+    if not data:
+        return None
+
+    rows = (data.get("data") or {}).get("rows") or []
+    result = []
+    for row in rows:
+        ticker = _ticker_from_url(row.get("url") or "")
+        if not ticker:
+            ticker = (row.get("rowId") or "").upper()
+            if "/" in ticker or not ticker:
+                continue
+        metrics = row.get("metrics") or []
+        score_m   = _find_metric(metrics, "SentiSense Score")
+        tone_m    = _find_metric(metrics, "Score tone")
+        change_m  = _find_metric(metrics, "Score change (7d)")
+        mention_m = _find_metric(metrics, "Mentions (7d)")
+        try:
+            score = float(score_m.get("value", 0))
+        except (TypeError, ValueError):
+            score = 0.0
+        try:
+            score_change = float(change_m.get("value", 0))
+        except (TypeError, ValueError):
+            score_change = 0.0
+        try:
+            mentions = int(mention_m.get("value", 0))
+        except (TypeError, ValueError):
+            mentions = 0
+        result.append({
+            "ticker":         ticker,
+            "score":          score,
+            "tone":           (tone_m.get("value") or "Neutral"),
+            "score_change_7d": score_change,
+            "mentions_7d":    mentions,
+            "category":       row.get("category") or "improving",
+        })
+
+    _cache_save(db, "ss_tracker_sentiment_movers", result)
+    logger.info(f"[SentiSense] Sentiment Movers fetched: {len(result)} rows")
+    if direction != "both":
+        result = [r for r in result if r.get("category") == direction]
+    return result[:limit]
+
+
+def get_sentiment_leaderboard(db, side: str = "both", limit: int = 8) -> list:  # Optional[list]
+    """
+    SentiSense Sentiment Leaderboard tracker — top-ranked stocks by sentiment score
+    with driving story and 7-day trend. Refreshes daily.
+
+    side: "bullish" | "bearish" | "both"
+    Cache key: ss_tracker_sentiment_leaderboard
+    Returns list of:
+      {ticker, score, tone, score_7d, mentions_7d, driving_story, story_url, category}
+    """
+    cached = _cache_load(db, "ss_tracker_sentiment_leaderboard", cache_days=1)
+    if cached is not None:
+        rows = cached
+        if side != "both":
+            rows = [r for r in rows if r.get("category") == side]
+        return rows[:limit]
+
+    data = _get("/trackers/sentiment-leaderboard")
+    if not data:
+        return None
+
+    rows = (data.get("data") or {}).get("rows") or []
+    result = []
+    for row in rows:
+        ticker = _ticker_from_url(row.get("url") or "")
+        if not ticker:
+            ticker = (row.get("rowId") or "").upper()
+            if "/" in ticker or not ticker:
+                continue
+        metrics  = row.get("metrics") or []
+        score_m  = _find_metric(metrics, "SentiSense Score")
+        tone_m   = _find_metric(metrics, "Score tone")
+        score7_m = _find_metric(metrics, "SentiSense Score 7d")
+        ment_m   = _find_metric(metrics, "Mentions (7d)")
+        story_m  = _find_metric(metrics, "Driving story")
+        try:
+            score = float(score_m.get("value", 0))
+        except (TypeError, ValueError):
+            score = 0.0
+        try:
+            score_7d = float(score7_m.get("value", 0))
+        except (TypeError, ValueError):
+            score_7d = 0.0
+        try:
+            mentions = int(ment_m.get("value", 0))
+        except (TypeError, ValueError):
+            mentions = 0
+        result.append({
+            "ticker":        ticker,
+            "score":         score,
+            "tone":          (tone_m.get("value") or "Neutral"),
+            "score_7d":      score_7d,
+            "mentions_7d":   mentions,
+            "driving_story": (story_m.get("value") or ""),
+            "story_url":     (story_m.get("sourceUrl") or ""),
+            "category":      row.get("category") or "bullish",
+        })
+
+    _cache_save(db, "ss_tracker_sentiment_leaderboard", result)
+    logger.info(f"[SentiSense] Sentiment Leaderboard fetched: {len(result)} rows")
+    if side != "both":
+        result = [r for r in result if r.get("category") == side]
     return result[:limit]
 
 
