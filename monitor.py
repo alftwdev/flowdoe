@@ -961,7 +961,9 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     vixy_line    = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
     seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
-    ex_div_line    = "┣ Ex-Div: Scheduled dip (not RO-related)\n" if ex_div_near else ""
+    # ex_div_line removed from display — the RO Risk: X/100 numeric score already
+    # communicates safety. Ex-div is predictable monthly noise; suppressor logic
+    # still runs in calculate_ro_risk_score() where it matters.
 
     return (
         f"{ticker} — {status}\n"
@@ -975,7 +977,6 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
-        f"{ex_div_line}"
         f"┗ Div. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
     )
 
@@ -1233,50 +1234,136 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
 
 def build_cornerstone_chart():
     """
-    Fetches live Finviz daily charts for CLM and CRF, stitches them vertically
-    into one image (CLM on top, CRF below) for the Discord embed attachment.
-    Falls back to None if either fetch fails — dispatch continues without a chart.
+    Builds a dark-theme CLM + CRF candlestick chart from Twelve Data OHLCV (90 days).
+    Replaces Finviz (which silently ignores the &theme=dark parameter on free tier).
+    Layout: CLM on top, CRF below — stacked vertically, consistent 900×700px total.
+    Includes: candlesticks, SMA 20 (orange) + SMA 50 (purple), volume subplot.
+    Falls back to None on any failure — dispatch continues without a chart.
     """
     try:
-        from PIL import Image
         import io
-        charts = []
-        headers = {"User-Agent": "Mozilla/5.0"}
-        for ticker in PRIORITY_ASSETS:
-            url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l&theme=dark"
-            res = requests.get(url, headers=headers, timeout=15)
-            res.raise_for_status()
-            img = Image.open(io.BytesIO(res.content)).convert("RGB")
-            charts.append(img)
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.gridspec import GridSpec
+        import numpy as np
 
-        if not charts:
+        BG       = "#0d1117"
+        PANEL    = "#161b22"
+        GREEN    = "#2ecc71"
+        RED      = "#e74c3c"
+        SMA20_C  = "#f39c12"
+        SMA50_C  = "#9b59b6"
+        GRID_C   = "#21262d"
+        TEXT_C   = "#c9d1d9"
+
+        def _sma(closes, n):
+            out = [None] * len(closes)
+            for i in range(n - 1, len(closes)):
+                out[i] = sum(closes[i - n + 1 : i + 1]) / n
+            return out
+
+        def _draw_panel(ax_price, ax_vol, rows, ticker):
+            """Draw one ticker panel (price + volume) on provided axes."""
+            rows = list(reversed(rows))          # oldest first
+            dates   = list(range(len(rows)))
+            opens   = [float(r.get("open",  r.get("close", 0))) for r in rows]
+            highs   = [float(r.get("high",  r.get("close", 0))) for r in rows]
+            lows    = [float(r.get("low",   r.get("close", 0))) for r in rows]
+            closes  = [float(r.get("close", 0)) for r in rows]
+            vols    = [float(r.get("volume", 0)) for r in rows]
+
+            # Candle body + wick
+            w = 0.6
+            for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
+                color = GREEN if c >= o else RED
+                ax_price.plot([i, i], [l, h], color=color, linewidth=0.8, zorder=2)
+                ax_price.add_patch(mpatches.FancyBboxPatch(
+                    (i - w / 2, min(o, c)), w, max(abs(c - o), 0.001),
+                    boxstyle="square,pad=0", linewidth=0, facecolor=color, zorder=3
+                ))
+
+            # SMA lines
+            sma20 = _sma(closes, 20)
+            sma50 = _sma(closes, 50)
+            xs20 = [i for i, v in enumerate(sma20) if v is not None]
+            xs50 = [i for i, v in enumerate(sma50) if v is not None]
+            if xs20: ax_price.plot(xs20, [sma20[i] for i in xs20], color=SMA20_C, linewidth=1.2, label="SMA 20", zorder=4)
+            if xs50: ax_price.plot(xs50, [sma50[i] for i in xs50], color=SMA50_C, linewidth=1.2, label="SMA 50", zorder=4)
+
+            # Volume bars
+            vol_colors = [GREEN if closes[i] >= opens[i] else RED for i in range(len(rows))]
+            ax_vol.bar(dates, vols, color=vol_colors, alpha=0.6, width=0.8, zorder=2)
+
+            # Styling
+            last_close = closes[-1] if closes else 0
+            for ax in (ax_price, ax_vol):
+                ax.set_facecolor(PANEL)
+                ax.tick_params(colors=TEXT_C, labelsize=7)
+                for spine in ax.spines.values():
+                    spine.set_edgecolor(GRID_C)
+                ax.grid(True, color=GRID_C, linewidth=0.5, zorder=1)
+
+            # Ticker label + last price
+            ax_price.set_title(
+                f"{ticker}  ${last_close:.2f}", color=TEXT_C,
+                fontsize=10, fontweight="bold", loc="left", pad=4
+            )
+            ax_price.legend(
+                fontsize=7, loc="upper right",
+                facecolor=PANEL, edgecolor=GRID_C, labelcolor=TEXT_C
+            )
+
+            # X-axis: show ~6 date labels (month-day)
+            n = len(rows)
+            step = max(1, n // 6)
+            ax_price.set_xticks([])
+            tick_pos  = list(range(0, n, step))
+            tick_lbls = [rows[i]["datetime"][:10] for i in tick_pos]
+            ax_vol.set_xticks(tick_pos)
+            ax_vol.set_xticklabels(tick_lbls, rotation=30, ha="right", fontsize=6, color=TEXT_C)
+            ax_vol.yaxis.set_visible(False)
+            ax_price.set_xlim(-1, n)
+            ax_vol.set_xlim(-1, n)
+
+        # ── Fetch data ─────────────────────────────────────────────────────────
+        with requests.Session() as sess:
+            data = {}
+            for tkr in PRIORITY_ASSETS:
+                rows = fetch_time_series(sess, tkr, outputsize=90)
+                if rows:
+                    data[tkr] = rows
+
+        if not data:
+            logger.warning("build_cornerstone_chart: no OHLCV data returned — skipping chart.")
             return None
 
-        # Stack vertically — both charts same width (Finviz returns consistent dimensions)
-        total_height = sum(c.height for c in charts)
-        combined = Image.new("RGB", (charts[0].width, total_height), (30, 30, 30))
-        y_offset = 0
-        for c in charts:
-            combined.paste(c, (0, y_offset))
-            y_offset += c.height
+        n_tickers = len(data)
+        # constrained_layout=True avoids tight_layout warning with GridSpec + sharex
+        fig = plt.figure(
+            figsize=(9, 3.5 * n_tickers), facecolor=BG,
+            constrained_layout=True,
+        )
+        gs = GridSpec(
+            n_tickers * 2, 1,
+            height_ratios=[4 if i % 2 == 0 else 1 for i in range(n_tickers * 2)],
+            hspace=0.06, figure=fig,
+        )
+        fig.patch.set_facecolor(BG)
+
+        for idx, (tkr, rows) in enumerate(data.items()):
+            ax_p = fig.add_subplot(gs[idx * 2])
+            ax_v = fig.add_subplot(gs[idx * 2 + 1], sharex=ax_p)
+            _draw_panel(ax_p, ax_v, rows, tkr)
 
         buf = io.BytesIO()
-        combined.save(buf, format="PNG")
+        fig.savefig(buf, format="PNG", facecolor=BG, dpi=110)
+        plt.close(fig)
         return buf.getvalue()
 
-    except ImportError:
-        # Pillow not installed — return individual CLM chart as fallback
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            url = f"https://finviz.com/chart.ashx?t=CLM&ty=c&ta=1&p=d&s=l&theme=dark"
-            res = requests.get(url, headers=headers, timeout=15)
-            res.raise_for_status()
-            return res.content
-        except Exception as e:
-            logger.error(f"Finviz chart fallback failed: {e}")
-            return None
     except Exception as e:
-        logger.error(f"Finviz chart generation failed: {e}")
+        logger.error(f"build_cornerstone_chart failed: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
