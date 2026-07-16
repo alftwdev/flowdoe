@@ -699,46 +699,83 @@ def main():
             except Exception as e:
                 logger.error(f"Wheel position monitor failed: {e}")
 
-            # ── MODULE 3: IV ENVIRONMENT STANDING-DOWN POST ────────────────────
-            # Posts every session regardless of screener results — members see activity
-            # even on low-IV days. Explains WHY the wheel is quiet and what to watch.
+            # ── MODULE 3: SOCIAL + IV CONVERGENCE WHEEL CANDIDATES ────────────
+            # Replaces static 5-ticker watchlist. Pulls today's social-conviction
+            # candidates (StockTwits + SS reddit-picks + Finviz + SS leaderboard),
+            # runs IVR proxy on each, and surfaces names where both signals align.
             try:
+                import math as _math
                 _, vixy_z = engine.fetch_vixy_proxy() if hasattr(engine, "fetch_vixy_proxy") else (0, 0)
                 if vixy_z < 0.5:
-                    iv_env = "LOW — implied vol below recent baseline. Options sellers have thin edge."
-                    directive = "Stand down on new wheel entries. Watch for IVR > 35% to open positions."
+                    iv_env = "LOW"
+                    directive = "Selective entries only — watch for HIGH conviction + IVR > 35%."
                 elif vixy_z < 1.0:
-                    iv_env = "MODERATE — some premium available. Be selective."
-                    directive = "Selective entries only. Prioritize high-quality underlyings with IVR > 35%."
+                    iv_env = "MODERATE"
+                    directive = "Active scanning. Prioritize HIGH conviction names with IVR > 35%."
                 else:
-                    iv_env = "ELEVATED — premium environment favorable for wheel."
-                    directive = "Active scanning. Run wheel screener for setups."
+                    iv_env = "ELEVATED"
+                    directive = "Premium environment favorable. HIGH conviction entries are priority."
 
-                # Show IVR proxy for top 5 WHEEL_UNIVERSE symbols
-                sample_universe = ["NVDA", "AAPL", "TSLA", "QQQ", "PLTR"]
-                ivr_lines = []
-                for sym in sample_universe:
+                plays = engine.generate_trending_options_plays(max_results=8)
+                _DTE_MID = 37
+                _T = _DTE_MID / 365.0
+
+                candidate_lines = []
+                for play in (plays or []):
+                    sym  = play.get("symbol", "")
+                    spot = play.get("spot", 0)
+                    if not sym or not spot:
+                        continue
                     try:
-                        hv30 = engine.calculate_historical_volatility(sym, lookback=30)
-                        # hv30 is already in % (e.g. 42.4 = 42.4% annualized vol)
-                        iv_est = hv30 * 1.15          # IV estimate in %
-                        ivr_proxy = min(iv_est, 99)   # already in %, no ×100
-                        bar = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
-                        ivr_lines.append(f"┣ {bar} **{sym}** IVR est `{ivr_proxy:.0f}%` (HV30 `{hv30:.1f}%`)")
+                        hv30      = engine.calculate_historical_volatility(sym, lookback=30)
+                        iv_est    = hv30 * 1.15
+                        ivr_proxy = min(iv_est, 99.0)
+                        meter     = play.get("meter", "NEUTRAL")
+                        # 0.20-delta put strike approximation at 37 DTE
+                        iv_dec    = iv_est / 100.0
+                        strike    = spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec ** 2 * _T)
+                        strike    = round(strike)
+                        ivr_bar   = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
+                        if meter == "HIGH" and ivr_proxy >= 35:
+                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | delta `0.20` → `${strike}` strike"
+                        elif meter == "HIGH":
+                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | IV thin — watch"
+                        else:
+                            line = f"┣ {ivr_bar} **{sym}** — Watch | IVR est `{ivr_proxy:.0f}%`"
+                        candidate_lines.append((meter, ivr_proxy, line))
                     except Exception:
                         pass
 
-                standing_payload = (
-                    f"**IV Environment:** {iv_env}\n"
-                    f"┣ VIXY z-score: `{vixy_z:+.2f}σ`\n"
-                    + ("\n".join(ivr_lines) + "\n" if ivr_lines else "")
-                    + f"┗ {directive}"
-                )
+                # HIGH + IVR>35 first, then HIGH, then Watch; within each tier sort by IVR desc
+                candidate_lines.sort(key=lambda x: (
+                    0 if (x[0] == "HIGH" and x[1] >= 35) else (1 if x[0] == "HIGH" else 2),
+                    -x[1]
+                ))
+                high_count = sum(1 for m, ivr, _ in candidate_lines if m == "HIGH" and ivr >= 35)
+
+                if candidate_lines:
+                    if high_count > 0:
+                        sub = f"{high_count} name{'s' if high_count != 1 else ''} where conviction is HIGH and IV setup supports premium selling"
+                    else:
+                        sub = "No HIGH conviction + IV entries today — stand down on new positions"
+                    candidates_payload = (
+                        f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"
+                        f"{sub}\n\n"
+                        + "\n".join(l for _, _, l in candidate_lines[:7])
+                        + f"\n┗ {directive}"
+                    )
+                else:
+                    candidates_payload = (
+                        f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"
+                        f"No social candidates surfaced today.\n"
+                        f"┗ {directive}"
+                    )
+
                 if WEBHOOK_INCOME:
-                    send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL STATUS | Daily IV Environment", standing_payload, 0x3498db)
-                    logger.info("Wheel IV environment standing-down post dispatched.")
+                    send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL CANDIDATES | Social + IV Convergence", candidates_payload, 0x3498db)
+                    logger.info(f"Wheel candidates social+IV dispatched: {high_count} HIGH entries, {len(candidate_lines)} total.")
             except Exception as e:
-                logger.error(f"Wheel IV environment post failed: {e}")
+                logger.error(f"Wheel candidates social+IV post failed: {e}")
 
             # ── MODULE 4: VIX-ADJUSTED ENTRY PARAMETERS ───────────────────────
             # Tells members WHICH delta and DTE to use TODAY based on VIX regime,
