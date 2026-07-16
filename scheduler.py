@@ -720,7 +720,8 @@ def main():
                 _DTE_MID = 37
                 _T = _DTE_MID / 365.0
 
-                candidate_lines = []
+                candidate_lines = []   # (meter, ivr, display_line)
+                snapshot_top   = []   # [{sym, ivr, strike}] — top HIGH entries for DB
                 for play in (plays or []):
                     sym  = play.get("symbol", "")
                     spot = play.get("spot", 0)
@@ -733,11 +734,11 @@ def main():
                         meter     = play.get("meter", "NEUTRAL")
                         # 0.20-delta put strike approximation at 37 DTE
                         iv_dec    = iv_est / 100.0
-                        strike    = spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec ** 2 * _T)
-                        strike    = round(strike)
+                        strike    = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec ** 2 * _T))
                         ivr_bar   = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
                         if meter == "HIGH" and ivr_proxy >= 35:
                             line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | delta `0.20` → `${strike}` strike"
+                            snapshot_top.append({"sym": sym, "ivr": int(ivr_proxy), "strike": strike})
                         elif meter == "HIGH":
                             line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | IV thin — watch"
                         else:
@@ -770,6 +771,18 @@ def main():
                         f"No social candidates surfaced today.\n"
                         f"┗ {directive}"
                     )
+
+                # Persist snapshot for announcements scorecard (zero extra API calls —
+                # snapshot_top was built during the loop above from already-fetched HV30)
+                try:
+                    engine.db.update_state("wheel_candidates_snapshot", {
+                        "date":           datetime.now().strftime("%Y-%m-%d"),
+                        "high_count":     high_count,
+                        "iv_env":         iv_env,
+                        "top_candidates": snapshot_top[:3],
+                    })
+                except Exception as _e:
+                    logger.warning(f"wheel_candidates_snapshot write failed: {_e}")
 
                 if WEBHOOK_INCOME:
                     send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL CANDIDATES | Social + IV Convergence", candidates_payload, 0x3498db)

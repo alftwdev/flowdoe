@@ -2689,12 +2689,22 @@ class HighFidelityAnalyticsEngine:
         else:
             ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED — monitoring ⚠️\n"
 
-        # ── #options-wheel: did wheel screener find setups today? ──
-        wheel_spot = self.db.get_state("wheel_spotlight_latest")
+        # ── #options-wheel: Tier 2 IVR alert (Module 1) OR social+IV snapshot (Module 3) ──
+        today_str_w = __import__("datetime").date.today().isoformat()
+        wheel_spot  = self.db.get_state("wheel_spotlight_latest")
+        wheel_snap  = self.db.get_state("wheel_candidates_snapshot")
+        snap_fresh  = isinstance(wheel_snap, dict) and wheel_snap.get("date") == today_str_w
         if wheel_spot:
+            # Module 1 fired (real Tradier data — highest quality)
             w_sym = wheel_spot.get("symbol", "—")
             w_ivr = wheel_spot.get("ivr_proxy", 0)
-            options_line = f"┣ #options-wheel    Wheel Setup: `{w_sym}` IVR `{w_ivr:.0f}%` — elevated premium env\n"
+            options_line = f"┣ #options-wheel    Wheel Alert: `{w_sym}` IVR `{w_ivr:.0f}%` — elevated premium env\n"
+        elif snap_fresh and wheel_snap.get("high_count", 0) > 0:
+            # Module 3 social+IV convergence has HIGH entries today
+            tops = wheel_snap.get("top_candidates", [])[:3]
+            top_str = " | ".join(f"`{t['sym']}` {t['ivr']}%" for t in tops) if tops else ""
+            n = wheel_snap["high_count"]
+            options_line = f"┣ #options-wheel    Wheel Candidates: `{n}` HIGH setup{'s' if n != 1 else ''} — {top_str}\n"
         else:
             options_line = f"┣ #options-wheel    Wheel Screener: No elevated IVR today — low vol environment\n"
 
