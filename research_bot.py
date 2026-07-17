@@ -1,244 +1,309 @@
+"""
+research_bot.py — Discord slash command bot: /query <ticker>
+
+Runs as a persistent async process (PythonAnywhere always-on task, slot 6).
+All responses are ephemeral (visible only to the requester).
+
+Data sources:
+  - Tradier: real ATM IV, IVR, delta-proxied strike
+  - SentiSense: sentiment score + social lean (daily cached)
+  - DB: tqqq_bottom_score / tqqq_top_score (written by tqqq.py)
+  - Twelve Data via HighFidelityAnalyticsEngine: spot, HV30, OHLCV matrix
+"""
+
 import os
-import discord
-from discord.ext import commands
-from discord import app_commands
-import logging
+import math
 import asyncio
+import logging
 from dotenv import load_dotenv
+
+import discord
+from discord import app_commands
+
 from analytics import HighFidelityAnalyticsEngine
+from tradier_client import TradierClient
+import sentisense_client as ss
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-logger = logging.getLogger("Research_Bot")
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("research_bot")
 
-class RockefellerQueryBot(discord.Client):
+_CRYPTO_TICKERS = {"BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "AVAX"}
+_INCOME_TICKERS = {"SCHD", "JEPI", "JEPQ", "DIVO", "O", "MO", "ARCC", "MAIN",
+                   "MLPI", "TDAQ", "KQQQ", "CLM", "CRF"}
+
+_DTE_MID = 37
+_T       = _DTE_MID / 365.0
+
+
+# ── Bot setup ─────────────────────────────────────────────────────────────────
+
+class QueryBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        self.tree   = app_commands.CommandTree(self)
         self.engine = HighFidelityAnalyticsEngine()
+        self.tradier = TradierClient()
 
     async def setup_hook(self):
         await self.tree.sync()
-        logger.info("Rockefeller /query slash commands synchronized.")
+        logger.info("Slash commands synced.")
 
-bot = RockefellerQueryBot()
+bot = QueryBot()
 
-def compile_equities_options_intel(engine, ticker):
+
+# ── Shared helpers ─────────────────────────────────────────────────────────────
+
+def _cycle_bias(db) -> str:
+    """One-line cycle posture from tqqq.py scores in DB."""
     try:
-        price_data = engine._execute_query("price", {"symbol": ticker})
-        spot = float(price_data.get("price", 0.0))
-        if spot == 0: return None, None
+        bottom = int(db.get_state("tqqq_bottom_score") or 0)
+        top    = int(db.get_state("tqqq_top_score")    or 0)
+        if bottom >= 55:
+            return f"Bottom score {bottom}/100 — CALL desk active 🟢"
+        if top >= 55:
+            return f"Top score {top}/100 — PUT desk active 🔴"
+        return f"Neutral — bottom {bottom} / top {top}"
+    except Exception:
+        return "N/A"
 
-        matrix = engine.calculate_ohlcv_matrix(ticker)
-        
-        td_data = engine._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "50"})
-        if td_data and 'values' in td_data:
-            closes = [float(x['close']) for x in td_data['values']]
-            sma50 = sum(closes[:50])/50 if len(closes) == 50 else spot
-        else:
-            sma50 = spot
-            
-        hv30 = engine.calculate_historical_volatility(ticker)
-        atm_iv = hv30 * 1.15  # Proxy: ATM IV typically trades ~15% above HV30
-        pop_val = 72.0  # Default for ~0.30-delta short strike
-        chain = engine._execute_query("options/chain", {"symbol": ticker})
-        if chain and "data" in chain and chain["data"]:
-            try:
-                import pandas as _pd
-                df_c = _pd.DataFrame(chain["data"])
-                df_c["implied_volatility"] = _pd.to_numeric(df_c["implied_volatility"], errors="coerce").fillna(0)
-                df_c["strike"] = df_c["strike"].astype(float)
-                atm_puts = df_c[(df_c["type"] == "put") & (df_c["strike"].between(spot * 0.98, spot * 1.02))]
-                if not atm_puts.empty:
-                    iv_median = float(atm_puts["implied_volatility"].median())
-                    if iv_median > 0:
-                        atm_iv = iv_median * 100
-                    if "delta" in atm_puts.columns:
-                        deltas = _pd.to_numeric(atm_puts["delta"], errors="coerce").abs()
-                        idx = (deltas - 0.30).abs().idxmin()
-                        pop_val = round((1 - float(deltas.loc[idx])) * 100, 1)
-            except Exception as _e:
-                logger.error(f"Live IV/PoP chain error for {ticker}: {_e}")
-        ivr_val = round(atm_iv, 1)
-        ivr_tag = "Low IV Environment" if atm_iv < 20 else ("Mid-Level Premium" if atm_iv < 35 else "Elevated Premium (Crush Favorable)")
-        
-        regime = "STRONG BULL" if spot > sma50 else "BEARISH REJECTION"
-        action = "STO" if spot > sma50 else "BTO"
-        strategy = "Bull Put Spread" if spot > sma50 else "Bear Call Spread"
-        
-        gex_state = "POSITIVE (Dealers Suppressing Volatility)" if spot > sma50 else "NEGATIVE (Dealers Amplifying Volatility)"
-        flow_state = "ACCUMULATION DETECTED" if matrix['volume_surge'] and spot > sma50 else ("DISTRIBUTION DETECTED" if matrix['volume_surge'] else "NOMINAL")
-        
-        short_strike = round(spot * 0.98 if action == "STO" else spot * 1.02, 1)
-        long_strike = round(short_strike * 0.95 if action == "STO" else short_strike * 1.05, 1)
-        
-        spread_width = abs(short_strike - long_strike)
-        credit = spread_width * 0.33
-        max_risk = spread_width - credit
 
-        payload = (
-            f"Structural State: {regime} (High Conviction)\n"
-            f"Unified Matrix Score: {85 if matrix['volume_surge'] else 65} / 100\n\n"
-            f"Technical Pulse & Boundaries\n"
-            f"┣ Spot Price: ${spot:,.2f}\n"
-            f"┣ IV Rank (IVR): {ivr_tag}\n"
-            f"┣ Institutional Flow: {flow_state}\n"
-            f"┗ Order Flow Z-Score: {matrix['sigma']:+.2f}σ\n\n"
-            f"Execution Framework (The Gold Standard)\n"
-            f"┣ Deployment Objective: {strategy}\n"
-            f"┣ Target Execution (Sell / Buy): ${short_strike} / ${long_strike}\n"
-            f"┣ Optimal DTE: 30-45 Days\n"
-            f"┣ Est. Credit: ${credit * 100:.0f} per contract\n"
-            f"┣ Probability of Profit (PoP): {pop_val}%\n"
-            f"┗ Risk/Reward Profile: 1 : {max_risk/credit:.1f}\n\n"
-            f"Frictionless Directional Alternative\n"
-            f"┗ Setup: Long {'Call' if action == 'STO' else 'Put'} (BTO) targeting ${round(spot * 1.03 if action == 'STO' else spot * 0.97, 1)}\n\n"
-            f"System Shield & Blockflow\n"
-            f"┣ Gamma Exposure (GEX): {gex_state}\n"
-            f"┣ Dark Pool Proxy: {flow_state}\n"
-            f"┣ VIX Sentry: STABLE\n"
-            f"┗ Disclaimer: System metrics are for data orientation. Independently manage risk."
-        )
-        return payload, 0x2ecc71
+def _ss_line(db, ticker: str) -> str:
+    """One-line SentiSense sentiment summary."""
+    try:
+        data = ss.get_sentiment(db, ticker)
+        if not data:
+            return "N/A"
+        score = data.get("score", 0)
+        lean  = data.get("lean") or data.get("direction") or "Neutral"
+        mentions = data.get("mentions", 0)
+        sign  = "+" if score >= 0 else ""
+        return f"{lean} ({sign}{score:.0f}) · {mentions:,} mentions"
+    except Exception:
+        return "N/A"
+
+
+def _iv_and_strike(tradier: TradierClient, db, ticker: str, spot: float) -> tuple:
+    """
+    Returns (iv_pct, ivr, ivr_tag, strike, reliable).
+    iv_pct is percentage (e.g. 45.0 for 45%).
+    Falls back to HV30×1.15 proxy when Tradier returns nothing.
+    """
+    try:
+        iv_rank = tradier.get_iv_rank(ticker, db)
+        iv_dec  = iv_rank.get("current_iv", 0.0)
+        ivr     = iv_rank.get("ivr", 0.0)
+        tag     = iv_rank.get("tag", "")
+        reliable = iv_rank.get("reliable", False)
+        if iv_dec > 0:
+            iv_pct = round(iv_dec * 100, 1)
+            # 0.20-delta put strike via BS approximation at DTE_MID
+            strike = round(spot * math.exp(-0.84 * iv_dec * math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
+            return iv_pct, ivr, tag, strike, reliable
     except Exception as e:
-        logger.error(f"Options intel failure: {e}")
-        return "Telemetry unavailable. Verify asset ticker or API limits.", 0xe74c3c
+        logger.warning(f"Tradier IV failed for {ticker}: {e}")
+    return None, None, None, None, False
 
-def compile_crypto_intel(engine, ticker):
+
+# ── Intel builders ─────────────────────────────────────────────────────────────
+
+def build_equity_intel(engine, tradier, ticker: str) -> tuple:
+    """Returns (description_str, embed_color)."""
     try:
-        price_data = engine._execute_query("price", {"symbol": ticker})
-        spot = float(price_data.get("price", 0.0))
-        if spot == 0: return None, None
-        
-        support_val = spot * 0.94
-        resist_vah = spot * 1.08
-        trend = "ACCUMULATION PHASE" if spot > support_val else "DISTRIBUTION PHASE"
+        spot = engine._execute_query("price", {"symbol": ticker})
+        spot = float((spot or {}).get("price", 0))
+        if not spot:
+            return None, None
 
-        payload = (
-            f"Structural State: HIGH-BETA DECENTRALIZED ASSET\n\n"
-            f"Technical Pulse & Boundaries\n"
-            f"┣ Spot Rate: ${spot:,.2f}\n"
-            f"┣ Overhead Supply (Resistance): ${resist_vah:,.2f}\n"
-            f"┗ Liquidity Floor (Support): ${support_val:,.2f}\n\n"
-            f"Execution Framework (The Gold Standard)\n"
-            f"┣ Deployment Objective: Spot Accumulation Bid\n"
-            f"┣ Target Entry Range: ${spot * 0.97:,.2f} - ${spot * 0.99:,.2f}\n"
-            f"┣ Structural Invalidation (Hard Stop): ${spot * 0.92:,.2f}\n"
-            f"┗ Take Profit Target: ${resist_vah:,.2f}\n\n"
-            f"System Shield & Blockflow\n"
-            f"┣ On-Chain Institutional Flow: {trend}\n"
-            f"┗ Disclaimer: System metrics are for data orientation. Independently manage risk."
+        db = engine.db
+        matrix = engine.calculate_ohlcv_matrix(ticker)
+        hv30   = engine.calculate_historical_volatility(ticker, lookback=30)
+
+        # IV — Tradier first, HV30 proxy fallback
+        iv_pct, ivr, ivr_tag, strike, iv_reliable = _iv_and_strike(tradier, db, ticker, spot)
+        if iv_pct is None:
+            iv_dec  = (hv30 or 20.0) / 100 * 1.15
+            iv_pct  = round(iv_dec * 100, 1)
+            ivr     = iv_pct           # best guess
+            ivr_tag = "~proxy (HV30×1.15)"
+            strike  = round(spot * math.exp(-0.84 * iv_dec * math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
+            iv_reliable = False
+
+        # Premium estimate (mid-point of strike × IV × √T)
+        iv_dec_final = iv_pct / 100
+        est_prem = round(strike * iv_dec_final * math.sqrt(_T) / (2 * math.pi) ** 0.5 * 100)
+
+        # Direction / flow
+        flow   = "ACCUMULATION" if matrix.get("volume_surge") and matrix.get("sigma", 0) > 0 else \
+                 ("DISTRIBUTION" if matrix.get("volume_surge") else "NOMINAL")
+        sigma  = matrix.get("sigma", 0.0)
+
+        # Cycle + sentiment
+        cycle_line = _cycle_bias(db)
+        ss_line    = _ss_line(db, ticker)
+
+        # IVR environment tag
+        if ivr >= 60:
+            env = "Elevated — premium crush favorable"
+            env_icon = "🟢"
+        elif ivr >= 35:
+            env = "Mid-range — sellable premium"
+            env_icon = "🟡"
+        else:
+            env = "Low — consider defined-risk or wait"
+            env_icon = "🔴"
+
+        desc = (
+            f"**Spot:** `${spot:,.2f}`\n\n"
+            f"**IV / Premium**\n"
+            f"┣ ATM IV: `{iv_pct:.1f}%`{'  ✅' if iv_reliable else '  ~proxy'}\n"
+            f"┣ IVR: {env_icon} `{ivr:.0f}%` — {env}\n"
+            f"┣ Wheel setup: STO `${strike}` put · {_DTE_MID} DTE · est `${est_prem}` credit\n\n"
+            f"**Market Signal**\n"
+            f"┣ Order flow: `{flow}` ({sigma:+.2f}σ)\n"
+            f"┣ Sentiment: {ss_line}\n"
+            f"┗ Cycle bias: {cycle_line}"
         )
-        return payload, 0xf39c12
-    except Exception as e: 
-        logger.error(f"Crypto intel failure: {e}")
-        return "Telemetry unavailable.", 0xe74c3c
+        color = 0x2ecc71 if ivr >= 35 else 0xe67e22
+        return desc, color
 
-def compile_income_intel(engine, ticker):
+    except Exception as e:
+        logger.error(f"equity_intel {ticker}: {e}")
+        return f"Data unavailable for `{ticker}` — verify ticker or try again shortly.", 0xe74c3c
+
+
+def build_income_intel(engine, tradier, ticker: str) -> tuple:
+    """Income/CEF/dividend ticker — CSP wheel setup focus."""
     try:
-        price_data = engine._execute_query("price", {"symbol": ticker})
-        spot = float(price_data.get("price", 0.0))
-        if spot == 0: return None, None
-        
-        target_strike = round(spot * 0.95, 1)
-        est_prem = target_strike * 0.015  # Fallback: 1.5% proxy
-        dte_target = 30
-        chain_i = engine._execute_query("options/chain", {"symbol": ticker})
-        if chain_i and "data" in chain_i and chain_i["data"]:
-            try:
-                import pandas as _pd
-                df_i = _pd.DataFrame(chain_i["data"])
-                df_i["expiration_date"] = _pd.to_datetime(df_i["expiration_date"])
-                df_i["strike"] = df_i["strike"].astype(float)
-                df_i["dte"] = (df_i["expiration_date"] - _pd.Timestamp.today()).dt.days
-                df_puts_i = df_i[
-                    (df_i["type"] == "put") &
-                    (df_i["dte"].between(25, 35)) &
-                    (df_i["strike"].between(spot * 0.92, spot * 0.98))
-                ]
-                if not df_puts_i.empty and "bid" in df_puts_i.columns and "ask" in df_puts_i.columns:
-                    df_puts_i = df_puts_i.copy()
-                    df_puts_i["mid"] = (
-                        _pd.to_numeric(df_puts_i["bid"], errors="coerce") +
-                        _pd.to_numeric(df_puts_i["ask"], errors="coerce")
-                    ) / 2
-                    best_put = df_puts_i.loc[df_puts_i["mid"].idxmax()]
-                    est_prem = float(best_put["mid"])
-                    target_strike = float(best_put["strike"])
-                    dte_target = int(best_put["dte"])
-            except Exception as _e:
-                logger.error(f"Live income chain fetch error for {ticker}: {_e}")
-        annualized_roi = (est_prem / target_strike) * (365 / dte_target) * 100
+        spot = engine._execute_query("price", {"symbol": ticker})
+        spot = float((spot or {}).get("price", 0))
+        if not spot:
+            return None, None
 
-        payload = (
-            f"Structural State: YIELD & DISTRIBUTION TERMINAL\n\n"
-            f"Technical Pulse & Boundaries\n"
-            f"┣ Spot Price: ${spot:,.2f}\n"
-            f"┣ Asset Profile: Income Generation & Premium Capture\n"
-            f"┗ Dividend Safety Rating: TIER 1 STABLE\n\n"
-            f"Execution Framework (The Gold Standard Wheel)\n"
-            f"┣ Deployment Objective: Cash-Secured Put (STO)\n"
-            f"┣ Optimal Strike: ${target_strike} (5% OTM Margin of Safety)\n"
-            f"┣ Target DTE: {dte_target} Days\n"
-            f"┣ Est. Premium Captured: ${est_prem * 100:.0f} per contract\n"
-            f"┗ Annualized Capital Efficiency: ~{annualized_roi:.1f}% ROI\n\n"
-            f"System Shield & Blockflow\n"
-            f"┣ Contingency Strategy: If assigned, immediately deploy Covered Calls at cost basis.\n"
-            f"┗ Disclaimer: System metrics are for data orientation. Independently manage risk."
+        db = engine.db
+        iv_pct, ivr, ivr_tag, strike, iv_reliable = _iv_and_strike(tradier, db, ticker, spot)
+
+        if iv_pct is None:
+            hv30   = engine.calculate_historical_volatility(ticker, lookback=30) or 15.0
+            iv_dec = hv30 / 100 * 1.15
+            iv_pct = round(iv_dec * 100, 1)
+            strike = round(spot * 0.95, 1)
+            iv_reliable = False
+        else:
+            iv_dec = iv_pct / 100
+
+        est_prem = round(strike * iv_dec * math.sqrt(_T) / (2 * math.pi) ** 0.5 * 100)
+        ann_roi  = round((est_prem / 100 / strike) * (365 / _DTE_MID) * 100, 1)
+
+        ss_line    = _ss_line(db, ticker)
+        cycle_line = _cycle_bias(db)
+
+        desc = (
+            f"**Spot:** `${spot:,.2f}`\n\n"
+            f"**Wheel / Income Setup**\n"
+            f"┣ Strike: `${strike}` CSP · {_DTE_MID} DTE\n"
+            f"┣ Est. credit: `${est_prem}` per contract\n"
+            f"┣ Annualized ROI: `~{ann_roi}%`\n"
+            f"┣ ATM IV: `{iv_pct:.1f}%`{'  ✅' if iv_reliable else '  ~proxy'}\n\n"
+            f"**Context**\n"
+            f"┣ Sentiment: {ss_line}\n"
+            f"┗ Cycle bias: {cycle_line}"
         )
-        return payload, 0xf1c40f
-    except Exception as e: 
-        logger.error(f"Income intel failure: {e}")
-        return "Telemetry unavailable.", 0xe74c3c
+        return desc, 0xf1c40f
 
-def process_query_routing(engine, ticker):
-    if "BTC" in ticker or "ETH" in ticker or "SOL" in ticker or "CRYPTO" in ticker:
-        return compile_crypto_intel(engine, ticker)
-    elif ticker in ["SCHD", "JEPI", "JEPQ", "DIVO", "O", "MO"]:
-        return compile_income_intel(engine, ticker)
-    elif "/" in ticker and "USD" not in ticker: 
-        return compile_equities_options_intel(engine, ticker.replace("/", ""))
-    else: 
-        return compile_equities_options_intel(engine, ticker)
+    except Exception as e:
+        logger.error(f"income_intel {ticker}: {e}")
+        return f"Data unavailable for `{ticker}`.", 0xe74c3c
 
-@bot.tree.command(name="query", description="Extract Actionable Intelligence for any ticker.")
-@app_commands.describe(ticker="Enter asset ticker (e.g., AAPL, BTC/USD, SCHD, /ES)")
+
+def build_crypto_intel(engine, ticker: str) -> tuple:
+    """Crypto spot + support/resistance + sentiment."""
+    try:
+        td_sym = ticker if "/" in ticker else f"{ticker}/USD"
+        spot_data = engine._execute_query("price", {"symbol": td_sym})
+        spot = float((spot_data or {}).get("price", 0))
+        if not spot:
+            return None, None
+
+        db = engine.db
+        support = round(spot * 0.94, 2)
+        resist  = round(spot * 1.08, 2)
+        ss_line = _ss_line(db, ticker.split("/")[0])
+        cycle_line = _cycle_bias(db)
+
+        desc = (
+            f"**Spot:** `${spot:,.2f}`\n\n"
+            f"**Levels**\n"
+            f"┣ Resistance: `${resist:,.2f}` (+8%)\n"
+            f"┣ Support: `${support:,.2f}` (−6%)\n"
+            f"┣ Entry range: `${round(spot*0.97,2):,.2f} – ${round(spot*0.99,2):,.2f}`\n"
+            f"┣ Invalidation: `${round(spot*0.92,2):,.2f}` (−8%)\n\n"
+            f"**Context**\n"
+            f"┣ Sentiment: {ss_line}\n"
+            f"┗ Cycle bias (equity): {cycle_line}"
+        )
+        return desc, 0xf39c12
+
+    except Exception as e:
+        logger.error(f"crypto_intel {ticker}: {e}")
+        return f"Data unavailable for `{ticker}`.", 0xe74c3c
+
+
+def route_query(engine, tradier, ticker: str) -> tuple:
+    base = ticker.split("/")[0].upper()
+    if base in _CRYPTO_TICKERS or "BTC" in ticker or "ETH" in ticker:
+        return build_crypto_intel(engine, ticker)
+    if ticker in _INCOME_TICKERS:
+        return build_income_intel(engine, tradier, ticker)
+    return build_equity_intel(engine, tradier, ticker)
+
+
+# ── Slash commands ─────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="query", description="On-demand intel for any ticker — options setup, IV, sentiment, cycle bias.")
+@app_commands.describe(ticker="Ticker symbol (e.g. AAPL, COIN, BTC, SCHD, CLM)")
 async def query_asset(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
     ticker = ticker.upper().strip()
-    logger.info(f"Command /query triggered for {ticker} by {interaction.user}")
-    
+    logger.info(f"/query {ticker} by {interaction.user}")
+
     try:
-        intel_payload, color = await asyncio.to_thread(process_query_routing, bot.engine, ticker)
-        
-        if not intel_payload or "unavailable" in intel_payload:
-            await interaction.followup.send(f"Could not resolve quantitative logic for `{ticker}`. Verify ticker format.", ephemeral=True)
+        desc, color = await asyncio.to_thread(route_query, bot.engine, bot.tradier, ticker)
+
+        if not desc:
+            await interaction.followup.send(
+                f"Could not resolve `{ticker}`. Check the ticker format and try again.",
+                ephemeral=True
+            )
             return
 
-        embed = discord.Embed(
-            title=f"Rockefeller Strategic Intelligence: {ticker}",
-            description=intel_payload,
-            color=color
-        )
-        embed.set_footer(text="Data Link Status: Twelve Data Enterprise Tier | Rockefeller Guard Loop Verified")
+        embed = discord.Embed(title=f"📊 {ticker}", description=desc, color=color)
+        embed.set_footer(text="Tradier · SentiSense · Twelve Data  |  For research only — not financial advice.")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     except Exception as e:
-        logger.error(f"Critical failure during /query execution: {e}")
-        await interaction.followup.send("Ecosystem structural fault. The API layer timed out. Please try again.", ephemeral=True)
+        logger.error(f"/query {ticker} critical failure: {e}")
+        await interaction.followup.send(
+            "API timeout or data error — try again in a moment.", ephemeral=True
+        )
+
 
 @bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    logger.error(f"Global Command Error: {error}")
+async def on_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    logger.error(f"Command error: {error}")
     if not interaction.response.is_done():
-        await interaction.response.send_message("An unexpected structural error occurred processing this command.", ephemeral=True)
+        await interaction.response.send_message("Unexpected error.", ephemeral=True)
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        logger.critical("Discord Bot Token missing from .env file.")
+        logger.critical("DISCORD_BOT_TOKEN missing from .env")
     else:
-        logger.info("Initializing Rockefeller /query Terminal...")
+        logger.info("Starting /query bot...")
         bot.run(DISCORD_BOT_TOKEN)
