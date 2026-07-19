@@ -1326,6 +1326,17 @@ class TQQQTacticalSniper:
         except Exception:
             pass  # DB unavailable — scorer continues without this signal
 
+        # ── VIXY GATE — distribution suppressor ──────────────────────────────
+        # Low VIXY (z < 0) on a red day = orderly selling, not capitulation.
+        # Capitulation requires fear. Without fear, the CALL desk should not fire.
+        # Three-signal distribution flag: calm VIXY + bearish MACD + below EMA21
+        # is the exact pattern of a distribution move, not a fear bottom.
+        is_distribution = (vix_z < 0.0 and macd_hist < 0 and ema21_pct < 0)
+        if is_distribution:
+            b = max(0, b - 20)   # hard dampen — prevents a false 55+ from squeaking through
+        elif vix_z < 0.0:
+            b = max(0, b - 10)   # single-condition calm: partial dampen
+
         bottom_score = min(b, 100)
 
         # ── TOP SCORE ──────────────────────────────────────────────────────────

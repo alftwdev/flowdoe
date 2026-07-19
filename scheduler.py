@@ -71,7 +71,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -258,7 +258,7 @@ def main():
                 if vix_z < -0.75:
                     premium_env = "SUPPRESSED — Low relative premium, avoid naked shorts. Prefer debit structures."
                 elif vix_z < 0.75:
-                    premium_env = "BALANCED — Moderate IV. Credit spreads and iron condors viable."
+                    premium_env = "BALANCED — Moderate IV. Wheel CSPs and covered calls viable."
                 else:
                     premium_env = "RICH — Elevated IV. Premium sellers have statistical edge today."
 
@@ -1049,7 +1049,7 @@ def main():
                         f"┣ 30D Historical Volatility (HV30): `{asset['hv']}%`\n"
                         f"┣ Front-Month Implied Volatility (IV): `{asset['iv']}%`\n"
                         f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` vol variance\n"
-                        f"Edge: Selling credit (spreads, iron condors, covered calls) statistically favored.\n\n"
+                        f"Edge: Selling premium (CSPs, covered calls) statistically favored.\n\n"
                     )
                 send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL | IV Crush Scanner", payload, 0xf1c40f)
                 iv_dispatched = True
@@ -1095,13 +1095,13 @@ def main():
 
                 if vix_z < -0.75:
                     vix_env = "LOW RELATIVE VOLATILITY"
-                    vix_detail = "Premium sellers in a drought. Prefer debit spreads or condors."
+                    vix_detail = "Premium sellers in a drought. Wait for IV expansion before wheeling."
                 elif vix_z < 0.75:
                     vix_env = "MODERATE VOLATILITY"
                     vix_detail = "Balanced premium. Credit spreads statistically favorable."
                 else:
                     vix_env = "ELEVATED VOLATILITY"
-                    vix_detail = "Rich premium. Ideal for iron condors & covered calls."
+                    vix_detail = "Rich premium. Ideal for CSPs and covered calls — wheel conditions optimal."
 
                 gex_state = gex.get("market_state", "UNKNOWN")
                 flip = gex.get("flip_strike", 0.0)
@@ -1490,47 +1490,6 @@ def main():
                 logger.info(f"store_daily_iv: stored={stored} skipped={skipped}")
             except Exception as e:
                 logger.error(f"store_daily_iv failed: {e}")
-
-        # ── SPX 0DTE INCOME — defined-risk iron condor scout → #options-wheel ──
-        elif args.mode == "spx_income":
-            try:
-                from tradier_client import TradierClient
-                tc = TradierClient()
-
-                # Gate: VIXY z-score < 0.5 + SPY breadth > 60% (low-vol only)
-                vixy_price, vixy_z = engine.fetch_vixy_proxy()
-                snap = engine._gather_cross_asset_snapshot()
-                breadth = snap.get("breadth", 0.5)
-
-                if vixy_z >= 0.5:
-                    logger.info(f"SPX income: gated — VIXY z {vixy_z:+.2f}σ (need < 0.5). No dispatch.")
-                elif breadth < 0.60:
-                    logger.info(f"SPX income: gated — breadth {breadth:.0%} (need > 60%). No dispatch.")
-                else:
-                    condor = tc.get_spx_0dte_condor(wing_width=5, target_delta=0.10)
-                    if not condor.get("valid"):
-                        logger.info(f"SPX income: {condor.get('reason','no valid condor')}")
-                    else:
-                        rr = condor["rr_ratio"]
-                        payload = (
-                            f"**SPX 0DTE Iron Condor Scout**\n"
-                            f"┣ Expiration: {condor['expiration']} (0DTE)\n"
-                            f"┣ Call side: Sell {condor['call_sell']:.0f} / Buy {condor['call_buy']:.0f}\n"
-                            f"┣ Put side:  Sell {condor['put_sell']:.0f} / Buy {condor['put_buy']:.0f}\n"
-                            f"┣ Credit: ${condor['credit']:.2f} (${condor['credit_dollars']} per spread)\n"
-                            f"┣ Max risk: ${condor['max_risk']:.0f} | R:R = 1:{rr}\n"
-                            f"┣ Gate: VIXY z {vixy_z:+.2f}σ ✅ | Breadth {breadth:.0%} ✅\n"
-                            f"┗ Defined risk — max loss is the wing width minus credit collected.\n"
-                            f"─────────────────────────\n"
-                            f"4 Pillars: Cash Flow play — premium expires worthless if SPX stays between wings.\n"
-                            f"Not financial advice — educational/informational only."
-                        )
-                        color = 0x2ecc71 if rr <= 3 else 0xf1c40f
-                        if WEBHOOK_OPTIONS:
-                            send_essentials_embed(WEBHOOK_OPTIONS, "SPX Income | 0DTE Condor", payload, color)
-                            logger.info(f"SPX income condor dispatched: credit ${condor['credit']:.2f}, R:R 1:{rr}")
-            except Exception as e:
-                logger.error(f"SPX income mode failed: {e}")
 
         # ── CEF PREMIUM Z-SCORE CALIBRATION — 22:30 UTC daily ────────────────
         # Pulls 252-day premium history from CEFConnect and updates monitor.py's
