@@ -73,6 +73,35 @@ LEAP_PUT_SYMBOL = "QQQ"        # puts on QQQ — TQQQ puts have brutal theta + t
 CYCLE_BOTTOM_THRESHOLD = 55    # bottom_score >= this unlocks CALL desk
 CYCLE_TOP_THRESHOLD = 55       # top_score >= this unlocks PUT desk
 
+# ── Seasonal size scalars for LEAP CALL desk (12-month calendar) ──────────────
+# Based on historical QQQ/TQQQ drawdown/rally patterns — bakes seasonal edge
+# into the entry embed as a size guidance note, not a hard gate.
+# PUT desk inverts: reduce when CALL increases, increase when CALL reduces.
+_LEAP_SEASONAL = {
+    1:  (1.25, "Jan — post-tax selling ends: accumulation zone, size up 25%"),
+    2:  (1.00, "Feb — neutral"),
+    3:  (0.50, "Mar — seasonal weakness: reduce CALL size 50%, wait 3+ green days"),
+    4:  (0.75, "Apr — pre-May caution: reduce 25%, watch for early exhaustion"),
+    5:  (0.50, "May — sell-in-May watch: reduce CALL size 50%"),
+    6:  (1.00, "Jun — neutral, mid-year rebalance complete"),
+    7:  (1.00, "Jul — neutral, summer rally potential"),
+    8:  (0.75, "Aug — summer chop: reduce 25%, require 3-day confirmation"),
+    9:  (0.50, "Sep — seasonal weakness: reduce CALL size 50%, wait 3+ green days"),
+    10: (1.25, "Oct — historically best CALL entry month: size up 25%"),
+    11: (1.00, "Nov — post-tax selling ends, year-end rally watch"),
+    12: (1.00, "Dec — Santa rally seasonality: neutral to slightly bullish"),
+}
+
+
+def get_leap_seasonal_params(month: int = None) -> tuple:
+    """
+    Returns (size_scalar, note) for the given month (defaults to current).
+    size_scalar: multiply normal position by this (0.50 = half size, 1.25 = 25% larger).
+    """
+    if month is None:
+        month = datetime.now().month
+    return _LEAP_SEASONAL.get(month, (1.0, "neutral"))
+
 
 def is_market_hours():
     """Returns True only during NYSE RTH (09:30–16:00 ET, Mon–Fri)."""
@@ -1734,7 +1763,9 @@ class TQQQTacticalSniper:
             f"TQQQ @ `${leap_setup['tqqq_spot']:.2f}` | Buy Time on the Pullback\n"
             f"┣ 🎯 BTO LEAP: {contract_line}\n"
             + delta_line + cost_line + liquidity_line + bs_block + breakeven_block
-            + "┣ Sizing: Max 2-3% of portfolio (TQQQ 3× leveraged = leverage on leverage)\n"
+            + f"┣ Sizing: Max 2-3% of portfolio (TQQQ 3× leveraged = leverage on leverage)"
+            + (f" | Seasonal scalar `{get_leap_seasonal_params()[0]:.2f}×` — {get_leap_seasonal_params()[1]}\n"
+               if get_leap_seasonal_params()[0] != 1.0 else "\n")
             + tranche_note
             + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
             "┣ Stop: −30% underlying move → reassessment alert (review thesis, not auto-close)\n"
@@ -2124,7 +2155,10 @@ class TQQQTacticalSniper:
             f"QQQ @ `${put_setup['qqq_spot']:.2f}` | Buy Time on the Extension\n"
             f"┣ 🎯 BTO LEAP PUT: {contract_line}\n"
             + delta_line + cost_line + liquidity_line
-            + "┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)\n"
+            + (f"┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)"
+               f" | Seasonal scalar `{1/max(get_leap_seasonal_params()[0],0.5):.2f}×` (PUT desk inverts CALL scalar)\n"
+               if get_leap_seasonal_params()[0] != 1.0 else
+               "┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)\n")
             + tranche_note
             + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
             "┣ Stop: −30% underlying move (QQQ continues UP) → reassessment (review thesis)\n"

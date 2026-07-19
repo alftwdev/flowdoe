@@ -1400,7 +1400,36 @@ def compute_cornerstone_reports():
         if TIER_RANK["ELEVATED"] > TIER_RANK.get(worst_tier, 0):
             worst_tier = "ELEVATED"
 
-    return full_report, worst_tier
+    # ── Margin carry spread (Strategy 1 health check) ─────────────────────────
+    # Blended Tier 2 yield (MLPI ~15% + TDAQ ~14% + KQQQ ~15% + MAIN ~8%) ÷ 4 = ~13%
+    # Actual E*TRADE margin rate tracks FEDFUNDS + ~1.25% spread; use whichever is higher.
+    _TIER2_BLENDED = 13.0
+    try:
+        from analytics import HighFidelityAnalyticsEngine as _AE
+        _snap = _AE().fetch_fred_macro_snapshot()
+        _fedfunds = float(_snap.get("fedfunds") or margin_rate)
+        _est_margin = max(margin_rate, _fedfunds + 1.25)
+    except Exception:
+        _est_margin = margin_rate
+    carry_spread = round(_TIER2_BLENDED - _est_margin, 2)
+    spread_icon = "✅" if carry_spread >= 5.0 else ("⚠️" if carry_spread >= 2.0 else "🚨")
+    full_report += (
+        f"\n\n{spread_icon} **Margin Carry:** Tier 2 `{_TIER2_BLENDED:.1f}%` − margin `{_est_margin:.2f}%`"
+        f" = `{carry_spread:+.1f}%` spread"
+        + (" — COMPRESSING, monitor rate" if carry_spread < 5.0 else "")
+    )
+    # Persist for cross-script reads (market_analysis, personal scorecard)
+    try:
+        db.update_state("carry_spread_data", {
+            "date": __import__("datetime").date.today().isoformat(),
+            "spread": carry_spread,
+            "margin_rate": _est_margin,
+            "tier2_yield": _TIER2_BLENDED,
+        })
+    except Exception:
+        pass
+
+    return full_report, worst_tier, carry_spread
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALERT DISPATCHER — Discord + Pushover + Personal Email + Work Email
@@ -1537,7 +1566,7 @@ def send_daily_pulse(is_test=False):
     except Exception as e:
         logger.error(f"Cornerstone ledger sweep failed: {e}")
 
-    full_report, worst_tier = compute_cornerstone_reports()
+    full_report, worst_tier, carry_spread = compute_cornerstone_reports()
 
     # SPY GEX macro context — fires as its own bite-size embed BEFORE the CLM/CRF flowstate.
     # Kept separate so the main flowstate stays clean and readable on mobile.
@@ -1572,6 +1601,36 @@ def send_daily_pulse(is_test=False):
     dispatch_cornerstone_alert(title, full_report, color)
     db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
 
+    # ── Carry spread Pushover alert (once per day when compressed) ────────────
+    # Fires separately from the main cornerstone so it arrives as a distinct notification.
+    if carry_spread < 5.0:
+        _carry_alert_key = f"carry_spread_alert_{__import__('datetime').date.today().isoformat()}"
+        if not db.get_state(_carry_alert_key):
+            db.update_state(_carry_alert_key, True)
+            _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+            _p_usr = os.getenv("PUSHOVER_USER_KEY")
+            if _p_tok and _p_usr:
+                try:
+                    _carry_data = db.get_state("carry_spread_data") or {}
+                    _msg = (
+                        f"Carry spread compressed to {carry_spread:+.1f}%\n"
+                        f"Tier 2 yield {_carry_data.get('tier2_yield', 13.0):.1f}% "
+                        f"vs margin {_carry_data.get('margin_rate', margin_rate):.2f}%\n"
+                        + ("CRITICAL: spread near zero — pause new margin draws" if carry_spread < 2.0
+                           else "WARNING: positive carry shrinking — monitor rate")
+                    )
+                    requests.post(
+                        "https://api.pushover.net/1/messages.json",
+                        data={"token": _p_tok, "user": _p_usr,
+                              "title": "⚠️ MARGIN CARRY ALERT",
+                              "message": _msg,
+                              "priority": 1 if carry_spread < 2.0 else 0},
+                        timeout=10,
+                    )
+                    logger.info(f"Carry spread Pushover alert fired: {carry_spread:+.1f}%")
+                except Exception as _e:
+                    logger.warning(f"Carry spread Pushover failed: {_e}")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTINUOUS ESCALATION LOOP (every 5 min, tier-transition debounced)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1584,7 +1643,7 @@ def check_and_escalate_if_critical():
     does not re-spam; only worsening (ELEVATED → CRITICAL) re-fires.
     3-notification rule enforced via can_broadcast().
     """
-    full_report, worst_tier = compute_cornerstone_reports()
+    full_report, worst_tier, _carry = compute_cornerstone_reports()
     current_rank = TIER_RANK.get(worst_tier, 0)
     prev_rank    = int(db.get_state("cornerstone_alert_tier_rank", 0))
 

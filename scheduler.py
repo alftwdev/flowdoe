@@ -71,7 +71,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate", "mlpi_entry"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "spx_income", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -684,6 +684,36 @@ def main():
                     except Exception:
                         pass
 
+                    # ── Earnings proximity check for THIS open position ──────────
+                    # Entry scanner (Module 5) guards new entries; this guards existing holds.
+                    try:
+                        if tc_wheel.api_key:
+                            earn_check = tc_wheel.get_earnings_proximity([pos["symbol"]], days_ahead=30)
+                            pos_earn   = earn_check.get(pos["symbol"])
+                            if pos_earn and pos_earn.get("flag") in ("FORCE_CLOSE", "REVIEW"):
+                                _earn_key = f"wheel_earn_{pos['id']}_{pos_earn.get('date','')}"
+                                if not engine.db.get_state(_earn_key):
+                                    engine.db.update_state(_earn_key, True)
+                                    _days_e = pos_earn.get("days_to_earnings", 0)
+                                    _flag_e = pos_earn["flag"]
+                                    _earn_payload = (
+                                        f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
+                                        f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
+                                        f"┣ 📅 Earnings: `{pos_earn.get('date','?')}` — `{_days_e}d` away\n"
+                                        f"┣ Premium held: `${pos['premium_collected']:.2f}` × {pos['contracts']} contracts\n"
+                                        f"┗ {'🔴 **CLOSE NOW** — earnings within 7 days, IV crush risk' if _flag_e == 'FORCE_CLOSE' else '🟡 **REVIEW** — no new entries on this name, monitor strike distance'}"
+                                    )
+                                    _earn_color = 0xe74c3c if _flag_e == "FORCE_CLOSE" else 0xf1c40f
+                                    if WEBHOOK_INCOME:
+                                        send_essentials_embed(
+                                            WEBHOOK_INCOME,
+                                            "⚠️ EARNINGS WARNING | Open Wheel Position",
+                                            _earn_payload, _earn_color,
+                                        )
+                                        logger.info(f"Earnings warning fired: {pos['symbol']} earn {pos_earn.get('date')} ({_flag_e})")
+                    except Exception as _ee:
+                        logger.warning(f"Earnings check for open position {pos['symbol']} failed: {_ee}")
+
                     if alert_dte is not None:
                         dte_payload = (
                             f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
@@ -784,8 +814,28 @@ def main():
                 except Exception as _e:
                     logger.warning(f"wheel_candidates_snapshot write failed: {_e}")
 
+                # ── Kelly position size footer (shared across all candidates) ──
+                # Reads PORTFOLIO_VALUE_APPROX from .env (user updates periodically).
+                # Falls back to a prompt if not set — no crash, no wrong numbers.
+                kelly_footer = ""
+                try:
+                    _port_val = float(os.getenv("PORTFOLIO_VALUE_APPROX", "0") or "0")
+                    _real_vix = engine.fetch_real_vix() or 20.0
+                    if _port_val > 0 and high_count > 0:
+                        _kelly = engine.kelly_position_size(_port_val, _real_vix)
+                        _using = "empirical" if _kelly["using_empirical"] else f"bootstrap prior ({_kelly['sample_trades']} trades)"
+                        kelly_footer = (
+                            f"\n\n📐 **Kelly Sizing** (per underlying, {_using})\n"
+                            f"┣ Win rate: `{_kelly['win_rate']:.0%}` | VIX scalar: `{_kelly['vix_scalar']:.2f}×`\n"
+                            f"┗ Max per position: `${_kelly['position_dollars']:,.0f}` ({_kelly['position_pct']:.1f}% of `${_port_val:,.0f}` portfolio)"
+                        )
+                    elif _port_val == 0:
+                        kelly_footer = "\n\n📐 Set `PORTFOLIO_VALUE_APPROX` in .env for Kelly sizing guidance."
+                except Exception as _ke:
+                    logger.debug(f"Kelly sizing footer failed: {_ke}")
+
                 if WEBHOOK_INCOME:
-                    send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL CANDIDATES | Social + IV Convergence", candidates_payload, 0x3498db)
+                    send_essentials_embed(WEBHOOK_INCOME, "🎡 WHEEL CANDIDATES | Social + IV Convergence", candidates_payload + kelly_footer, 0x3498db)
                     logger.info(f"Wheel candidates social+IV dispatched: {high_count} HIGH entries, {len(candidate_lines)} total.")
             except Exception as e:
                 logger.error(f"Wheel candidates social+IV post failed: {e}")
@@ -1299,6 +1349,40 @@ def main():
                         f"Extreme Greed Streak: `{streak}d`\n"
                         f"┗ Smart Money: {sm_div}\n\n"
                     )
+
+                    # ── Tier 3 exit Pushover alert (Pushover only, weekly dedup) ──
+                    # Triggers when all three exit conditions converge:
+                    #   BTC dominance < 40% (alt-season peak) AND
+                    #   Extreme Greed streak >= 3 days AND
+                    #   cycle top score >= 80 (system confirms overbought)
+                    if ct_score >= 80 and dom < 40.0 and streak >= 3:
+                        _exit_week = datetime.now().strftime("%Y-W%W")
+                        _exit_key  = f"tier3_exit_alert_{_exit_week}"
+                        if not engine.db.get_state(_exit_key):
+                            engine.db.update_state(_exit_key, True)
+                            _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                            _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                            if _p_tok and _p_usr:
+                                try:
+                                    import requests as _req
+                                    _req.post(
+                                        "https://api.pushover.net/1/messages.json",
+                                        data={
+                                            "token": _p_tok, "user": _p_usr,
+                                            "title": "🔴 TIER 3 EXIT SIGNAL",
+                                            "message": (
+                                                f"Cycle top score {ct_score}/100\n"
+                                                f"BTC dominance {dom:.1f}% (<40%)\n"
+                                                f"Extreme Greed {streak}d streak\n"
+                                                "Action: exit BITA/YBTC — rotate cash to margin paydown"
+                                            ),
+                                            "priority": 1,
+                                        },
+                                        timeout=10,
+                                    )
+                                    logger.info(f"Tier 3 exit Pushover fired — score {ct_score}, dom {dom:.1f}%, streak {streak}d")
+                                except Exception as _pe:
+                                    logger.warning(f"Tier 3 exit Pushover failed: {_pe}")
                 except Exception as e:
                     logger.warning(f"Crypto cycle top score failed: {e}")
 
@@ -1552,6 +1636,114 @@ def main():
                         logger.info(f"MLPI entry: conditions not met — {' | '.join(conds)}")
             except Exception as e:
                 logger.error(f"mlpi_entry mode failed: {e}")
+
+        elif args.mode == "personal_scorecard":
+            # ── PERSONAL SCORECARD → Pushover ONLY (never Discord) ────────────
+            # Weekly snapshot of all 3 strategy pillars. Financial data stays private.
+            # Designed to run Sundays at 18:00 HST (PA cron: 04:00 UTC Monday).
+            # All data sourced from DB — zero new API calls.
+            try:
+                from datetime import date as _date
+                today_s = _date.today().isoformat()
+
+                # ── Strategy 1: CLM/CRF Carry Health ──────────────────────────
+                carry_raw = engine.db.get_state("carry_spread_data") or {}
+                carry_sp  = carry_raw.get("spread")
+                carry_mr  = carry_raw.get("margin_rate")
+                carry_t2  = carry_raw.get("tier2_yield")
+                carry_dt  = carry_raw.get("date", "N/A")
+                carry_icon = "✅" if carry_sp and carry_sp >= 5.0 else ("⚠️" if carry_sp and carry_sp >= 2.0 else "🚨")
+                carry_line = (
+                    f"{carry_icon} Carry: {carry_t2:.1f}% − {carry_mr:.2f}% = {carry_sp:+.1f}% ({carry_dt})"
+                    if carry_sp is not None else "Carry: data pending"
+                )
+
+                # CLM/CRF z-scores from DB (monitor.py writes these)
+                clm_z = engine.db.get_state("clm_premium_z") or "N/A"
+                crf_z = engine.db.get_state("crf_premium_z") or "N/A"
+                hy    = engine.db.get_state("hy_spread_cached") or "N/A"
+                try: hy_str = f"{float(hy):.2f}%"
+                except Exception: hy_str = str(hy)
+
+                strat1 = (
+                    f"STRATEGY 1 — CLM/CRF SNOWBALL\n"
+                    f"  {carry_line}\n"
+                    f"  CLM z-score: {clm_z} | CRF z-score: {crf_z}\n"
+                    f"  HY spread: {hy_str}"
+                )
+
+                # ── Strategy 2: Wheel Performance ─────────────────────────────
+                open_pos   = engine.db.get_open_wheel_positions() or []
+                total_prem = engine.db.get_total_premium_collected() or 0.0
+                try:
+                    dist = engine.db.get_wheel_outcome_distribution(lookback_days=90) or []
+                    wins = sum(d["count"] for d in dist if d["outcome"] in ("CLOSED", "EXPIRED"))
+                    total_closed = sum(d["count"] for d in dist)
+                    win_rate_str = f"{wins/total_closed:.0%}" if total_closed > 0 else "N/A"
+                except Exception:
+                    wins, total_closed, win_rate_str = 0, 0, "N/A"
+
+                ivr_accum = engine.db.get_state("iv_daily_count") or "building"
+                kelly_val = ""
+                try:
+                    _pv = float(os.getenv("PORTFOLIO_VALUE_APPROX", "0") or "0")
+                    _rv = engine.fetch_real_vix() or 20.0
+                    if _pv > 0:
+                        _k = engine.kelly_position_size(_pv, _rv)
+                        kelly_val = f"\n  Kelly size: ${_k['position_dollars']:,.0f} ({_k['position_pct']:.1f}%) | VIX scalar {_k['vix_scalar']:.2f}×"
+                except Exception:
+                    pass
+
+                strat2 = (
+                    f"STRATEGY 2 — WHEEL\n"
+                    f"  Open positions: {len(open_pos)}\n"
+                    f"  Total premium collected (all-time): ${total_prem:,.2f}\n"
+                    f"  90-day win rate: {win_rate_str} ({wins}/{total_closed} closed){kelly_val}\n"
+                    f"  IVR history: {ivr_accum} trading days stored"
+                )
+
+                # ── Strategy 3: TQQQ Cycle Posture ────────────────────────────
+                bottom = int(engine.db.get_state("tqqq_bottom_score") or 0)
+                top    = int(engine.db.get_state("tqqq_top_score")    or 0)
+                bias   = (engine.db.get_state("market_analysis_bias") or {})
+                bias_l = bias.get("label", "NEUTRAL") if isinstance(bias, dict) else "NEUTRAL"
+                real_v = engine.fetch_real_vix() or "N/A"
+                from tqqq import get_leap_seasonal_params as _gsp
+                _scalar, _seas_note = _gsp()
+                strat3 = (
+                    f"STRATEGY 3 — TQQQ LEAP DESK\n"
+                    f"  Bottom score: {bottom}/100 | Top score: {top}/100\n"
+                    f"  Daily bias: {bias_l} | VIX: {real_v:.1f}\n"
+                    f"  Seasonal: {_seas_note}"
+                )
+
+                # ── Carry spread alert flag ────────────────────────────────────
+                alert_note = ""
+                if carry_sp is not None and carry_sp < 5.0:
+                    alert_note = f"\n⚠️ CARRY SPREAD COMPRESSED ({carry_sp:+.1f}%) — review margin draw pace"
+
+                msg = f"{strat1}\n\n{strat2}\n\n{strat3}{alert_note}"
+
+                _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                if _p_tok and _p_usr:
+                    import requests as _rq
+                    _rq.post(
+                        "https://api.pushover.net/1/messages.json",
+                        data={
+                            "token": _p_tok, "user": _p_usr,
+                            "title": f"📊 Personal Scorecard — {today_s}",
+                            "message": msg,
+                            "priority": 0,
+                        },
+                        timeout=15,
+                    )
+                    logger.info("Personal scorecard dispatched via Pushover.")
+                else:
+                    logger.warning("Personal scorecard: PUSHOVER_API_TOKEN or PUSHOVER_USER_KEY not set.")
+
+            except Exception as e:
+                logger.error(f"personal_scorecard mode failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")
