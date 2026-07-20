@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Jul 15 2026*
+*Last updated: Jul 19 2026*
 
 ---
 
@@ -44,6 +44,20 @@ $500/wk auto-deposit + monthly W2 surplus (Simplifi by Quicken monitors leftover
 - CEF premium compression (fast intra-session collapse)
 - VIXY crisis overlay (market vol spike = CEF premium risk)
 - Live HY credit spread from FRED (not hardcoded — reacts to real credit stress)
+- **NAV Determination Month gate** (October = Cornerstone Board locks next year's distribution rate; heightened sensitivity all month)
+- **CEF institutional exit detector** (high lit-market volume + SPY flat = institutions exiting the distribution reset — the Feb 2026 crash pattern)
+- **Distribution yield floor** (fair value = annual_dist / 0.19; price > FV×1.10 = overvalued at new rate; price ≤ FV = accumulate zone. CLM 2026 FV: $7.51 | CRF 2026 FV: $7.28)
+
+**Distribution reset cycle — what to watch (learned from Jan–Feb 2026 CLM -15% crash while SPY +3.6%):**
+```
+Phase 1 — NAV Peak (Oct 8): market priced CLM at premium before Board locked lower NAV
+Phase 2 — Quiet Signal (Oct 14, Nov 13-17): 5–6M vol spikes on flat SPY = inst. distribution
+Phase 3 — Trap Rally (Jan 2–14): new-year income buyers push to NEW HIGH ($8.51) on old rate
+Phase 4 — Capitulation (Feb 13–19): 9.8M shares Feb 18 while SPY +0.5% — CEF-specific flush
+Bottom = $7.23 = fair value at 19% yield on new $0.1189/mo distribution
+Rebuy zone: price ≤ $7.51 (CLM) / $7.28 (CRF) → yield ≥ 19% → structural income buyer support
+```
+All three new signals in monitor.py fire as conditional lines in the #cornerstone pulse embed.
 
 **Guardrails:**
 - Margin never exceeds 25% of portfolio value
@@ -89,9 +103,11 @@ Stock price > $100 OR margin is tight            → put credit spread instead
   → No assignment path (defined max loss = spread width minus credit)
   → Stop-loss: close if spread value = 2× credit collected
   → Never roll if you'd pay a debit to do so — just close and move on
-Iron condor: only AFTER put side has decayed 75%+ AND stock has moved favorably
-             → add call credit spread above current price, conservative delta (0.15–0.20)
 ```
+
+**Iron condors are NOT part of this strategy and have been removed from all scripts.**
+The system sells CSPs and covered calls only. Iron condors were purged from scheduler.py,
+tradier_client.py, and market_scheduler.py (Jul 19 2026). Do not re-introduce them.
 
 Credit spreads were the personal strategy that funded retirement before this system.
 That edge is preserved as a tool, not expanded into a competing engine. The CLM/CRF
@@ -230,7 +246,8 @@ Margin freed → reborrow → buy more CLM/CRF or Tier 2
 - **DRIP at NAV:** shares issued below market price = built-in alpha
 - **Rights Offering dodge:** Sell 99% on N-2 detection → buy back post-offering dip → net more shares than participants
 - **Timed DCA months:** March and September (seasonal weakness = accumulation zones)
-- **Annual distributions:** CLM $0.1215/share | CRF $0.1176/share (2026 reset)
+- **Annual distributions:** CLM $0.1189/share | CRF $0.1152/share (2026 reset — decreased from $0.1224/$0.1176 due to lower Oct 2025 NAV lock)
+- **2026 fair-value floor:** CLM $7.51 | CRF $7.28 (at 19% yield target — accumulate at or below these prices)
 
 ### Tier 2 — Margin Accelerators (cash dividends only, NO DRIP)
 | Ticker | Type | Yield | Frequency | Role |
@@ -339,6 +356,27 @@ SPY P/C z-score (15pts), VIX term structure (12pts), CNN F&G (10pts), SMA200 (5p
 P/C ratio scored on 30-day rolling z-score (raw SPY ratio is structurally ~1.5+ due to institutional hedging — raw number is meaningless alone).
 VIX term structure via VIXY/VXZ ETF proxies (VIX9D/VIX3M unavailable at Twelve Data tier).
 **Actual VIX (FRED VIXCLS)** also fetched and shown in embed to confirm VIXY proxy reading.
+
+**VIXY Distribution Gate (added Jul 19 2026 — prevents false CALL entries):**
+```
+Three-signal distribution flag: VIXY z < 0 AND MACD bearish AND QQQ below EMA21
+  → bottom_score − 20 (hard dampen — orderly selloff, not capitulation)
+Single-condition calm: VIXY z < 0 only
+  → bottom_score − 10 (partial dampen)
+```
+Root cause: Jul 17 2026 signal fired on VIXY z = −1.38σ (calm) + bearish MACD + below EMA21.
+The embed correctly labeled it "distribution, not capitulation" but the scorer still crossed 55.
+The gate enforces what the embed was already saying. Genuine fear (VIXY z ≥ +1.5σ) unaffected.
+**Rule: CALL desk requires actual fear (elevated VIXY), not just a red day.**
+
+**12-Month Seasonal LEAP Calendar** (added Jul 19 2026):
+```python
+# CALL desk size scalars (PUT desk inverts automatically via 1/max(scalar, 0.5))
+Jan: +25%  Feb: neutral  Mar: −50%  Apr: −25%  May: −50%
+Jun: neutral  Jul: neutral  Aug: −25%  Sep: −50%  Oct: +25%  Nov: neutral  Dec: neutral
+```
+Size scalar displayed in every LEAP embed. Mar/Sep/May = weakest entry months (wait for 3 green days).
+Jan/Oct = strongest CALL accumulation windows.
 
 **CLI flags:**
 - `--test-leap` — clears `tqqq_last_leap_signal_ts` to 0, fires CALL desk
@@ -551,16 +589,16 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | File | Status | Purpose |
 |------|--------|---------|
 | `audit.py` | ✅ Live | Daily DB maintenance — prunes stale alert locks (>24h), caps audit_logs at 500 rows, runs VACUUM. Runs once/day at 09:39 UTC via cron. |
-| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Live HY spread via FRED (cached daily). |
+| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Live HY spread via FRED (cached daily). New Jul 19: NAV determination month gate (Oct), CEF institutional exit detector (high vol + flat SPY), distribution yield floor (FV at 19% yield target). All zero extra API calls. |
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
 | `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives |
 | `essentials_tools.py` | ✅ Live | Discord embed senders, chart generators |
 | `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 0800 HST morning brief + 10:20 HST intraday pulse + 13:40 HST EOD recap → #market-analysis. 8-flag bias scorer (BULLISH/NEUTRAL/BEARISH). Synthesizes FRED + VIXY + SPY/QQQ + F&G + CLM/CRF z-score + TQQQ cycle + wheel positions. |
 | `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/spx_income/cef_calibrate/mlpi_entry. Removed: `gex` and `options_flow`. wheel_signals: VIX-adjusted params (Module 4) + earnings proximity (Module 5). crypto_social: cycle top score. trending_plays: SS leaderboard as 4th source. mlpi_entry: XLE/MLPI dip signal → Pushover + Discord. |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/cef_calibrate/mlpi_entry/personal_scorecard. Removed: `gex`, `options_flow`, `spx_income` (iron condor — purged Jul 19). wheel_signals: VIX-adjusted params (Module 4) + earnings proximity on open positions (Module 5) + Kelly position size footer. crypto_social: cycle top score + Tier 3 exit Pushover (triple gate). trending_plays: SS leaderboard as 4th source. mlpi_entry: XLE/MLPI dip signal → Pushover + Discord. personal_scorecard: Pushover-only Sunday recap of all 3 strategies from DB. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
-| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Now writes bottom_score/top_score to DB for market_analysis.py. |
+| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Writes bottom_score/top_score to DB for market_analysis.py. New Jul 19: VIXY distribution gate (prevents false CALL entries on calm red days), 12-month seasonal size scalar for both desks. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
 | `seed_cef_premiums.py` | ✅ One-time tool | Run once on PA to seed CLM/CRF z-score mu/sigma from 252-day CEFConnect premium history. Replaces hardcoded defaults (mu=15, sigma=4) with empirical data. |
@@ -740,10 +778,12 @@ SENTISENSE_API_KEY=          # SentiSense — sentiment, trackers, congressional
 |----------|---------|------------|
 | Market crash -30% | Margin call, NAV drop | 25% margin cap survives 50%+ drop; TQQQ puts pay out |
 | Rights Offering | Share dilution | monitor.py fires → sell 99% → rebuy dip → net more shares |
-| Margin rate spike | Higher interest cost | Tier 2 divs absorb increase; reduce draw if rate > div yield |
+| Margin rate spike | Higher interest cost | Tier 2 divs absorb increase; carry spread alert fires if spread < 5% |
 | Dark pool exit | Unexplained price drop | detect_dark_pool_activity() flags low-vol price drops |
 | CEF premium collapse | Fast premium compression | detect_premium_compression() flags intra-session spread collapse |
 | Credit crunch | HY spread spike | FRED live spread → RO score reacts in real time (was hardcoded) |
+| Distribution cut (NAV reset) | Price drops -15% while SPY flat | Oct NAV gate + institutional exit detector + yield floor; all three layers fire before/during Feb-style crash |
+| False LEAP CALL entry | BTO on calm red day, not capitulation | VIXY distribution gate: calm z + bearish MACD + below EMA21 → score dampened by 20pts, CALL desk stays shut |
 
 ---
 
@@ -782,13 +822,32 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 - [x] Ex-div display line removed from daily pulse embed (✅ Jul 15)
 - [x] SentiSense Tracker API — reddit-picks / sentiment-movers / sentiment-leaderboard wired into analytics.py (✅ Jul 15)
 - [x] Reddit 403 fix — SentiSense reddit-picks tracker now primary source for WSB mentions (✅ Jul 15)
+- [x] `research_bot.py` upgraded — real Tradier IV/IVR, SentiSense sentiment, DB cycle scores for /query slash commands (✅ Jul 19)
+- [x] Strategy 1 hardening — carry spread alert (Tier 2 yield − margin rate; Pushover if < 5%), persisted to DB (✅ Jul 19)
+- [x] Strategy 2 hardening — earnings proximity on OPEN wheel positions (deduped per position+date), Kelly size footer in wheel candidates (✅ Jul 19)
+- [x] Strategy 3 hardening — VIXY distribution gate (prevents false CALL entries on calm red days), 12-month seasonal LEAP calendar, Tier 3 crypto exit Pushover (triple-gate) (✅ Jul 19)
+- [x] Personal scorecard — `scheduler.py --mode personal_scorecard`, Pushover-only Sunday recap, zero new API calls (✅ Jul 19)
+- [x] Iron condors purged — removed from scheduler.py, tradier_client.py, market_scheduler.py; strategy is BTO LEAP calls/puts + wheel CSPs/CCs only (✅ Jul 19)
+- [x] CLM/CRF distribution reset cycle signals — NAV determination month gate, CEF institutional exit detector (high vol + flat SPY), distribution yield floor; all wired into monitor.py RO score and pulse embed (✅ Jul 19)
+- [x] TQQQ false signal forensic analysis — Jul 17 2026 signal validated against actual CLM/CRF price history; VIXY gate confirmed working (✅ Jul 19)
 
-### Deployment Checklist (next PA session)
+### Weekly Audit Cadence (ongoing discipline)
+Capital is deployed and compounding. Each week, check for signals that slipped through:
+1. **Did any monitor.py signals fire?** — Review #cornerstone for any ELEVATED/CRITICAL events
+2. **Carry spread still ≥ 5%?** — Personal scorecard (Sunday Pushover) surfaces this
+3. **Open wheel positions clean?** — DTE countdown, any earnings within 21 days?
+4. **LEAP scorer calibrated?** — Did any CALL/PUT signals fire? Was VIXY elevated?
+5. **CLM/CRF at or below fair value?** — CLM $7.51 | CRF $7.28; accumulate if at or below
+6. **Is October approaching?** — NAV lock month; review premium and position size
+
+### Deployment Checklist (pending on PA)
 1. `git pull origin main` on PythonAnywhere
-2. Run `python seed_cef_premiums.py` once — seeds CLM/CRF z-score mu/sigma from CEFConnect
-3. Add `market_analysis.py` as 6th always-on task on PythonAnywhere
-4. Add `scheduler.py --mode mlpi_entry` to cron: 10:30 HST + 14:00 HST
-5. `market_scheduler.py` already wires `cef_calibrate` at 22:30 UTC — no cron change needed
+2. Restart `monitor.py` always-on task (picks up distribution reset signals + carry spread fix)
+3. Restart `tqqq.py` always-on task (picks up VIXY gate + seasonal calendar)
+4. Add `PORTFOLIO_VALUE_APPROX=<your_value>` to `.env` on PA (required for Kelly sizing + personal scorecard)
+5. Add `personal_scorecard` to PA cron: `0 4 * * 0 python scheduler.py --mode personal_scorecard` (Sundays 04:00 UTC = 18:00 HST)
+6. Run `python seed_cef_premiums.py` once if not already done — seeds CLM/CRF z-score mu/sigma
+7. Add `market_analysis.py` as 6th always-on task if not already done
 
 ### Data Infrastructure
 - [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline ~Aug 11, full 52-week rank after 252 trading days
@@ -821,22 +880,11 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 
 ### Gaps in the Current System
 
-**Gap 1 — market_analysis.py is the most critical missing piece**
-Every strategy depends on morning conviction. Without a structured 0800 HST brief that
-synthesizes #cornerstone + #futures + #crypto + macro into a single actionable posture,
-the data sits in separate channels and requires manual synthesis. Build this first.
+**Gap 1 — ✅ CLOSED** market_analysis.py built and live (✅ Jul 12)
 
-**Gap 2 — No earnings calendar awareness on wheel positions**
-The wheel scanner filters out earnings within 45 days, but there's no active alert
-when an earnings date approaches on an OPEN wheel position. A name can be safe at
-entry and then have earnings announced 2 weeks later. Add earnings proximity alert
-to `scheduler.py --mode wheel_signals` for open positions.
+**Gap 2 — ✅ CLOSED** Earnings proximity on open wheel positions live (✅ Jul 19)
 
-**Gap 3 — No position sizing calculator**
-The system knows what to buy but not how much. A Kelly Criterion-inspired sizer using
-win rate (from the accuracy ledger), average gain/loss, and current margin utilization
-would turn signal quality into a specific contract/share count. Reduces both
-under-sizing (leaving money on the table) and over-sizing (margin call risk).
+**Gap 3 — ✅ CLOSED** Kelly half-Kelly position sizer live in wheel candidates (✅ Jul 19)
 
 **Gap 4 — CLM/CRF premium z-score baseline needs more history**
 The z-score compares current premium to a rolling mean/sigma stored in DB. If the DB
@@ -852,11 +900,7 @@ cross-reference the VIX regime from `classify_vix_regime()` and either:
   - Reduce delta to 0.15 in ELEVATED/CRITICAL VIX (less probability of assignment)
   - Flag it explicitly in the signal output so the human can decide
 
-**Gap 6 — Crypto cycle has no exit signal**
-Tier 3 holdings (BITA, YBTC) are supposed to exit when the crypto cycle peaks, but
-there's no defined exit trigger. Add a structured exit rule: when BTC dominance drops
-below 40% AND F&G enters Extreme Greed for 3+ consecutive days AND funding rates
-annualize above 50%+ → Tier 3 exit signal fires to #market-analysis.
+**Gap 6 — ✅ CLOSED** Tier 3 crypto exit Pushover live: ct_score ≥ 80 AND BTC dom < 40% AND Extreme Greed streak ≥ 3d → weekly-deduped Pushover alert (✅ Jul 19)
 
 ### Ideas to Explore (Hardening, Not Scope Creep)
 
