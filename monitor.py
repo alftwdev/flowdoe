@@ -126,6 +126,7 @@ PREMIUM_RO_WATCH_THRESHOLD = 30.0
 ALERT_MAX_PER_SECTOR    = 3
 ALERT_COOLDOWN_HOURS    = 24
 MINOR_CHANGE_THRESHOLD  = 0.5  # price/score delta below this = minor, do not broadcast
+margin_rate             = 7.25  # E*TRADE benchmark margin rate (%)
 
 # RO composite score weights — N-2 SEC filing is the single highest-conviction signal.
 # EDGAR sources stack: multiple filings in the same cycle = multi-source conviction.
@@ -1124,7 +1125,6 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     annual_div = 1.4580 if ticker == "CLM" else 1.4112  # 2026 distribution profiles
     y_dist     = (annual_div / price) * 100 if price > 0 else 0
     y_nav      = (annual_div / nav)   * 100 if nav   > 0 else 0
-    margin_rate     = 7.25
     leverage_ratio  = 1.0
     s_net      = y_dist - (margin_rate * leverage_ratio)
     premium    = ((price - nav) / nav) * 100 if nav > 0 else 0
