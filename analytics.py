@@ -932,10 +932,15 @@ class HighFidelityAnalyticsEngine:
         "BTCI": ("NEOS", "Monthly"),      # Bitcoin
     }
 
-    def generate_new_income_etf_screener(self, min_yield_pct=10.0, min_trading_days=126):
+    def generate_new_income_etf_screener(self, min_yield_pct=10.0, min_trading_days=126, tickers=None):
         """
-        Module 3 — New/trending CC ETF screener across YieldMax, Roundhill, NEOS, TappAlpha
-        families (Kurv's only listed product, KQQQ, is already a Tier 2 holding — excluded here
+        Module 3 — CC ETF yield enricher. When `tickers` is provided (e.g. top-N from
+        scan_ccincome_social_buzz), only those symbols are screened — social buzz drives
+        discovery, this function adds yield/pay/AUM data. When `tickers` is None, falls
+        back to the full NEW_INCOME_ETF_UNIVERSE (original static behaviour).
+
+        Original static universe: YieldMax, Roundhill, NEOS, TappAlpha families
+        (Kurv's only listed product, KQQQ, is already a Tier 2 holding — excluded here
         to avoid duplicate coverage).
 
         Filters (Twelve Data only, no external screener):
@@ -951,9 +956,22 @@ class HighFidelityAnalyticsEngine:
         """
         results = []
         today = datetime.now()
-        quotes = self._fetch_twelve_data_quotes(list(self.NEW_INCOME_ETF_UNIVERSE.keys()))
 
-        for sym, (family, freq) in self.NEW_INCOME_ETF_UNIVERSE.items():
+        # Build the working universe: caller-supplied tickers take priority.
+        # For buzz-driven calls, map each symbol to its family/freq from the known universe
+        # (falling back to "Unknown"/"?") so the caller doesn't need to supply metadata.
+        if tickers is not None:
+            working_universe = {
+                sym: self.NEW_INCOME_ETF_UNIVERSE.get(sym, ("Unknown", "?"))
+                for sym in tickers
+                if sym  # guard against empty strings
+            }
+        else:
+            working_universe = self.NEW_INCOME_ETF_UNIVERSE
+
+        quotes = self._fetch_twelve_data_quotes(list(working_universe.keys()))
+
+        for sym, (family, freq) in working_universe.items():
             try:
                 q = quotes.get(sym, {})
                 spot = float(q.get("close", 0.0))

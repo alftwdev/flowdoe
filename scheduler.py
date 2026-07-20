@@ -424,119 +424,135 @@ def main():
             except Exception as e:
                 logger.error(f"Dividend wheel v2 segment failed: {e}")
 
-            # ── SEGMENT 2: NEW/TRENDING CC ETF SCREENER ────────────────────────
-            # YieldMax / Roundhill / NEOS / TappAlpha discovery feed — surfaces names worth
-            # adding to the wheel universe. Yield, age, and AUM filters all pull real data;
-            # nothing here is a static watchlist.
+            # ── SEGMENT 2: SOCIAL-FIRST CC ETF RADAR ─────────────────────────
+            # Flow: StockTwits buzz scan across full ~35-ticker CC ETF universe
+            # → top 3 by community activity → yield/AUM enrichment → single embed.
+            # Social discovery drives what surfaces; yield data confirms it's viable.
+            # Replaces the old static-watchlist screener + separate buzz embed.
             try:
-                new_etfs = engine.generate_new_income_etf_screener()
-                if new_etfs:
-                    state_str = "_".join(f"{e['symbol']}{e['ann_yield']}" for e in new_etfs[:8])
-                    if engine.db.track_and_limit_alerts(
-                        "new_income_etf_screener_daily", state_str,
-                        sum(e['ann_yield'] for e in new_etfs), max_broadcasts=2, threshold_pct=0.05
-                    ):
-                        # SentiSense sentiment for each ETF's underlying (not the ETF itself —
-                        # YieldMax/Roundhill ETFs aren't tracked directly; use the underlying ticker
-                        # the ETF is based on to gauge whether the strategy is in a good window).
-                        ss_map = {}
-                        try:
-                            import sentisense_client as ss
+                buzz_ranked = engine.scan_ccincome_social_buzz(top_n=10)  # wider net, yield filter narrows
+
+                if buzz_ranked:
+                    buzz_syms = [b["symbol"] for b in buzz_ranked]
+                    buzz_meta = {b["symbol"]: b for b in buzz_ranked}
+
+                    # Enrich with yield/pay/AUM — only buzz-surfaced tickers, not the full universe
+                    enriched = engine.generate_new_income_etf_screener(tickers=buzz_syms)
+
+                    # Primary sort: buzz score DESC. Tiebreaker: yield DESC.
+                    # StockTwits caps at 30 msgs/call so ties are common on high-activity days.
+                    buzz_scores = {b["symbol"]: b["buzz_score"] for b in buzz_ranked}
+                    enriched.sort(key=lambda x: (
+                        -buzz_scores.get(x["symbol"], 0),
+                        -x["ann_yield"]
+                    ))
+
+                    # Cap at top 3 that passed yield enrichment
+                    top3 = enriched[:3]
+
+                    if top3:
+                        state_str = "_".join(f"{e['symbol']}{e['ann_yield']}" for e in top3)
+                        if engine.db.track_and_limit_alerts(
+                            "new_income_etf_screener_daily", state_str,
+                            sum(e['ann_yield'] for e in top3), max_broadcasts=2, threshold_pct=0.05
+                        ):
+                            # SentiSense underlying sentiment enrichment
                             underlying_map = {
                                 "MSTY": "MSTR", "NVDY": "NVDA", "TSLY": "TSLA",
                                 "CONY": "COIN", "GOOY": "GOOGL", "AMDY": "AMD",
                                 "YMAX": "QQQ",  "XDTE": "SPY",  "QDTE": "QQQ",
                                 "RDTE": "IWM",  "QQQI": "QQQ",  "SPYI": "SPY",
-                                "BTCI": "BTC",  "MAGY": "META",
+                                "BTCI": "BTC",  "MAGY": "META",  "YMAG": "QQQ",
+                                "PLTY": "PLTR", "AMZY": "AMZN", "METY": "META",
+                                "JPMY": "JPM",  "FEPI": "SPY",  "SVOL": "VXX",
+                                "DIVO": "SPY",  "SCHD": "SPY",  "JEPI": "SPY",
+                                "JEPQ": "QQQ",  "XYLD": "SPY",  "QYLD": "QQQ",
+                                "RYLD": "IWM",
                             }
-                            for e in new_etfs[:8]:
-                                ul = underlying_map.get(e["symbol"])
-                                if ul and ul != "BTC":
-                                    sent = ss.get_sentiment(engine.db, ul)
-                                    if sent:
-                                        ss_map[e["symbol"]] = sent
-                        except Exception:
-                            pass
+                            ss_map = {}
+                            try:
+                                import sentisense_client as ss
+                                for e in top3:
+                                    ul = underlying_map.get(e["symbol"])
+                                    if ul and ul != "BTC" and ul != "VXX":
+                                        sent = ss.get_sentiment(engine.db, ul)
+                                        if sent:
+                                            ss_map[e["symbol"]] = sent
+                            except Exception:
+                                pass
 
-                        new_payload = ""
-                        for e in new_etfs[:8]:
-                            sent = ss_map.get(e["symbol"])
-                            ss_line = ""
-                            if sent:
-                                score_str = f"`{sent['score']:+.0f}` {sent['lean']}"
-                                ss_line = f"┣ Underlying sentiment: {score_str} ({sent['mentions']} mentions)\n"
-                            new_payload += (
-                                f"**{e['symbol']}** | {e['family']} | {e['freq']}\n"
-                                f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
-                                f"┣ Trading: `{e['trading_days']}` sessions | Next pay: `{e['next_ex_date']}`\n"
-                                f"{ss_line}"
-                                f"┗ Filters: yield >10% | pay freq confirmed | >6mo history\n\n"
+                            new_payload = ""
+                            for rank, e in enumerate(top3, 1):
+                                bz = buzz_meta.get(e["symbol"], {})
+                                buzz_score = bz.get("buzz_score", 0)
+                                msg_count  = bz.get("msg_count", 0)
+                                lean       = bz.get("lean", "")
+                                bull_pct   = bz.get("bull_pct", 0)
+                                lean_emoji = "🟢" if lean == "BULLISH" else ("🔴" if lean == "BEARISH" else "🟡")
+
+                                sent = ss_map.get(e["symbol"])
+                                ss_line = ""
+                                if sent:
+                                    ss_line = (
+                                        f"┣ Underlying ({underlying_map.get(e['symbol'], '?')}): "
+                                        f"`{sent['score']:+.0f}` {sent['lean']} ({sent['mentions']} mentions)\n"
+                                    )
+
+                                new_payload += (
+                                    f"**#{rank} {e['symbol']}** | {e['family']} | {e['freq']}\n"
+                                    f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
+                                    f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
+                                    f"┣ Next pay: `{e['next_ex_date']}`\n"
+                                    f"{ss_line}"
+                                    f"┗ Source: StockTwits community activity + yield filter >10%\n\n"
+                                )
+                            new_payload = new_payload.rstrip()
+
+                            if WEBHOOK_INCOME:
+                                send_essentials_embed(
+                                    WEBHOOK_INCOME,
+                                    "📡 CC INCOME RADAR | Top 3 by Community Buzz",
+                                    new_payload, 0x9b59b6
+                                )
+                                logger.info(f"Social-first CC ETF radar dispatched: top {len(top3)} by buzz.")
+
+                            # Cache top result for weekly scorecard income spotlight
+                            try:
+                                top_etf = top3[0]
+                                engine.db.update_state("cc_etf_spotlight_latest", {
+                                    "symbol":    top_etf["symbol"],
+                                    "family":    top_etf["family"],
+                                    "ann_yield": top_etf["ann_yield"],
+                                    "freq":      top_etf["freq"],
+                                    "spot":      top_etf["spot"],
+                                    "next_ex_date": top_etf["next_ex_date"],
+                                    "aum":       top_etf["aum"],
+                                    "buzz_score": buzz_meta.get(top_etf["symbol"], {}).get("buzz_score", 0),
+                                })
+                            except Exception as e:
+                                logger.warning(f"CC ETF spotlight cache write failed: {e}")
+                    else:
+                        # Buzz tickers didn't pass yield filter — fall back to yield-sorted static scan
+                        logger.info("Buzz tickers below yield threshold — falling back to static screener.")
+                        fallback = engine.generate_new_income_etf_screener()[:3]
+                        if fallback and WEBHOOK_INCOME:
+                            fb_payload = ""
+                            for e in fallback:
+                                fb_payload += (
+                                    f"**{e['symbol']}** | {e['family']} | {e['freq']}\n"
+                                    f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann.\n"
+                                    f"┣ Next pay: `{e['next_ex_date']}`\n"
+                                    f"┗ Source: yield-sorted fallback (no buzz signal today)\n\n"
+                                )
+                            send_essentials_embed(
+                                WEBHOOK_INCOME,
+                                "CC INCOME RADAR | Top 3 by Yield (Fallback)",
+                                fb_payload.rstrip(), 0x9b59b6
                             )
-                        new_payload = new_payload.rstrip()
-                        if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "CC INCOME RADAR | Weekly/Monthly Pay ETFs", new_payload, 0x9b59b6)
-                            logger.info(f"New income ETF screener dispatched: {len(new_etfs)} candidates.")
-
-                        # Cache top result for weekly scorecard income spotlight
-                        try:
-                            top_etf = new_etfs[0]
-                            engine.db.update_state("cc_etf_spotlight_latest", {
-                                "symbol": top_etf["symbol"],
-                                "family": top_etf["family"],
-                                "ann_yield": top_etf["ann_yield"],
-                                "freq": top_etf["freq"],
-                                "spot": top_etf["spot"],
-                                "next_ex_date": top_etf["next_ex_date"],
-                                "aum": top_etf["aum"],
-                            })
-                        except Exception as e:
-                            logger.warning(f"CC ETF spotlight cache write failed: {e}")
-            except Exception as e:
-                logger.error(f"New income ETF screener segment failed: {e}")
-
-            # ── CC INCOME SOCIAL BUZZ SCANNER ─────────────────────────────────
-            # Scans r/dividends / r/ETFs / r/thetagang / r/Bogleheads for CC income
-            # ETF mentions — surfaces what the income community is actually talking
-            # about, not just what passes the yield filter. Fires as a separate embed
-            # so it has its own pulse even on quiet screener days.
-            try:
-                buzz = engine.scan_ccincome_social_buzz(top_n=6)
-                if buzz:
-                    buzz_payload = ""
-                    for b in buzz:
-                        freq_str   = b["freq"]   if b["freq"]   != "?" else ""
-                        family_str = b["family"] if b["family"] != "Unknown" else ""
-                        meta = " | ".join(filter(None, [family_str, freq_str]))
-                        lean_emoji = "🟢" if b["lean"] == "BULLISH" else ("🔴" if b["lean"] == "BEARISH" else "🟡")
-                        sentiment_line = (
-                            f"┣ Sentiment: {lean_emoji} {b['lean']} — "
-                            f"`{b['bullish']}` bull / `{b['bearish']}` bear "
-                            f"(`{b['bull_pct']}%` bullish)\n"
-                        ) if b["bullish"] + b["bearish"] > 0 else ""
-                        buzz_payload += (
-                            f"**{b['symbol']}**  `{b['label']}`"
-                            + (f"  {meta}" if meta else "") + "\n"
-                            f"┣ StockTwits: `{b['msg_count']}` recent messages\n"
-                            + sentiment_line
-                            + f"┗ Buzz score: `{b['buzz_score']}`\n\n"
-                        )
-                    buzz_payload = buzz_payload.rstrip()
-                    buzz_payload += (
-                        "\n\n─────────────────────────\n"
-                        "Source: StockTwits symbol streams (Reddit public API blocked site-wide)\n"
-                        "Buzz ≠ fundamentals — verify yield/AUM before adding to your universe."
-                    )
-                    if WEBHOOK_INCOME:
-                        send_essentials_embed(
-                            WEBHOOK_INCOME,
-                            "📡 CC INCOME SOCIAL BUZZ | What the Community Is Watching",
-                            buzz_payload, 0x1abc9c
-                        )
-                        logger.info(f"CC income social buzz dispatched: {len(buzz)} tickers.")
                 else:
                     logger.info("CC income social buzz: no CC income tickers trending today.")
             except Exception as e:
-                logger.error(f"CC income social buzz scanner failed: {e}")
+                logger.error(f"Social-first CC ETF radar failed: {e}")
 
         elif args.mode == "wheel_signals":
             # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
