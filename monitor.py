@@ -92,6 +92,22 @@ CRISIS_VIXY_Z_THRESHOLD = 1.5
 # routing and general risk posture.
 SEASONAL_CAUTION_MONTHS = [3, 9]
 
+# NAV Determination Month — Cornerstone Board locks 2026 distribution rate at Oct 31 NAV.
+# During October: raise alert sensitivity, tighten premium compression threshold to -1.5%.
+NAV_DETERMINATION_MONTH = 10  # October
+
+# CEF Institutional Exit — high lit-market volume + SPY flat = not a macro event.
+# Distinct from dark pool (dark pool = LOW lit volume). This is HIGH lit volume while
+# SPY doesn't explain the move — the Feb 2026 crash pattern.
+CEF_INST_EXIT_VOL_RATIO_MIN = 2.0   # vol > 2× 20D avg
+CEF_INST_EXIT_SPY_MAX_CHG   = 0.75  # abs(SPY 1d chg) must be < 0.75% to qualify as CEF-specific
+
+# Distribution yield floor — price below which income buyers absorb all selling.
+# At 19% yield (Cornerstone's target payout band), any lower price = structural support.
+# Fair value = annual_distribution / 0.19. If current price > fair value + 10% = overvalued signal.
+DIST_YIELD_TARGET_PCT = 19.0        # 19% = structural support floor yield
+DIST_YIELD_OVERVALUED_GAP = 0.10    # price > fair_value × 1.10 = overvalued at new rate
+
 # Dark pool / off-exchange detection thresholds:
 # Price drop significant but public volume BELOW average → suggests off-exchange activity.
 DARK_POOL_PRICE_DROP_PCT   = -1.5   # session price change threshold (%)
@@ -137,6 +153,10 @@ RO_SCORE_WEIGHTS = {
     # Cross-script signals (lightweight, cached-data reads — no new API calls)
     "yield_steepen":       5,   # T10-T2 spread steepened > 20bps in a session (rate pressure on CEF)
     "sentiment_fear":      5,   # SentiSense market mood ≤ 25 (extreme fear = CEF premium risk)
+    # Distribution reset cycle signals
+    "nav_determination":  12,   # October = NAV lock month; heightened sensitivity window
+    "cef_inst_exit":      20,   # High vol + flat SPY = institutional distribution cycle exit
+    "dist_overvalued":    10,   # Price > fair-value floor by >10% at new annual distribution rate
     # Suppressors
     "ex_div_relief":      -10,
 }
@@ -426,6 +446,91 @@ def fetch_obv_mfi(session, symbol):
 def is_seasonal_caution_month(today=None) -> bool:
     today = today or datetime.now(pytz.timezone('Pacific/Honolulu'))
     return today.month in SEASONAL_CAUTION_MONTHS
+
+def is_nav_determination_month(today=None) -> bool:
+    """
+    October = NAV lock month. Cornerstone Board votes on next year's distribution
+    rate using the Oct 31 NAV. During this month, tighten all alert thresholds —
+    any premium compression or vol divergence carries higher weight.
+    """
+    today = today or datetime.now(pytz.timezone('Pacific/Honolulu'))
+    return today.month == NAV_DETERMINATION_MONTH
+
+def detect_cef_institutional_exit(session, ticker: str, spy_chg: float) -> tuple:
+    """
+    Identifies the Feb 2026 crash pattern: HIGH lit-market volume + SPY flat/green.
+    This is NOT a dark pool signal (that requires low public vol).
+    This is the opposite: institutions exiting publicly, not hiding the trade,
+    because the selling pressure overwhelms absorption capacity.
+
+    Signature: vol > 2× 20D avg AND abs(SPY 1D change) < 0.75%.
+    Returns (is_inst_exit, vol_ratio, price_chg, description).
+    Uses data already fetched by detect_dark_pool_activity — no extra API calls.
+    """
+    try:
+        values = fetch_time_series(session, ticker, outputsize=21)
+        if len(values) < 11:
+            return False, 0.0, 0.0, "Insufficient data"
+
+        today_vol    = float(values[0]["volume"])
+        baseline_vol = sum(float(v["volume"]) for v in values[1:21]) / max(len(values[1:21]), 1)
+        vol_ratio    = today_vol / baseline_vol if baseline_vol > 0 else 1.0
+        price_chg    = (float(values[0]["close"]) - float(values[1]["close"])) / float(values[1]["close"]) * 100
+
+        # Institutional exit: high volume + price falling + SPY not explaining the move
+        is_inst_exit = (
+            vol_ratio  >= CEF_INST_EXIT_VOL_RATIO_MIN and
+            price_chg  <= -1.0 and                        # CEF is down at least 1%
+            abs(spy_chg) < CEF_INST_EXIT_SPY_MAX_CHG      # SPY is not the cause
+        )
+        desc = (
+            f"{'🔴 ' if is_inst_exit else ''}{vol_ratio:.1f}x avg vol / "
+            f"{price_chg:+.1f}% vs SPY {spy_chg:+.1f}% — "
+            f"{'INST. EXIT: HIGH VOL, SPY FLAT' if is_inst_exit else 'normal'}"
+        )
+        return is_inst_exit, vol_ratio, price_chg, desc
+    except Exception as e:
+        logger.error(f"[CEF Inst Exit Detector Error] {ticker}: {e}")
+        return False, 0.0, 0.0, "Error"
+
+def check_distribution_yield_floor(price: float, ticker: str) -> tuple:
+    """
+    Computes the fair-value floor using the known annual distribution and the
+    19% yield target (Cornerstone's managed distribution band).
+
+    Fair value = annual_distribution / 0.19
+    If current price > fair_value × 1.10 → price is overvalued at the new rate
+    and a correction toward fair value is structurally likely.
+
+    Also computes the current implied yield at the current price — this is the
+    number income buyers use to decide whether CLM/CRF is cheap or expensive.
+
+    Returns (is_overvalued, fair_value, implied_yield_pct, description).
+    Zero API calls — uses known distribution constants from get_ticker_report().
+    """
+    try:
+        annual_div = 1.4268 if ticker == "CLM" else 1.3824   # 2026 reset: $0.1189 × 12 CLM, $0.1152 × 12 CRF
+        fair_value = round(annual_div / (DIST_YIELD_TARGET_PCT / 100), 2)
+        implied_yield = (annual_div / price * 100) if price > 0 else 0.0
+
+        is_overvalued = price > fair_value * (1 + DIST_YIELD_OVERVALUED_GAP)
+        gap_pct = ((price - fair_value) / fair_value * 100) if fair_value > 0 else 0.0
+
+        if is_overvalued:
+            desc = (
+                f"⚠️ Price ${price:.2f} is {gap_pct:+.1f}% above fair value "
+                f"${fair_value:.2f} at {DIST_YIELD_TARGET_PCT:.0f}% yield — "
+                f"distribution reset mispricing, correction likely"
+            )
+        elif implied_yield >= DIST_YIELD_TARGET_PCT:
+            desc = f"✅ Yield {implied_yield:.1f}% ≥ {DIST_YIELD_TARGET_PCT:.0f}% target — price at or below fair value (accumulate zone)"
+        else:
+            desc = f"Yield {implied_yield:.1f}% | Fair value ${fair_value:.2f} | Gap {gap_pct:+.1f}%"
+
+        return is_overvalued, fair_value, round(implied_yield, 1), desc
+    except Exception as e:
+        logger.error(f"[Dist Yield Floor Error] {ticker}: {e}")
+        return False, 0.0, 0.0, "Error"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EX-DIVIDEND & RO SEASON GUARDS
@@ -832,6 +937,7 @@ def calculate_ro_risk_score(
     macro_underperform=False, holder_exit=False,
     premium_30pct_watch=False,
     yield_steepen=False, sentiment_fear=False,
+    nav_determination=False, cef_inst_exit=False, dist_overvalued=False,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -879,6 +985,12 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["yield_steepen"]
     if sentiment_fear:
         score += RO_SCORE_WEIGHTS["sentiment_fear"]
+    if nav_determination:
+        score += RO_SCORE_WEIGHTS["nav_determination"]
+    if cef_inst_exit:
+        score += RO_SCORE_WEIGHTS["cef_inst_exit"]
+    if dist_overvalued:
+        score += RO_SCORE_WEIGHTS["dist_overvalued"]
     if ex_div_near and score > 0:
         score += RO_SCORE_WEIGHTS["ex_div_relief"]   # negative weight — schedules dip, not dilution
 
@@ -933,7 +1045,10 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          macro_interp, ex_div_near, ro_season, crisis_day,
                          vixy_z, status, recommendation, verdict,
                          income_note, s_net, alpha_drip, seasonal_caution,
-                         y_dist=0.0) -> str:
+                         y_dist=0.0,
+                         nav_determination=False, cef_inst_exit_desc="",
+                         dist_fair_value=0.0, implied_yield=0.0,
+                         is_dist_overvalued=False) -> str:
     """
     Cornerstone Pulse — mobile-first labeled format.
 
@@ -958,12 +1073,17 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     whale_tag = f"⚠️ {whale_status}" if "DISTRIBUTION" in whale_status.upper() else "NORMAL"
 
     # Conditional lines — inserted before verdict only when triggered
-    vixy_line    = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
+    vixy_line      = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
     seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
-    # ex_div_line removed from display — the RO Risk: X/100 numeric score already
-    # communicates safety. Ex-div is predictable monthly noise; suppressor logic
-    # still runs in calculate_ro_risk_score() where it matters.
+    nav_det_line   = "┣ ⚠️ NAV Lock Month (Oct) — sensitivity heightened\n" if nav_determination else ""
+    inst_exit_line = f"┣ 🔴 Inst. Exit: {cef_inst_exit_desc}\n" if cef_inst_exit_desc and "INST. EXIT" in cef_inst_exit_desc else ""
+    dist_line      = (
+        f"┣ ⚠️ Dist. Floor: ${dist_fair_value:.2f} fair value | Yield {implied_yield:.1f}% — OVERVALUED at new rate\n"
+        if is_dist_overvalued else
+        f"┣ Dist. Floor: ${dist_fair_value:.2f} fair value | Yield {implied_yield:.1f}%\n"
+        if dist_fair_value > 0 else ""
+    )
 
     return (
         f"{ticker} — {status}\n"
@@ -977,6 +1097,9 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
+        f"{nav_det_line}"
+        f"{inst_exit_line}"
+        f"{dist_line}"
         f"┗ Div. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
     )
 
@@ -1052,6 +1175,18 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         f"{'⚠️ ' if macro_underperf else ''}{avg_cef_chg:+.1f}% vs SPY {spy_chg:+.1f}% — "
         f"{'CEF underperforming' if macro_underperf else 'tracking market'}"
     ) if spy_chg != 0.0 else "SPY unavailable"
+
+    # ── NEW: NAV determination month gate (October — tightened sensitivity)
+    nav_determination = is_nav_determination_month()
+
+    # ── NEW: CEF institutional exit (high lit vol + flat SPY)
+    # spy_chg already computed above — reuse, no extra API call
+    is_cef_inst_exit, inst_vol_ratio, _inst_price_chg, cef_inst_exit_desc = \
+        detect_cef_institutional_exit(session, ticker, spy_chg)
+
+    # ── NEW: Distribution yield floor (fair value vs current price)
+    is_dist_overvalued, dist_fair_value, implied_yield, dist_yield_desc = \
+        check_distribution_yield_floor(price, ticker)
 
     # ── NEW: 13F / large holder exit signal from SEC scrape
     holder_exit = "13D" in sec_shield or "13G" in sec_shield
@@ -1130,6 +1265,9 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         macro_underperform=macro_underperf, holder_exit=holder_exit,
         premium_30pct_watch=premium_30pct_watch,
         yield_steepen=yield_steepen, sentiment_fear=sentiment_fear,
+        nav_determination=nav_determination,
+        cef_inst_exit=is_cef_inst_exit,
+        dist_overvalued=is_dist_overvalued,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
@@ -1185,7 +1323,12 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         crisis_day=crisis_day, vixy_z=vixy_z, status=status,
         recommendation=recommendation, verdict=verdict,
         income_note=income_note, s_net=s_net, alpha_drip=alpha_drip,
-        seasonal_caution=seasonal_caution, y_dist=y_dist
+        seasonal_caution=seasonal_caution, y_dist=y_dist,
+        nav_determination=nav_determination,
+        cef_inst_exit_desc=cef_inst_exit_desc,
+        dist_fair_value=dist_fair_value,
+        implied_yield=implied_yield,
+        is_dist_overvalued=is_dist_overvalued,
     )
 
     # ── OBV + MFI: back-pocket volume pressure signals.
