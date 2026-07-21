@@ -124,7 +124,8 @@ def main():
                             f"┣ USD/JPY: `{usdjpy_chg:+.2f}%` | Gold (XAU/USD): `{gold_chg:+.2f}%`\n"
                             f"┗ {explanation}"
                         )
-                        send_essentials_embed(WEBHOOK_MARKET, "Carry Trade Risk Regime", regime_payload, 0x16a085)
+                        _regime_color = COLOR_GREEN if "RISK-ON" in regime else COLOR_RED
+                        send_essentials_embed(WEBHOOK_MARKET, "Carry Trade Risk Regime", regime_payload, _regime_color)
                         logger.info(f"Dispatched carry-trade regime sync ({regime})")
 
                         spy_price_data = engine._execute_query("price", {"symbol": "SPY"})
@@ -153,10 +154,11 @@ def main():
                         ohlc = engine.fetch_crypto_ohlc(symbol, outputsize=60)
                         if ohlc is not None and not ohlc.empty:
                             chart_bytes = generate_candlestick_chart(symbol, ohlc, last_change=change, last_change_pct=pct_change)
+                            _mover_color = COLOR_GREEN if pct_change > 0 else COLOR_RED
                             send_essentials_embed_with_chart(
                                 WEBHOOK_CRYPTO, f"🪙 CRYPTO MOVER OF THE DAY: {symbol}",
                                 f"┣ Spot: `${price:,.2f}`\n┗ 1-Day Move: `{pct_change:+.2f}%` — largest swing in the tracked universe today.",
-                                chart_bytes, color=0xf39c12
+                                chart_bytes, color=_mover_color
                             )
                             logger.info(f"Dispatched crypto chart snapshot for {symbol} ({pct_change:+.2f}%)")
                 except Exception as e:
@@ -187,7 +189,8 @@ def main():
                                     f"┣ SPY: {spy_trend}\n"
                                     f"┗ Final Actionable Posture: {posture} — crypto sentiment is leaning the same way equities are pricing in. Useful pre-market context for options scalpers."
                                 )
-                                send_essentials_embed(WEBHOOK_MARKET, "CRYPTO → EQUITIES SIGNAL SYNC", corr_payload, 0x9b59b6)
+                                _btc_spy_color = COLOR_GREEN if btc_bullish else COLOR_RED
+                                send_essentials_embed(WEBHOOK_MARKET, "CRYPTO → EQUITIES SIGNAL SYNC", corr_payload, _btc_spy_color)
                                 logger.info(f"Dispatched BTC/SPY correlation sync ({posture})")
                 except Exception as e:
                     logger.error(f"BTC/SPY correlation sync failed: {e}")
@@ -296,7 +299,8 @@ def main():
                     f"Bias: {'Favor BUY setups (positive gamma suppresses downside).' if 'POSITIVE' in gex_state else 'Elevated tail risk. Size down on directional plays. Spreads preferred.'}"
                 )
                 if WEBHOOK_OPTIONS:
-                    send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS DESK | Pre-Market Conditions Brief", options_brief, 0x00ffff)
+                    _options_pm_color = COLOR_GREEN if vix_z >= 0.75 else COLOR_YELLOW
+                    send_essentials_embed(WEBHOOK_OPTIONS, "OPTIONS DESK | Pre-Market Conditions Brief", options_brief, _options_pm_color)
             except Exception as e:
                 logger.error(f"Morning options brief failed: {e}")
 
@@ -1050,10 +1054,12 @@ def main():
                         + "\n\n┗ ⭐ = institutional + insider confluence — highest conviction entry"
                     )
                     if WEBHOOK_INCOME:
+                        _total_stars = sum(s for s, _ in conviction_lines)
+                        _conv_layer_color = COLOR_GREEN if _total_stars > 0 else COLOR_YELLOW
                         send_essentials_embed(
                             WEBHOOK_INCOME,
                             "🔭 CONVICTION LAYER | Inst Flows + Insider Signals",
-                            conv_payload, 0x8e44ad
+                            conv_payload, _conv_layer_color
                         )
                         logger.info(f"SentiSense conviction layer dispatched: {len(conviction_lines)} symbols.")
                 else:
@@ -1117,7 +1123,9 @@ def main():
                         f"┗ Premium Edge Spread: `{asset['spread']:+.1f}%` vol variance\n"
                         f"Edge: Selling premium (CSPs, covered calls) statistically favored.\n\n"
                     )
-                send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL | IV Crush Scanner", payload, 0xf1c40f)
+                _best_spread = max(a['spread'] for a in scan_data)
+                _crush_color = COLOR_GREEN if _best_spread >= 20 else COLOR_YELLOW
+                send_essentials_embed(WEBHOOK_OPTIONS, "VOLATILITY ARBITRAGE TERMINAL | IV Crush Scanner", payload, _crush_color)
                 iv_dispatched = True
                 logger.info(f"IV crush scan dispatched: {len(scan_data)} elevated-premium assets.")
 
@@ -1147,7 +1155,10 @@ def main():
                 alert_id = "unusual_flow_scan"
                 state_str = "_".join([f"{s['symbol']}{s['direction'][:3]}" for s in flow_data[:3]])
                 if engine.db.track_and_limit_alerts(alert_id, state_str, float(len(flow_data)), max_broadcasts=3, threshold_pct=0.5):
-                    send_essentials_embed(WEBHOOK_OPTIONS, "INSTITUTIONAL FLOW RADAR | Sweep & OI Intelligence", flow_payload, 0x9b59b6)
+                    _bull_flow = sum(1 for s in flow_data if s.get("direction", "").upper() in ("CALL", "BULLISH", "BULL"))
+                    _bear_flow = sum(1 for s in flow_data if s.get("direction", "").upper() in ("PUT", "BEARISH", "BEAR"))
+                    _flow_color = COLOR_GREEN if _bull_flow > _bear_flow else (COLOR_RED if _bear_flow > _bull_flow else COLOR_YELLOW)
+                    send_essentials_embed(WEBHOOK_OPTIONS, "INSTITUTIONAL FLOW RADAR | Sweep & OI Intelligence", flow_payload, _flow_color)
                     flow_dispatched = True
                     logger.info(f"Unusual flow dispatch: {len(flow_data)} signals found.")
 
@@ -1182,7 +1193,8 @@ def main():
                     f"Context: When both IV and flow are quiet, capital preservation > new entries. "
                     f"Watch for a volatility spike or unusual volume tomorrow morning."
                 )
-                send_essentials_embed(WEBHOOK_OPTIONS, "Options Market Flowstate", outlook_payload, 0x3498db)
+                _flowstate_color = COLOR_GREEN if vix_z >= 0.75 else COLOR_YELLOW
+                send_essentials_embed(WEBHOOK_OPTIONS, "Options Market Flowstate", outlook_payload, _flowstate_color)
                 logger.info("Options fallback market conditions snapshot dispatched.")
 
         elif args.mode == "gex":
@@ -1459,7 +1471,8 @@ def main():
                 )
 
                 if WEBHOOK_CRYPTO:
-                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Derivatives", payload, 0xf39c12)
+                    _crypto_color = COLOR_GREEN if ct_score < 40 else (COLOR_RED if ct_score >= 70 else COLOR_YELLOW)
+                    send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Derivatives", payload, _crypto_color)
                     logger.info("Crypto social snapshot dispatched.")
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")
@@ -1486,7 +1499,9 @@ def main():
                         )
                     payload += "Social overlay for #futures context — not a directional call."
                     if WEBHOOK_FUTURES:
-                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | Commodity & Macro Buzz", payload, 0xe67e22)
+                        _buzz_avg = sum(p.get("chg_5d", 0) for p in plays[:8]) / max(len(plays[:8]), 1)
+                        _buzz_color = COLOR_GREEN if _buzz_avg > 0.5 else (COLOR_RED if _buzz_avg < -0.5 else COLOR_YELLOW)
+                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | Commodity & Macro Buzz", payload, _buzz_color)
                         logger.info(f"Futures social dispatched: {len(plays)} names.")
                 else:
                     logger.info("Futures social: no futures-adjacent names trending this session.")
@@ -1520,7 +1535,8 @@ def main():
                         "Not financial advice — for informational/educational use only."
                     )
                     if WEBHOOK_FUTURES:
-                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | S&P Pattern Scan", pat_payload, 0x3498db)
+                        _pat_color = COLOR_GREEN if len(bullish) > len(bearish) else (COLOR_RED if len(bearish) > len(bullish) else COLOR_YELLOW)
+                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | S&P Pattern Scan", pat_payload, _pat_color)
                         logger.info(f"Pattern scan dispatched: {len(bullish)} bullish, {len(bearish)} bearish.")
                 else:
                     logger.info("Pattern scan: no qualifying patterns returned (may be outside market hours).")
@@ -1634,7 +1650,7 @@ def main():
                             f"┗ Sizing: 1 tranche. Watch for 3-session XLE weakness for full position."
                         )
                         if WEBHOOK_INCOME:
-                            send_essentials_embed(WEBHOOK_INCOME, "🛢️ MLPI ENTRY WINDOW | Accumulation Signal", payload, 0xe67e22)
+                            send_essentials_embed(WEBHOOK_INCOME, "🛢️ MLPI ENTRY WINDOW | Accumulation Signal", payload, COLOR_YELLOW)
 
                         # Pushover personal alert (financial signal — direct notification)
                         try:

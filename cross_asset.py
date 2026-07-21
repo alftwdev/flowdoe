@@ -25,6 +25,10 @@ except ImportError:
 logger = logging.getLogger("Market_Profile_Matrix")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+COLOR_GREEN  = 0x2ecc71
+COLOR_YELLOW = 0xf1c40f
+COLOR_RED    = 0xe74c3c
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -566,7 +570,11 @@ def run_futures_board():
     payload = build_board_payload(board, session_label, vix_regime=vix_regime,
                                   econ_alert=econ_alert, daily_levels=daily_levels,
                                   fred_macro=fred_macro)
-    send_essentials_embed(WEBHOOK_FUTURES, "FUTURES BOARD", payload, 0x00FFFF)
+    _es_chg  = board.get("S&P 500",    {}).get("percent_change", 0.0)
+    _nq_chg  = board.get("Nasdaq 100", {}).get("percent_change", 0.0)
+    _idx_chg = (_es_chg + _nq_chg) / 2.0
+    _board_color = COLOR_GREEN if _idx_chg > 0.1 else (COLOR_RED if _idx_chg < -0.1 else COLOR_YELLOW)
+    send_essentials_embed(WEBHOOK_FUTURES, "FUTURES BOARD", payload, _board_color)
     db.update_state("futures_board_last_quotes", board)
     db.update_state("futures_board_last_dispatch", datetime.now().isoformat())
     logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due})")
@@ -671,14 +679,16 @@ def run_intraday_futures_update():
                 f"┣ Conviction: `{conviction['score']}/100` — {conviction['verdict']}\n"
                 f"┗ Fade value boundaries `${profile['val']:,.2f}`–`${profile['vah']:,.2f}` for core setups"
             )
+            _conv_score = conviction.get("score", 50)
+            _mp_color = COLOR_GREEN if _conv_score >= 70 else (COLOR_RED if _conv_score < 40 else COLOR_YELLOW)
             try:
                 chart_bytes = generate_market_profile_chart(label, active_df, profile, vwap, posture.split('|')[0].strip())
                 send_essentials_embed_with_chart(
-                    WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, chart_bytes, color=0x00FFFF
+                    WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, chart_bytes, color=_mp_color
                 )
             except Exception as e:
                 logger.error(f"Chart generation failed, falling back to text-only dispatch: {e}")
-                send_essentials_embed(WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, 0x00FFFF)
+                send_essentials_embed(WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, _mp_color)
             logger.info(f"Dispatched {status_tag} Futures Pulse for {label}")
 
         # Cross-sector correlation: ES trading outside its OVERNIGHT value area heading into/around
@@ -701,7 +711,8 @@ def run_intraday_futures_update():
                             f"┣ Overnight POC: ${on_profile['poc']:,.2f} | Current: ${spot:,.2f}\n"
                             f"┗ Final Actionable Posture: SPY likely opens/extends in the same direction — futures leads cash."
                         )
-                        send_essentials_embed(WEBHOOK_MARKET, "FUTURES → EQUITIES SIGNAL SYNC", corr_payload, 0xe67e22)
+                        _sync_color = COLOR_GREEN if direction == "ABOVE" else COLOR_RED
+                        send_essentials_embed(WEBHOOK_MARKET, "FUTURES → EQUITIES SIGNAL SYNC", corr_payload, _sync_color)
                         logger.info("Dispatched ES/SPY overnight correlation signal to Market Analysis channel")
             except Exception as e:
                 logger.error(f"Correlation dispatch failed: {e}")
