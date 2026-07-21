@@ -1118,6 +1118,20 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if price == 0.0:
         return f"**{ticker}**\n┗ ⚠️ Data feed offline.\n", "LOW", 0
 
+    # NAV persistence: if live fetch returned the hardcoded default, try DB cached value first.
+    # XCLMX/XCRFX intermittently return 0 or fail on Twelve Data — without this, premium
+    # and z_premium compute against the wrong baseline and z_premium gets stored as null.
+    _default_nav = PRIORITY_ASSETS[ticker]["default_nav"]
+    if nav == _default_nav:
+        _cached_nav = db.get_state(f"{ticker.lower()}_last_nav")
+        if _cached_nav:
+            try:
+                nav = float(_cached_nav)
+            except (TypeError, ValueError):
+                pass
+    if nav > 0:
+        db.update_state(f"{ticker.lower()}_last_nav", round(nav, 4))
+
     # ── Whale flow (original)
     whale_status, whale_rvol = detect_whale_flow_direction(session, ticker)
 
@@ -1355,7 +1369,9 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     db.update_state(f"{ticker}_acc_detail", acc["detail"])
 
     # ── Persist key metrics for cross-script reads (market_analysis.py morning brief)
-    db.update_state(f"{ticker.lower()}_last_z_premium", round(z_premium, 3))
+    # Only write z_premium when NAV is valid — nav=0 produces a nonsense z-score
+    if nav > 0:
+        db.update_state(f"{ticker.lower()}_last_z_premium", round(z_premium, 3))
     db.update_state(f"{ticker.lower()}_last_premium",   round(premium, 3))
     db.update_state(f"{ticker.lower()}_last_ro_tier",   ro_tier)
     db.update_state(f"{ticker.lower()}_last_ro_score",  ro_score)  # numeric score for cross-script reads

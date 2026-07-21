@@ -1704,7 +1704,7 @@ class TQQQTacticalSniper:
         pc_label = f"z `{pc_z_v:+.1f}σ` vs 30D mean — {'SPIKE ⚠️ fear surge' if pc_z_v >= 1.2 else 'elevated' if pc_z_v >= 0.5 else 'normal'}"
         rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
         real_vix = leap_setup.get("real_vix")
-        real_vix_str = f" | **VIX: `{real_vix:.1f}`** [FRED]" if real_vix else ""
+        real_vix_str = f" | VIX: `{real_vix:.1f}` (prev close)" if real_vix else ""
         pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}{real_vix_str}\n"
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
         score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"

@@ -430,7 +430,7 @@ def main():
             # Social discovery drives what surfaces; yield data confirms it's viable.
             # Replaces the old static-watchlist screener + separate buzz embed.
             try:
-                buzz_ranked = engine.scan_ccincome_social_buzz(top_n=10)  # wider net, yield filter narrows
+                buzz_ranked = engine.scan_ccincome_social_buzz(top_n=15)  # wide net — yield filter cuts to ~3
 
                 if buzz_ranked:
                     buzz_syms = [b["symbol"] for b in buzz_ranked]
@@ -447,8 +447,28 @@ def main():
                         -x["ann_yield"]
                     ))
 
-                    # Cap at top 3 that passed yield enrichment
+                    # Cap at top 3 that passed yield enrichment.
+                    # If buzz universe didn't yield 3, pad with top static screener results
+                    # (excluding any already in enriched) so the embed always shows 3.
                     top3 = enriched[:3]
+                    if len(top3) < 3:
+                        try:
+                            already = {e["symbol"] for e in top3}
+                            static_fill = [
+                                e for e in engine.generate_new_income_etf_screener()
+                                if e["symbol"] not in already
+                            ]
+                            for e in static_fill:
+                                if len(top3) >= 3:
+                                    break
+                                buzz_meta[e["symbol"]] = {
+                                    "buzz_score": 0, "msg_count": 0,
+                                    "bullish": 0, "bearish": 0,
+                                    "bull_pct": 0, "lean": "NEUTRAL",
+                                }
+                                top3.append(e)
+                        except Exception:
+                            pass
 
                     if top3:
                         state_str = "_".join(f"{e['symbol']}{e['ann_yield']}" for e in top3)
@@ -498,13 +518,20 @@ def main():
                                         f"`{sent['score']:+.0f}` {sent['lean']} ({sent['mentions']} mentions)\n"
                                     )
 
+                                if buzz_score > 0:
+                                    buzz_line = f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
+                                    source_line = "┗ Source: StockTwits community activity + yield filter >10%\n\n"
+                                else:
+                                    buzz_line = "┣ Buzz: — (yield-sorted fill — no social signal today)\n"
+                                    source_line = "┗ Source: yield-sorted fallback\n\n"
+
                                 new_payload += (
                                     f"**#{rank} {e['symbol']}** | {e['family']} | {e['freq']}\n"
-                                    f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
+                                    f"{buzz_line}"
                                     f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
                                     f"┣ Next pay: `{e['next_ex_date']}`\n"
                                     f"{ss_line}"
-                                    f"┗ Source: StockTwits community activity + yield filter >10%\n\n"
+                                    f"{source_line}"
                                 )
                             new_payload = new_payload.rstrip()
 
@@ -895,7 +922,7 @@ def main():
                 today_str  = datetime.now().strftime("%Y-%m-%d")
                 bias_fresh = "✅" if bias_date == today_str else "⚠️ stale"
                 vix_payload = (
-                    f"VIX Regime: **{tier}** (VIX `{real_vix:.1f}` [FRED])\n\n"
+                    f"VIX Regime: **{tier}** (VIX `{real_vix:.1f}` prev close)\n\n"
                     f"┣ Base Delta (VIX): `{base_delta:.2f}`\n"
                     f"┣ Cycle Scores: bottom `{bottom_score}` | top `{top_score}`\n"
                     f"┣ Daily Bias: `{bias_label}` {bias_fresh}\n"
