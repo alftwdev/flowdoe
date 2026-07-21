@@ -28,6 +28,18 @@ WEBHOOK_FED = os.getenv("WEBHOOK_FED")      # reserved for fed.py (not yet built
 WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS") 
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
+# Shared embed color palette — green/yellow/red maps to bullish/neutral/bearish.
+# All dynamic embeds use this so the Discord left bar is instantly readable.
+COLOR_GREEN  = 0x2ecc71   # bullish / safe / risk-on
+COLOR_YELLOW = 0xf1c40f   # neutral / mixed / caution
+COLOR_RED    = 0xe74c3c   # bearish / danger / risk-off
+
+def _bias_color(score: float, bull_threshold: float = 1.0, bear_threshold: float = -1.0) -> int:
+    """Return green/yellow/red based on a numeric score."""
+    if score >= bull_threshold:  return COLOR_GREEN
+    if score <= bear_threshold:  return COLOR_RED
+    return COLOR_YELLOW
+
 def dispatch_conviction_sync(engine, snap, report_label):
     """
     The reverse feed: every sector channel (futures/crypto/TQQQ) already pushes a
@@ -95,7 +107,10 @@ def main():
         if args.mode == "macro":
             liq_payload = engine.generate_macro_liquidity_payload()
             if liq_payload and WEBHOOK_MARKET:
-                send_essentials_embed(WEBHOOK_MARKET, "Credit & Liquidity Check", liq_payload, 0x3498db)
+                # Color from live HY spread: green=safe, yellow=watch, red=stress
+                _hy = engine.fetch_hy_spread() or 0.0
+                _liq_color = COLOR_RED if _hy > 4.5 else (COLOR_YELLOW if _hy > 3.5 else COLOR_GREEN)
+                send_essentials_embed(WEBHOOK_MARKET, "Credit & Liquidity Check", liq_payload, _liq_color)
 
             # Cross-sector carry-trade regime: USD/JPY + Gold gives a clean risk-on/off read.
             # Dispatches to #market-analysis only when unambiguous (not MIXED) — no forex channel.
@@ -200,7 +215,10 @@ def main():
                         f"┣ **FRED Macro Overlay — Real Data**\n"
                         f"{yc_line}{vix_line}{macro_lines}"
                     )
-                    send_essentials_embed(WEBHOOK_MARKET, "Treasury & Macro Conditions (FRED)", fred_payload, 0x2980b9)
+                    # Color from yield curve: positive=green, flat zone=yellow, inverted=red
+                    _yc_spread = yc["spread"] if yc else 0.0
+                    _macro_color = COLOR_RED if _yc_spread < 0 else (COLOR_YELLOW if _yc_spread < 0.25 else COLOR_GREEN)
+                    send_essentials_embed(WEBHOOK_MARKET, "Treasury & Macro Conditions (FRED)", fred_payload, _macro_color)
                     logger.info("Dispatched FRED yield curve + macro snapshot")
             except Exception as e:
                 logger.error(f"FRED macro dispatch failed: {e}")
@@ -220,7 +238,8 @@ def main():
                         "**4 Pillars Framework** — Fundamental → Technical → Cash Flow → Risk\n"
                         "─────────────────────────────────────────────────\n"
                     )
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", pillars_header + morning_brief, 0x1abc9c)
+                    _morning_color = _bias_color(morning_snap.get("conviction_score", 0))
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", pillars_header + morning_brief, _morning_color)
                     dispatch_conviction_sync(engine, morning_snap, "morning")
             except Exception as e:
                 import traceback
@@ -290,7 +309,10 @@ def main():
             try:
                 intraday_brief = engine.generate_market_analysis_intraday_report()
                 if intraday_brief and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | INTRADAY PULSE", intraday_brief, 0xf1c40f)
+                    _intra_bias = engine.db.get_state("market_analysis_bias") or {}
+                    _intra_score = _intra_bias.get("score", 0) if isinstance(_intra_bias, dict) else 0
+                    _intra_color = _bias_color(_intra_score)
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | INTRADAY PULSE", intraday_brief, _intra_color)
                     logger.info("Intraday pulse dispatched.")
             except Exception as e:
                 logger.error(f"Market analysis intraday report failed: {e}")
@@ -335,7 +357,8 @@ def main():
             try:
                 eod_brief, eod_snap = engine.generate_market_analysis_eod_report()
                 if eod_brief and WEBHOOK_MARKET:
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | END-OF-DAY RECAP", eod_brief, 0x2c3e50)
+                    _eod_color = _bias_color(eod_snap.get("conviction_score", 0))
+                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | END-OF-DAY RECAP", eod_brief, _eod_color)
                     dispatch_conviction_sync(engine, eod_snap, "eod")
             except Exception as e:
                 logger.error(f"Market analysis EOD recap failed: {e}")

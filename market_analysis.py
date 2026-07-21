@@ -367,7 +367,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         snap = engine.fetch_fred_macro_snapshot()
         hy   = engine.fetch_hy_spread()
         real_vix = bias["real_vix"]
-        vix_line = f"`{real_vix:.1f}` [FRED] — {'Calm. Options cheap.' if real_vix < 15 else 'Low vol.' if real_vix < 20 else 'Elevated. Size down.' if real_vix < 30 else 'PANIC. Defensive posture.'}"
+        vix_line = f"`{real_vix:.1f}` (prev close) — {'Calm. Options cheap.' if real_vix < 15 else 'Low vol.' if real_vix < 20 else 'Elevated. Size down.' if real_vix < 30 else 'PANIC. Defensive posture.'}"
         yc_line  = f"`{yc['spread']:+.2f}%` {yc['label']}" if yc else "N/A"
         ff_line  = f"`{snap.get('fedfunds', '?')}%` Fed Funds"
         hy_line  = f"`{hy:.2f}%` {'✅ healthy' if hy < 4.5 else '⚠️ stress' if hy < 6 else '🔴 crisis'}" if hy else "N/A"
