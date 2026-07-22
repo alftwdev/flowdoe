@@ -1074,34 +1074,34 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     whale_tag = f"⚠️ {whale_status}" if "DISTRIBUTION" in whale_status.upper() else "NORMAL"
 
     # Conditional lines — inserted before verdict only when triggered
-    vixy_line      = f"┣ VIXY: {vixy_z:+.1f}σ spike — reduce size / close puts→calls\n" if crisis_day else ""
+    vixy_line      = f"┣ VIXY: `{vixy_z:+.1f}σ` spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
     seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
     nav_det_line   = "┣ ⚠️ NAV Lock Month (Oct) — sensitivity heightened\n" if nav_determination else ""
     inst_exit_line = f"┣ 🔴 Inst. Exit: {cef_inst_exit_desc}\n" if cef_inst_exit_desc and "INST. EXIT" in cef_inst_exit_desc else ""
     dist_line      = (
-        f"┣ ⚠️ Dist. Floor: ${dist_fair_value:.2f} fair value | Yield {implied_yield:.1f}% — OVERVALUED at new rate\n"
+        f"┣ ⚠️ Dist. Floor: `${dist_fair_value:.2f}` fair value | Yield `{implied_yield:.1f}%` — OVERVALUED at new rate\n"
         if is_dist_overvalued else
-        f"┣ Dist. Floor: ${dist_fair_value:.2f} fair value | Yield {implied_yield:.1f}%\n"
+        f"┣ Dist. Floor: `${dist_fair_value:.2f}` fair value | Yield `{implied_yield:.1f}%`\n"
         if dist_fair_value > 0 else ""
     )
 
     return (
         f"{ticker} — {status}\n"
         f"┣ SEC Filing: {sec['sec_line']}\n"
-        f"┣ Premium to NAV: {premium:.2f}% {prem_tag}\n"
+        f"┣ Premium to NAV: `{premium:.2f}%` {prem_tag}\n"
         f"┣ Holder (13D/G): {sec['holder_line']}\n"
         f"┣ ⚡ EDGAR: {sec['edgar_line']}\n"
         f"┣ Whale Flow: {whale_tag}\n"
-        f"┣ Z-Score: {z_premium:+.1f}σ {z_tag}\n"
-        f"┣ RSI (1D): {rsi:.1f} {rsi_tag}\n"
+        f"┣ Z-Score: `{z_premium:+.1f}σ` {z_tag}\n"
+        f"┣ RSI (1D): `{rsi:.1f}` {rsi_tag}\n"
         f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
         f"{nav_det_line}"
         f"{inst_exit_line}"
         f"{dist_line}"
-        f"┗ Div. Yield: {y_dist:.1f}% | RO Risk: {ro_score}/100 ({ro_tier})\n"
+        f"┗ Div. Yield: `{y_dist:.1f}%` | RO Risk: `{ro_score}/100` ({ro_tier})\n"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
