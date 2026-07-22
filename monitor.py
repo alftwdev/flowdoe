@@ -1115,8 +1115,24 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     Returns (formatted_report_string, ro_tier, ro_score).
     """
     price, rsi, nav = fetch_live_metrics(session, ticker)
+    _stale_price = False
+    if price == 0.0:
+        # Before declaring offline, try the last known-good price stored in DB.
+        # TD intermittently times out during peak hours — stale data beats a blank embed.
+        _cached_price = db.get_state(f"{ticker.lower()}_last_price")
+        if _cached_price:
+            try:
+                price = float(_cached_price)
+                _stale_price = True
+                logger.warning(f"[{ticker}] Live price unavailable — using cached ${price:.2f} (stale)")
+            except (TypeError, ValueError):
+                pass
     if price == 0.0:
         return f"**{ticker}**\n┗ ⚠️ Data feed offline.\n", "LOW", 0
+
+    # Persist last known-good price for stale-data fallback on next TD outage.
+    if not _stale_price and price > 0:
+        db.update_state(f"{ticker.lower()}_last_price", round(price, 4))
 
     # NAV persistence: if live fetch returned the hardcoded default, try DB cached value first.
     # XCLMX/XCRFX intermittently return 0 or fail on Twelve Data — without this, premium
@@ -1327,6 +1343,10 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note  = "Accumulation phase"
         verdict      = "✅ DRIP active — accumulate on premium dips < 15% or ex-div window."
         recommendation = "Reinvest distributions at NAV."
+
+    # If we fell back to a cached price, mark the status so it's visible in the embed
+    if _stale_price:
+        status = f"{status} ⚠️ (price stale — TD unavailable)"
 
     report_text = format_pulse_report(
         ticker=ticker, price=price, nav=nav, rsi=rsi, premium=premium,
