@@ -582,7 +582,7 @@ def _build_intraday_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDat
     score_sign = f"+{bias['bias_score']}" if bias['bias_score'] >= 0 else str(bias['bias_score'])
 
     desc = (
-        f"**Mid-Session Bias: {bias['label']} (Score: {score_sign})**\n\n"
+        f"**Mid-Session Bias: {bias['label']} (Score: {score_sign})**\n"
         f"┣ SPY: {_arrow(spy_chg)}{abs(spy_chg):.2f}% | QQQ: {_arrow(qqq_chg)}{abs(qqq_chg):.2f}%\n"
         f"┣ VIX: `{real_vix:.1f}` | VIXY z: `{vixy_z:+.2f}σ`\n"
         f"┣ Fear & Greed: `{fg_val}` ({bias['fg_class']})\n"
@@ -598,7 +598,7 @@ def _build_intraday_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDat
     except Exception:
         pass
     desc += "┗ Intraday context — full brief at 0800 HST daily."
-    return f"MID-SESSION PULSE — {now_label}", desc, bias["color"]
+    return "MID-SESSION PULSE", desc, bias["color"]
 
 
 def _build_eod_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> tuple:
