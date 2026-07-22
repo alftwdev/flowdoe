@@ -802,9 +802,13 @@ def main():
             # ── MODULE 3: SOCIAL + IV CONVERGENCE WHEEL CANDIDATES ────────────
             # Replaces static 5-ticker watchlist. Pulls today's social-conviction
             # candidates (StockTwits + SS reddit-picks + Finviz + SS leaderboard),
-            # runs IVR proxy on each, and surfaces names where both signals align.
+            # runs real IVR from Tradier (fallback: HV30 proxy labeled correctly),
+            # and surfaces names where both signals align.
             try:
                 import math as _math
+                from tradier_client import TradierClient as _TC3
+                _tc3 = _TC3()
+
                 _, vixy_z = engine.fetch_vixy_proxy() if hasattr(engine, "fetch_vixy_proxy") else (0, 0)
                 if vixy_z < 0.5:
                     iv_env = "LOW"
@@ -819,6 +823,7 @@ def main():
                 plays = engine.generate_trending_options_plays(max_results=8)
                 _DTE_MID = 37
                 _T = _DTE_MID / 365.0
+                _2PI_SQRT = (2 * _math.pi) ** 0.5
 
                 candidate_lines = []   # (meter, ivr, display_line)
                 snapshot_top   = []   # [{sym, ivr, strike}] — top HIGH entries for DB
@@ -828,22 +833,52 @@ def main():
                     if not sym or not spot:
                         continue
                     try:
-                        hv30      = engine.calculate_historical_volatility(sym, lookback=30)
-                        iv_est    = hv30 * 1.15
-                        ivr_proxy = min(iv_est, 99.0)
-                        meter     = play.get("meter", "NEUTRAL")
-                        # 0.20-delta put strike approximation at 37 DTE
-                        iv_dec    = iv_est / 100.0
-                        strike    = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec ** 2 * _T))
-                        ivr_bar   = "🟢" if ivr_proxy >= 35 else ("🟡" if ivr_proxy >= 20 else "🔴")
-                        if meter == "HIGH" and ivr_proxy >= 35:
-                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | delta `0.20` → `${strike}` strike"
-                            snapshot_top.append({"sym": sym, "ivr": int(ivr_proxy), "strike": strike})
-                        elif meter == "HIGH":
-                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | IVR est `{ivr_proxy:.0f}%` | IV thin — watch"
+                        meter = play.get("meter", "NEUTRAL")
+
+                        # Real IVR from Tradier (1h cache — no redundant calls).
+                        # Falls back to HV30×1.15 proxy; labels clarify which source.
+                        ivr_val    = 0.0
+                        iv_dec     = 0.0
+                        iv_reliable = False
+                        iv_label   = ""
+                        if _tc3.api_key:
+                            try:
+                                _ivr_data = _tc3.get_iv_rank(sym, engine.db)
+                                _cur_iv   = _ivr_data.get("current_iv", 0.0)
+                                if _cur_iv > 0:
+                                    ivr_val    = _ivr_data.get("ivr", 0.0)
+                                    iv_dec     = _cur_iv
+                                    iv_reliable = _ivr_data.get("reliable", False)
+                                    iv_label   = f"IVR `{ivr_val:.0f}%`{'✅' if iv_reliable else '~'}"
+                            except Exception:
+                                pass
+                        if iv_dec == 0.0:
+                            hv30    = engine.calculate_historical_volatility(sym, lookback=30)
+                            iv_dec  = (hv30 * 1.15) / 100.0
+                            ivr_val = min(hv30 * 1.15, 99.0)   # NOT a rank — just IV est
+                            iv_label = f"IV est `{ivr_val:.0f}%`~proxy"
+
+                        # 0.20-delta put strike at DTE_MID via Black-Scholes approximation
+                        strike   = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
+                        # Premium estimate (half-normal approximation of ATM option price)
+                        est_prem = round(strike * iv_dec * _math.sqrt(_T) / _2PI_SQRT * 100)
+
+                        ivr_bar = "🟢" if ivr_val >= 35 else ("🟡" if ivr_val >= 20 else "🔴")
+
+                        # CLAUDE.md decision tree: stocks > $100 → credit spread, not naked CSP
+                        if spot > 100:
+                            setup_tag = f"→ spread: sell `${strike}` / buy `${strike - 5}` put · est `${est_prem}` cr"
                         else:
-                            line = f"┣ {ivr_bar} **{sym}** — Watch | IVR est `{ivr_proxy:.0f}%`"
-                        candidate_lines.append((meter, ivr_proxy, line))
+                            setup_tag = f"→ CSP `${strike}` strike · est `${est_prem}` cr"
+
+                        if meter == "HIGH" and ivr_val >= 35:
+                            line = f"┣ {ivr_bar} **{sym}** — HIGH | {iv_label} | Δ0.20 {setup_tag}"
+                            snapshot_top.append({"sym": sym, "ivr": int(ivr_val), "strike": strike})
+                        elif meter == "HIGH":
+                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | {iv_label} | IV thin — watch"
+                        else:
+                            line = f"┣ {ivr_bar} **{sym}** — Watch | {iv_label}"
+                        candidate_lines.append((meter, ivr_val, line))
                     except Exception:
                         pass
 
@@ -856,14 +891,14 @@ def main():
 
                 if candidate_lines:
                     if high_count > 0:
-                        sub = f"{high_count} name{'s' if high_count != 1 else ''} where conviction is HIGH and IV setup supports premium selling"
+                        sub = f"{high_count} name{'s' if high_count != 1 else ''} where conviction is HIGH and IVR supports premium selling"
                     else:
-                        sub = "No HIGH conviction + IV entries today — stand down on new positions"
+                        sub = "No HIGH conviction + IVR entries today — stand down on new positions"
                     candidates_payload = (
                         f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"
                         f"{sub}\n\n"
                         + "\n".join(l for _, _, l in candidate_lines[:7])
-                        + f"\n┗ {directive}"
+                        + f"\n┗ {directive} Stocks >$100 → spread shown."
                     )
                 else:
                     candidates_payload = (
