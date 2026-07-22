@@ -6,17 +6,19 @@ always-on process. Wakes every 60 seconds, checks current UTC time against a
 schedule table, fires each mode as a non-blocking subprocess, and deduplicates
 via the DB so no mode fires twice in the same calendar day even across restarts.
 
-Keep in PythonAnywhere cron (these are once-daily and too lightweight to justify
-an always-on slot):
-  09:39 UTC  audit.py          — DB maintenance / vacuum
-  06:00 UTC  daily_pulse.py    — morning health check
+Keep in PythonAnywhere cron (deliberately standalone — contains personal financial data):
+  09:39 UTC         audit.py          — DB maintenance / vacuum
+  06:00 UTC         daily_pulse.py    — SimpleFIN balance snapshot → Pushover only (never Discord)
 
-Everything else is handled here.
+Everything else is handled here, including:
+  21:30 UTC weekdays  store_daily_iv  — IV accumulation after close
+  04:00 UTC Sundays   personal_scorecard — strategy recap → Pushover only
 
 Cron slots freed (remove these from PythonAnywhere after deploying):
   morning, gex, macro (×2), trending_plays, futures_social, wheel_signals,
   crypto_social, cross_asset (×2), options_flow (×3), market_intraday,
-  income, iv_crush, post_market, eod, weekly_scorecard
+  income, iv_crush, post_market, eod, weekly_scorecard,
+  store_daily_iv, personal_scorecard
 """
 
 import os
@@ -87,8 +89,6 @@ SCHEDULE = [
     (17, 30, "market_intraday",    "scheduler",    ["--mode", "market_intraday"], True),
     # spx_income removed — not part of active strategy.
     (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
-    # store_daily_iv is NOT here — it runs once/day via PythonAnywhere scheduled task
-    # at 21:30 UTC (after market close). Add to cron: python scheduler.py --mode store_daily_iv
     (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),
@@ -97,6 +97,9 @@ SCHEDULE = [
     # Pulls 252-day premium history from CEFConnect → updates mu/sigma in DB
     # so monitor.py's z-score uses empirical data, not hardcoded defaults.
     (22, 30, "cef_calibrate",      "scheduler",    ["--mode", "cef_calibrate"],   True),
+    # IV accumulation — stores daily ATM IV per symbol after close.
+    # Accumulating since Jul 11 2026; usable baseline ~30 days; full 52-week IVR after 252 days.
+    (21, 30, "store_daily_iv",     "scheduler",    ["--mode", "store_daily_iv"],  True),
     # weekly_scorecard fires Friday only — gated here, not inside the script.
     # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
 ]
@@ -104,6 +107,11 @@ SCHEDULE = [
 # Friday-only entries appended separately so the main loop can filter them.
 SCHEDULE_FRIDAY_ONLY = [
     (20, 30, "weekly_scorecard",   "scheduler",    ["--mode", "weekly_scorecard"], True),
+]
+
+# Sunday-only entries — personal recap sent via Pushover (never Discord).
+SCHEDULE_SUNDAY_ONLY = [
+    ( 4,  0, "personal_scorecard", "scheduler",    ["--mode", "personal_scorecard"], False),
 ]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,7 +166,11 @@ def run():
         date_str = now_utc.strftime("%Y-%m-%d")
         h, m     = now_utc.hour, now_utc.minute
 
-        schedule = SCHEDULE + (SCHEDULE_FRIDAY_ONLY if weekday == 4 else [])
+        schedule = (
+            SCHEDULE
+            + (SCHEDULE_FRIDAY_ONLY  if weekday == 4 else [])
+            + (SCHEDULE_SUNDAY_ONLY  if weekday == 6 else [])
+        )
         for (t_h, t_m, task_key, script, args, wkdays_only) in schedule:
             if wkdays_only and not is_wkday:
                 continue
