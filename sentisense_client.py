@@ -58,7 +58,9 @@ def _get(path: str, params: dict = None, timeout: int = 15) -> dict:  # Optional
                 time.sleep(2)
                 continue
             if r.status_code != 200:
-                logger.warning(f"[SentiSense] {r.status_code} on {path}: {r.text[:200]}")
+                # 404 = endpoint not available at this plan tier; not an error worth alerting on
+                lvl = logging.DEBUG if r.status_code == 404 else logging.WARNING
+                logger.log(lvl, f"[SentiSense] {r.status_code} on {path}: {r.text[:200]}")
                 return None
             return r.json()
         except requests.RequestException as e:
@@ -104,6 +106,11 @@ def get_market_mood(db) -> dict:  # Optional[dict]
 
     data = _get("/market/mood")
     if not data:
+        # Fallback: return last cached value (any age) so the signal isn't blank
+        raw = db.get_state("ss_market_mood")
+        if isinstance(raw, dict) and raw.get("data"):
+            logger.debug(f"[SentiSense] market_mood unavailable — using stale cache from {raw.get('date', '?')}")
+            return raw["data"]
         return None
 
     # API may wrap under "data" key or return flat

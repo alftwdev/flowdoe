@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import logging
+import traceback
 import requests
 from datetime import datetime, timezone
 
@@ -688,13 +689,16 @@ def run():
                     continue
 
                 logger.info(f"Firing {mode} brief...")
-                _mark_fired(db, db_key, date_str)
                 try:
                     builder = BUILDERS[mode]
                     title, description, color = builder(engine, db)
                     _send_embed(title, description, color)
+                    _mark_fired(db, db_key, date_str)  # only mark after successful dispatch
                 except Exception as e:
-                    logger.error(f"{mode} brief build failed: {e}")
+                    logger.error(
+                        f"{mode} brief build/dispatch failed: {e}\n"
+                        f"{traceback.format_exc()}"
+                    )
 
         except Exception as e:
             logger.error(f"Loop tick error: {e}")
