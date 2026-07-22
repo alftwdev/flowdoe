@@ -358,11 +358,33 @@ def check_sec_edgar(session, ticker):
 # TWELVE DATA — LIVE METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _td_sleep_rate_limit(attempt: int, response: dict) -> bool:
+    """
+    Returns True and sleeps to the next minute boundary if the TD response is a 429.
+    Returns False for all other errors so normal backoff applies.
+    The 429 means "wait for the next minute" — retrying in 2-5s just burns retries
+    inside the same rate-limit window and guarantees failure.
+    Only sleeps on attempts 0 and 1 (leaves attempt 2 as the final hard fail).
+    """
+    if response.get('code') != 429:
+        return False
+    if attempt >= 2:
+        return False  # last attempt — let caller log the failure
+    secs_remaining = 62 - datetime.now().second  # +2s buffer past the minute flip
+    logger.warning(
+        f"[Rate Limit] 429 on attempt {attempt + 1} — sleeping {secs_remaining}s "
+        f"to clear the TD minute window ({response.get('message', '')[:80]})"
+    )
+    time.sleep(secs_remaining)
+    return True
+
+
 def fetch_live_metrics(session, symbol, retries=3):
     """
-    Three attempts with escalating backoff (2s, 5s) before giving up.
-    Twelve Data intermittently times out during peak market hours — a single
-    failure with no retry was causing false "Data feed offline" reports.
+    Three attempts with 429-aware backoff before giving up.
+    On a rate-limit response the sleep advances to the next minute boundary
+    (instead of retrying in 2-5s inside the same window and failing again).
+    On transient errors the original 2s/5s backoff still applies.
     Timeout raised to 20s to handle slower responses during high-load windows.
     """
     last_err = None
@@ -371,30 +393,34 @@ def fetch_live_metrics(session, symbol, retries=3):
         try:
             if backoff[attempt]:
                 time.sleep(backoff[attempt])
-            p_res  = session.get(
+            p_res = session.get(
                 f"https://api.twelvedata.com/price?symbol={symbol}&apikey={TD_API_KEY}",
                 timeout=20).json()
-            price  = float(p_res.get('price', 0.0))
+            if _td_sleep_rate_limit(attempt, p_res):
+                continue
+            price = float(p_res.get('price', 0.0))
             if price == 0.0:
                 raise ValueError(f"price came back 0.0: {p_res}")
 
-            rsi    = 50.0
+            rsi   = 50.0
             r_res = session.get(
                 f"https://api.twelvedata.com/rsi?symbol={symbol}&interval=1day"
                 f"&time_period=14&apikey={TD_API_KEY}", timeout=20).json()
-            rsi   = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
+            if not _td_sleep_rate_limit(attempt, r_res):
+                rsi = float(r_res.get('values', [{'rsi': 50.0}])[0]['rsi'])
 
             nav_ticker = PRIORITY_ASSETS[symbol]["nav_ticker"]
             nav_res    = session.get(
                 f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
                 timeout=20).json()
-            nav        = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
+            nav = float(nav_res.get('price', PRIORITY_ASSETS[symbol]["default_nav"]))
 
             return price, rsi, nav
         except Exception as e:
             last_err = e
     logger.error(f"[Data Fetch Error] {symbol} failed after {retries} attempts: {last_err}")
     return 0.0, 50.0, PRIORITY_ASSETS[symbol]["default_nav"]
+
 
 def fetch_time_series(session, symbol, outputsize=21):
     """Returns list of daily close dicts from Twelve Data, newest first."""
@@ -404,6 +430,15 @@ def fetch_time_series(session, symbol, outputsize=21):
             params={"symbol": symbol, "interval": "1day",
                     "outputsize": outputsize, "apikey": TD_API_KEY},
             timeout=20).json()
+        if res.get('code') == 429:
+            secs = 62 - datetime.now().second
+            logger.warning(f"[Rate Limit] time_series {symbol} — sleeping {secs}s")
+            time.sleep(secs)
+            res = session.get(
+                "https://api.twelvedata.com/time_series",
+                params={"symbol": symbol, "interval": "1day",
+                        "outputsize": outputsize, "apikey": TD_API_KEY},
+                timeout=20).json()
         return res.get("values", [])
     except Exception as e:
         logger.error(f"[Time Series Fetch Error] {symbol}: {e}")
