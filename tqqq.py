@@ -587,6 +587,19 @@ class TQQQTacticalSniper:
             # otherwise the signal fires every time the market rallies with conviction.
             if contract == "PUT" and macro_bull and z_score < 3.0:
                 return None
+            # Symmetric gate for PUT MONITORING on calm bullish days — mirrors the VIXY
+            # distribution gate that suppresses false CALL entries on calm red days.
+            # market_analysis_bias ≥ +2 = confirmed bullish (2+ of 8 flags positive net),
+            # vix_z < 0.5 = no fear spike. A PUT signal on a calm green day is noise,
+            # not conviction — suppress it. Genuine tops require vix_z spike or extreme
+            # overbought (z ≥ 3.0) to override this gate.
+            if contract == "PUT" and vix_z < 0.5:
+                try:
+                    _bias = int(db.get_state("market_analysis_bias") or 0)
+                except (TypeError, ValueError):
+                    _bias = 0
+                if _bias >= 2 and z_score < 3.0:
+                    return None
         else:
             return None
 
@@ -1870,13 +1883,17 @@ class TQQQTacticalSniper:
                 elif pnl_proxy >= LEAP_TP2_PCT and f"TP2_{today_str}" not in last_alert:
                     _fire(
                         "🎯 TQQQ LEAP | FULL TARGET HIT",
-                        base_line + "┗ +100% target reached — close full position or trail with tight stop.",
+                        base_line
+                        + "┣ +100% target reached — close full position or trail with tight stop.\n"
+                        + "┗ 📌 Profit cascade: route proceeds → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         0x2ecc71, "TP2"
                     )
                 elif pnl_proxy >= LEAP_TP1_PCT and f"TP1_{today_str}" not in last_alert:
                     _fire(
                         "✅ TQQQ LEAP | FIRST TARGET HIT",
-                        base_line + "┗ Scale out 50% of position — hold remainder for the full double.",
+                        base_line
+                        + "┣ Scale out 50% of position — hold remainder for the full double.\n"
+                        + "┗ 📌 Proceeds from the 50% scale: route → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         0x2ecc71, "TP1"
                     )
                 elif dte_remaining <= LEAP_ROLL_DTE and f"ROLL_{today_str}" not in last_alert:
@@ -2260,7 +2277,8 @@ class TQQQTacticalSniper:
                     send_essentials_embed(
                         WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 🎯 TP2 — Close Remainder",
                         f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
-                        f"┗ P&L proxy `+{pnl_proxy:.1f}%` — close full position. Target achieved.",
+                        f"┣ P&L proxy `+{pnl_proxy:.1f}%` — close full position. Target achieved.\n"
+                        f"┗ 📌 Profit cascade: route proceeds → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         color_val
                     )
                     pos["last_alert"] = f"TP2_{today_str}"
@@ -2269,7 +2287,8 @@ class TQQQTacticalSniper:
                     send_essentials_embed(
                         WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 📊 TP1 — Scale 50% Out",
                         f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
-                        f"┗ P&L proxy `+{pnl_proxy:.1f}%` — sell half, let remainder ride.",
+                        f"┣ P&L proxy `+{pnl_proxy:.1f}%` — sell half, let remainder ride.\n"
+                        f"┗ 📌 Proceeds from the 50% scale: route → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         color_val
                     )
                     pos["last_alert"] = f"TP1_{today_str}"
