@@ -128,12 +128,12 @@ class RealTimeTickAgent:
 
     def on_close(self, ws, close_status_code, close_msg):
         self._connected = False
-        logger.debug("Stream dropped.")
+        logger.debug(f"Stream dropped (code={close_status_code}).")
 
     def execution_loop(self):
-        self._connected = False
+        self._connected    = False
         self._connected_at = 0.0
-        self._backoff = 30.0
+        self._backoff      = 30.0
         while True:
             try:
                 ws = websocket.WebSocketApp(
@@ -146,18 +146,24 @@ class RealTimeTickAgent:
                 ws.run_forever(ping_interval=60, ping_timeout=15)
             except Exception as e:
                 logger.error(f"WS exception: {e}")
-            # A connection is only "stable" if it lasted ≥ 60s. TD cycles connections at
-            # equity close, producing rapid connect/drop loops. Resetting backoff on any
-            # on_open (even an 8-second session) prevented escalation and hammered TD.
-            # Now: short-lived connections keep escalating; only a real session resets.
-            stable = self._connected and (time.time() - self._connected_at) >= 60
+
+            # Use session duration to decide stability — not self._connected, which
+            # on_close already set to False before we reach this check. A session that
+            # lasted ≥ 60s is a normal TD server-side drop; reset to minimum backoff.
+            # A short session (< 60s) means something is wrong; escalate to avoid hammering.
+            session_secs = time.time() - self._connected_at if self._connected_at > 0 else 0
+            stable = session_secs >= 60
             if stable:
                 self._backoff = 30.0
             else:
                 self._backoff = min(self._backoff * 2, 300.0)
-            logger.info(f"Reconnecting in {self._backoff:.0f}s...{'(stable reset)' if stable else ''}")
+            logger.info(
+                f"Reconnecting in {self._backoff:.0f}s "
+                f"(session lasted {session_secs:.0f}s — {'normal TD drop, reset backoff' if stable else 'short session, escalating'})"
+            )
             time.sleep(self._backoff)
-            self._connected = False
+            self._connected    = False
+            self._connected_at = 0.0   # reset so next session's duration is clean
 
 # =====================================================================
 # DAEMON ORCHESTRATOR
