@@ -617,14 +617,14 @@ def _build_eod_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase
     score_sign = f"+{bias['bias_score']}" if bias['bias_score'] >= 0 else str(bias['bias_score'])
 
     desc = (
-        f"**Session Close — Bias: {bias['label']} (Score: {score_sign})**\n\n"
+        f"**Session Close — Bias: {bias['label']} (Score: {score_sign})**\n"
         f"┣ SPY: {_arrow(spy_chg)}{abs(spy_chg):.2f}% | QQQ: {_arrow(qqq_chg)}{abs(qqq_chg):.2f}%\n"
         f"┣ VIX close: `{real_vix:.1f}` | VIXY z: `{vixy_z:+.2f}σ`\n"
         f"┣ Fear & Greed: `{bias['fg_val']}` ({bias['fg_class']})\n"
-        f"┣ HY Spread: `{bias['signals'].get('hy_spread', 0.0):.2f}%`\n"
+        f"┗ HY Spread: `{bias['signals'].get('hy_spread', 0.0):.2f}%`\n"
     )
 
-    # Wheel position DTE countdown
+    # Wheel position DTE countdown — appended after fixed lines if any positions open
     try:
         open_pos = db.get_open_wheel_positions()
         if open_pos:
@@ -645,7 +645,6 @@ def _build_eod_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase
     except Exception as e:
         logger.warning(f"EOD: wheel position read failed: {e}")
 
-    desc += "\n┗ Full brief resumes 0800 HST tomorrow."
     return f"EOD BRIEF — {now_label}", desc, bias["color"]
 
 
