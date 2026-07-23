@@ -360,6 +360,24 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception:
         pass
 
+    # Log prediction to signal_ledger — graded next trading day by announcements.py.
+    # Only log directional calls (skip NEUTRAL/CHOP — no edge to score).
+    try:
+        if bias["label"] in ("BULLISH", "BEARISH"):
+            _q = engine._fetch_twelve_data_quotes(["SPY"])
+            spy_price = float((_q.get("SPY") or {}).get("close", 0) or 0)
+            if spy_price > 0:
+                db.log_prediction(
+                    signal_type="market_direction",
+                    ticker="SPY",
+                    predicted_direction=bias["label"],
+                    entry_price=spy_price,
+                    target_days=1,
+                    notes=f"bias_score={bias['bias_score']}/8",
+                )
+    except Exception:
+        pass
+
     sigs = bias["signals"]
 
     # ── MACRO ENVIRONMENT ─────────────────────────────────────────────────────

@@ -135,6 +135,28 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
 
+                # Signal ledger — logs predictions from all three strategies for accuracy scoring.
+                # Graded weekly by announcements.py; published to #announcements as a free-tier hook.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS signal_ledger (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signal_type TEXT NOT NULL,
+                        ticker TEXT,
+                        predicted_direction TEXT NOT NULL,
+                        entry_price REAL,
+                        prediction_date TEXT NOT NULL,
+                        target_date TEXT NOT NULL,
+                        exit_price REAL,
+                        outcome TEXT DEFAULT 'PENDING',
+                        score_contribution REAL DEFAULT 0,
+                        graded_date TEXT,
+                        notes TEXT
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_outcome ON signal_ledger(outcome)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_target ON signal_ledger(target_date)")
+                conn.commit()
+
                 # Graceful column migrations — try each; OperationalError means already exists.
                 for col_sql in [
                     # Lot-engine (session 1)
@@ -200,6 +222,117 @@ class EcosystemDatabase:
         except sqlite3.OperationalError as e:
             logger.warning(f"Database lock in alert manager: {e}")
             return False
+
+    def log_prediction(self, signal_type: str, ticker: str, predicted_direction: str,
+                       entry_price: float, target_days: int, notes: str = "") -> bool:
+        """
+        Logs a signal prediction to the ledger for later grading.
+        Deduplicates by signal_type + ticker + prediction_date — one log per signal per day.
+        signal_type: 'market_direction' | 'tqqq_call' | 'tqqq_put' | 'clm_floor' | 'btc_sentiment'
+        predicted_direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL'
+        target_days: trading days until grading (1=next day, 5=one week, 14=two weeks, 30=month)
+        """
+        from datetime import date, timedelta
+        today = date.today().isoformat()
+        target = (date.today() + timedelta(days=target_days)).isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM signal_ledger WHERE signal_type=? AND ticker=? AND prediction_date=?",
+                    (signal_type, ticker, today)
+                )
+                if cursor.fetchone():
+                    return False  # already logged today
+                cursor.execute("""
+                    INSERT INTO signal_ledger
+                        (signal_type, ticker, predicted_direction, entry_price,
+                         prediction_date, target_date, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (signal_type, ticker, predicted_direction, entry_price, today, target, notes))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"log_prediction failed: {e}")
+            return False
+
+    def get_pending_predictions(self, max_target_date: str = None) -> list:
+        """Returns PENDING predictions whose target_date <= max_target_date (default: today)."""
+        from datetime import date
+        cutoff = max_target_date or date.today().isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, signal_type, ticker, predicted_direction, entry_price,
+                           prediction_date, target_date, notes
+                    FROM signal_ledger
+                    WHERE outcome = 'PENDING' AND target_date <= ?
+                    ORDER BY target_date ASC
+                """, (cutoff,))
+                cols = ["id", "signal_type", "ticker", "predicted_direction", "entry_price",
+                        "prediction_date", "target_date", "notes"]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"get_pending_predictions failed: {e}")
+            return []
+
+    def grade_prediction(self, pred_id: int, exit_price: float, outcome: str,
+                         score: float, notes: str = ""):
+        """Records the graded outcome for a ledger entry. outcome: WIN | LOSS | NEUTRAL"""
+        from datetime import date
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE signal_ledger
+                    SET exit_price=?, outcome=?, score_contribution=?, graded_date=?, notes=?
+                    WHERE id=?
+                """, (exit_price, outcome, score, date.today().isoformat(), notes, pred_id))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"grade_prediction failed: {e}")
+
+    def get_scorecard_window(self, days_back: int = 7) -> list:
+        """Returns all graded predictions from the last N days for the weekly scorecard."""
+        from datetime import date, timedelta
+        since = (date.today() - timedelta(days=days_back)).isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT signal_type, ticker, predicted_direction, entry_price, exit_price,
+                           outcome, score_contribution, prediction_date, target_date, notes
+                    FROM signal_ledger
+                    WHERE graded_date >= ? AND outcome != 'PENDING'
+                    ORDER BY prediction_date DESC
+                """, (since,))
+                cols = ["signal_type", "ticker", "predicted_direction", "entry_price", "exit_price",
+                        "outcome", "score_contribution", "prediction_date", "target_date", "notes"]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"get_scorecard_window failed: {e}")
+            return []
+
+    def get_mtd_accuracy(self) -> tuple:
+        """Returns (wins, total) for the current calendar month."""
+        from datetime import date
+        month_start = date.today().replace(day=1).isoformat()
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        SUM(CASE WHEN outcome='WIN' THEN 1 ELSE 0 END),
+                        COUNT(*)
+                    FROM signal_ledger
+                    WHERE graded_date >= ? AND outcome != 'PENDING'
+                """, (month_start,))
+                row = cursor.fetchone()
+                return (row[0] or 0, row[1] or 0)
+        except Exception as e:
+            logger.error(f"get_mtd_accuracy failed: {e}")
+            return (0, 0)
 
     def open_wheel_position(self, symbol, position_type, strike, expiration, premium_collected,
                              contracts=1, cost_basis=None, open_fees=0.0, roll_group_id=None):

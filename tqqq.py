@@ -2366,6 +2366,17 @@ class TQQQTacticalSniper:
             leap_setup = self.enrich_leap_with_tradier_chain(leap_setup)
             leap_setup = self.enrich_leap_with_greeks(leap_setup, tqqq_daily)
             self.dispatch_leap_signal(leap_setup)
+            try:
+                db.log_prediction(
+                    signal_type="tqqq_call",
+                    ticker="TQQQ",
+                    predicted_direction="BULLISH",
+                    entry_price=leap_setup.get("tqqq_spot", 0.0),
+                    target_days=30,
+                    notes=f"bottom_score={leap_setup.get('bottom_score', 0):.0f}",
+                )
+            except Exception:
+                pass
 
         # LEAP PUT desk: BTO deep ITM QQQ puts on green days / overbought conditions.
         # Gated by top_score >= CYCLE_TOP_THRESHOLD so low-conviction green days don't fire.
@@ -2373,6 +2384,17 @@ class TQQQTacticalSniper:
         if put_setup:
             put_setup = self.enrich_leap_put_with_tradier_chain(put_setup)
             self.dispatch_leap_put_signal(put_setup)
+            try:
+                db.log_prediction(
+                    signal_type="tqqq_put",
+                    ticker="QQQ",
+                    predicted_direction="BEARISH",
+                    entry_price=put_setup.get("qqq_spot", 0.0),
+                    target_days=30,
+                    notes=f"top_score={put_setup.get('top_score', 0):.0f}",
+                )
+            except Exception:
+                pass
 
         # Monitor any open LEAP positions (monthly check-ins, TP/stop/roll alerts).
         self.check_leap_position_status(tqqq_spot_now)

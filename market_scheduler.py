@@ -106,7 +106,10 @@ SCHEDULE = [
 
 # Friday-only entries appended separately so the main loop can filter them.
 SCHEDULE_FRIDAY_ONLY = [
-    (20, 30, "weekly_scorecard",   "scheduler",    ["--mode", "weekly_scorecard"], True),
+    (20, 30, "weekly_scorecard",   "scheduler",      ["--mode", "weekly_scorecard"], True),
+    # Grade all pending predictions + publish accuracy scorecard → #announcements.
+    # Runs 15 min after weekly_scorecard so both close out the trading week cleanly.
+    (20, 45, "announcements",      "announcements",  [],                             True),
 ]
 
 # Sunday-only entries — personal recap sent via Pushover (never Discord).
@@ -131,6 +134,8 @@ def build_cmd(script: str, args: list) -> list:
     if script == "cross_asset":
         cmd = [PYTHON, os.path.join(BASE_DIR, "cross_asset.py")]
         return cmd + args if args else cmd
+    if script == "announcements":
+        return [PYTHON, os.path.join(BASE_DIR, "announcements.py")]
     raise ValueError(f"Unknown script type: {script}")
 
 def fire(task_key: str, cmd: list):

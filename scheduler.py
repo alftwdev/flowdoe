@@ -1380,6 +1380,24 @@ def main():
                 elif v <= 75:    fng_bar = "Greed"
                 else:            fng_bar = "Extreme Greed"
 
+                # Log BTC prediction at sentiment extremes — graded at T+7.
+                # Extreme Fear → BULLISH (contrarian bounce). Extreme Greed → BEARISH (fade).
+                if v <= 25 or v >= 75:
+                    try:
+                        _btc_snap = snap.get("trending") or []
+                        _btc_price = next((d["price"] for t, d in _btc_snap if t == "BTC"), 0.0)
+                        if _btc_price > 0:
+                            engine.db.log_prediction(
+                                signal_type="btc_sentiment",
+                                ticker="BTC/USD",
+                                predicted_direction="BULLISH" if v <= 25 else "BEARISH",
+                                entry_price=_btc_price,
+                                target_days=7,
+                                notes=f"F&G={v} ({fng_bar})",
+                            )
+                    except Exception:
+                        pass
+
                 payload = f"**CRYPTO DESK — {today_l}**\n\n"
                 payload += f"**Fear & Greed:** {fng['value']}/100 — {fng_bar}\n\n"
 

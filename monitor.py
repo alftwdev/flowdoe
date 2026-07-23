@@ -1253,6 +1253,20 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     is_dist_overvalued, dist_fair_value, implied_yield, dist_yield_desc = \
         check_distribution_yield_floor(price, ticker)
 
+    # Log accumulation signal when price is at or below fair value — graded T+14.
+    if not is_dist_overvalued and implied_yield >= 19.0 and price > 0:
+        try:
+            db.log_prediction(
+                signal_type="clm_floor",
+                ticker=ticker,
+                predicted_direction="BULLISH",
+                entry_price=price,
+                target_days=14,
+                notes=f"yield={implied_yield:.1f}% fv=${dist_fair_value}",
+            )
+        except Exception:
+            pass
+
     # ── NEW: 13F / large holder exit signal from SEC scrape
     holder_exit = "13D" in sec_shield or "13G" in sec_shield
 
@@ -1957,7 +1971,10 @@ def run_monitor():
             current_date = now.strftime("%Y-%m-%d")
             last_pulse   = db.get_state("last_monitor_pulse_date", "")
 
-            if now.hour >= 8 and last_pulse != current_date:
+            # 08:10 HST = 18:10 UTC — intentionally 10 min after market_analysis.py's
+            # 0800 HST cycle to avoid Twelve Data 429 credit contention (both scripts
+            # hit the same TD per-minute limit simultaneously at 18:00 UTC).
+            if (now.hour > 8 or (now.hour == 8 and now.minute >= 10)) and last_pulse != current_date:
                 logger.info("Triggering 0800 HST daily pulse...")
                 send_daily_pulse()
                 db.update_state("last_monitor_pulse_date", current_date)
