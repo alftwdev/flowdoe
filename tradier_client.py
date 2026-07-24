@@ -461,6 +461,83 @@ class TradierClient:
         return results
 
 
+    def get_timesales(self, symbol: str, start_et: str, end_et: str,
+                      interval: str = "1min") -> list:
+        """
+        Fetch intraday bars for a symbol via Tradier /markets/timesales.
+        start_et / end_et: "YYYY-MM-DD HH:MM" in US/Eastern time.
+        interval: "1min" | "5min" | "15min"
+        Returns list of bar dicts with keys: time, open, high, low, close, volume, vwap.
+        Empty list on failure.
+        """
+        if not self.api_key:
+            return []
+        cache_key = f"timesales_{symbol}_{start_et}_{interval}"
+        def _fetch():
+            data = self._get("/markets/timesales", {
+                "symbol":         symbol,
+                "interval":       interval,
+                "start":          start_et,
+                "end":            end_et,
+                "session_filter": "open",   # RTH only — excludes pre/post market bars
+            })
+            if not data:
+                return []
+            items = (data.get("series") or {}).get("data", [])
+            if isinstance(items, dict):   # single-bar response is a dict, not a list
+                items = [items]
+            result = []
+            for bar in (items or []):
+                try:
+                    result.append({
+                        "time":   bar.get("time", ""),
+                        "open":   float(bar.get("open",  0)),
+                        "high":   float(bar.get("high",  0)),
+                        "low":    float(bar.get("low",   0)),
+                        "close":  float(bar.get("close", 0)),
+                        "volume": int(bar.get("volume", 0)),
+                        "vwap":   float(bar.get("vwap",  0)),
+                    })
+                except (TypeError, ValueError):
+                    continue
+            return result
+        # Cache 10 min — ORB bars are historical once calculated
+        return self._cached(cache_key, 600, _fetch)
+
+    def is_macro_event_today(self) -> bool:
+        """
+        Returns True if today has a high-impact macro event (FOMC, CPI, NFP, Fed speak).
+        Uses Tradier calendar endpoint. Caches 6 hours.
+        A macro event on ORB day degrades the statistical edge significantly.
+        """
+        if not self.api_key:
+            return False
+        cache_key = f"macro_event_{datetime.now().strftime('%Y-%m-%d')}"
+        def _fetch():
+            today = datetime.now().date()
+            r = self._get("/markets/calendar", {
+                "month": today.month,
+                "year":  today.year,
+            })
+            if not r:
+                return False
+            days_data = r.get("calendar", {}).get("days", {}).get("day", [])
+            if isinstance(days_data, dict):
+                days_data = [days_data]
+            today_str = today.isoformat()
+            keywords = ("fomc", "fed", "federal reserve", "cpi", "consumer price",
+                        "nonfarm", "nfp", "payroll", "gdp", "pce", "ppi")
+            for day in (days_data or []):
+                if day.get("date", "") != today_str:
+                    continue
+                # Tradier calendar stores description under various keys
+                desc = str(day).lower()
+                if any(kw in desc for kw in keywords):
+                    return True
+            return False
+        return self._cached(cache_key, 21600, _fetch)
+
+
 def _gex_empty(symbol):
     return {
         "flip_strike": 0.0,

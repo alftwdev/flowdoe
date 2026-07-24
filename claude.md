@@ -1,10 +1,170 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Jul 19 2026*
+*Last updated: Jul 23 2026*
 
 ---
 
-## 0. The 3 Personal Strategies (Real Funds — This Is The System)
+## 0-A. Deployment Runbook (PA — after every git pull)
+
+### Step 1 — Pull on PythonAnywhere
+```bash
+cd ~/flowdoe_dev && git pull origin main
+```
+
+### Step 2 — Kill always-on tasks (copy-paste block)
+```bash
+pkill -f monitor.py
+pkill -f market_scheduler.py
+pkill -f market_analysis.py
+pkill -f tqqq.py
+pkill -f stream.py
+```
+
+### Step 3 — Restart via PA web UI
+Go to **Web → Always-on tasks** and restart each. Order matters:
+1. `market_scheduler.py` — dispatcher for all cron-style jobs
+2. `monitor.py` — CLM/CRF protection, 5-min loop
+3. `market_analysis.py` — morning/intraday/EOD brief
+4. `tqqq.py` — LEAP desk + cycle scorer
+5. `stream.py` — VIXY real-time → DB (crisis early warning)
+
+### Step 4 — Verify (30 seconds after restart)
+```bash
+ps aux | grep -E "monitor|market_scheduler|market_analysis|tqqq|stream" | grep -v grep
+```
+All five should appear. If `market_analysis_bias` in DB is stale (> 2 days), the always-on
+task died — restart it.
+
+### One-time setup (new PA environment only)
+```bash
+python seed_cef_premiums.py   # seeds CLM/CRF z-score mu/sigma from CEFConnect history
+```
+
+---
+
+## 0-B. Known Constants — Lock These, Never Guess
+
+### CLM/CRF Distribution (2026 reset — do NOT use pre-reset values)
+```python
+# 2026 annual distributions (set once per year after October NAV lock)
+CLM_ANNUAL_DIST = 1.4268   # $0.1189/month × 12
+CRF_ANNUAL_DIST = 1.3824   # $0.1152/month × 12
+
+# Fair value floor (annual_dist / 0.19 = FV at 19% yield target)
+CLM_FAIR_VALUE  = 7.51
+CRF_FAIR_VALUE  = 7.28
+
+# NAV fallbacks (updated Jul 23 2026 — refresh whenever CEFConnect NAV changes >0.10)
+CLM_NAV_FALLBACK = 6.45
+CRF_NAV_FALLBACK = 6.18   # was 6.30 — corrected Jul 23 2026 based on implied NAV math
+
+# Margin rate (E*TRADE)
+MARGIN_RATE = 7.25
+```
+
+**Rule: Every script that calculates CLM/CRF yield or Div. Yield MUST use these constants.**
+The pre-reset values ($0.1224 CLM / $0.1176 CRF → annuals 1.4688 / 1.4112) are dead.
+Never use 1.4580, 1.4688, 1.4112, or 1.3984 in any new code — those inflate yield and
+misrepresent the distribution reset. If you see those numbers in existing code, fix them.
+
+### Bug fixed Jul 23 2026 — monitor.py distribution mismatch
+`get_ticker_report()` line ~1190 was using `1.4580 / 1.4112` (pre-reset) for `y_dist`
+(Div. Yield in embed footer) while `check_distribution_yield_floor()` correctly used
+`1.4268 / 1.3824`. This caused the footer "Div. Yield" to show ~0.8–1.3% higher than
+the floor yield line, creating an internal inconsistency visible in Discord embeds.
+**Fix applied:** both paths now use the same 2026 constants.
+
+### Bug fixed Jul 23 2026 — "HIGH PREMIUM" label fired on negative z-score
+Status label logic (`send_daily_pulse`) was:
+```python
+elif ro_tier == "ELEVATED" or z_premium >= 1.5 or premium > 25.0:
+    status = "HIGH PREMIUM"
+```
+When `ro_tier == "ELEVATED"` from non-premium signals (volume anomaly, RO season, etc.)
+and `z_premium` was negative (premium BELOW historical average), the label "HIGH PREMIUM"
+was factually wrong. Fixed to two separate branches:
+- `z_premium >= 1.5 or premium > 25.0` → "HIGH PREMIUM"
+- `ro_tier == "ELEVATED"` (when premium is safe) → "RISK ELEVATED"
+
+**Rule: Never combine premium-label conditions with RO-score conditions in one elif.**
+The z-score is the authoritative premium signal. A negative z-score always means safe premium,
+regardless of what the composite RO score is. Label them separately.
+
+---
+
+## 0-C. API Budget & PA CPU Rules
+
+### Twelve Data rate limit: 144 credits/min (Grow plan)
+Each REST call = 1 credit. The 5-min monitor loop must stay well under budget.
+
+**monitor.py loop budget per tick (approx):**
+```
+2 price/RSI calls (CLM, CRF)        = 2 credits
+2 NAV proxy calls (XCLMX, XCRFX)   = 2 credits
+1 SPY time_series 200-day           = 1 credit  (cached in spy_chg_cache, not re-fetched)
+2 RVOL calls (CLM, CRF volume)      = 2 credits
+2 OBV/MFI (conditional, only fires on divergence) = 0–2 credits
+FRED HY spread: cached daily        = 0 credits (after first fetch)
+VIXY from stream.py DB              = 0 credits (WebSocket, no REST)
+─────────────────────────────────────────────────
+Per loop: ~7–9 credits out of 720/5-min budget. Extremely lean.
+```
+
+**Stagger rule (prevents 429 collision):**
+- monitor.py daily pulse: `08:10 HST = 18:10 UTC`
+- market_analysis.py morning: `08:00 HST = 18:00 UTC`
+- 10-minute gap between the two heaviest Twelve Data consumers. **Never move these closer.**
+
+**stream.py:** WebSocket — 0 REST credits. Subscribes to `BTC/USD,VIXY,SPY,QQQ` and writes
+VIXY price to DB for monitor.py to read. This is the zero-cost VIXY early warning layer.
+If VIXY z-score is None in DB, stream.py is dead — restart it.
+
+**No TDClient SDK on PA — REST only:**
+Every Twelve Data call uses `requests.get()` directly. The SDK spawns WebSocket threads
+on every instantiation and exhausts the OS thread limit. Never import or use `TDClient`.
+
+**FRED API:** All FRED fetches cached to DB once per calendar day. The 5-min monitor loop
+never hits FRED more than 1×/day. Pattern: `if not cached_today: fetch(); cache()`.
+
+**Binance FAPI:** Free public endpoints — no API key. If returning zeros on PA, check
+network egress rules. This doesn't affect the core strategy.
+
+**SentiSense:** All fetches cached to DB per TTL (daily or 7-day depending on endpoint).
+Never fetch the same SentiSense endpoint twice in a session.
+
+---
+
+## 0-D. Cross-Script Data Flow (read before adding any new signal)
+
+Scripts communicate through the DB, never by importing each other.
+
+```
+stream.py   → DB: vixy_last_price, vixy_z_score (WebSocket, real-time)
+monitor.py  → DB: clm_premium_z, crf_premium_z, clm_last_price, crf_last_price,
+                   clm_last_nav, crf_last_nav, hy_spread_cached, carry_spread_data,
+                   clm_floor_{date} signal_ledger entries
+tqqq.py     → DB: tqqq_bottom_score, tqqq_top_score
+market_analysis.py → DB: market_analysis_bias, morning_conviction_bias_{date}
+scheduler.py → DB: orb_intraday_bias_{date}, orb_{sym}_{date}, wheel_snapshot_top,
+                    wheel_candidates_snapshot, btc_sentiment via signal_ledger
+
+Consumers:
+  market_analysis.py reads: tqqq_bottom_score, tqqq_top_score, vixy_z_score,
+                             clm_premium_z, crf_premium_z, orb_intraday_bias_{date},
+                             fred_yield_spread, hy_spread_cached
+  tqqq.py reads:            market_analysis_bias, vixy_z_score, orb_intraday_bias_{date}
+  scheduler.py reads:       market_analysis_bias, tqqq_bottom_score, tqqq_top_score
+```
+
+**Rule: If a signal is already in the DB, READ it — don't re-fetch from the API.**
+Example: VIXY z-score is written by stream.py → read from DB in monitor.py and tqqq.py.
+Never make a REST call for data another script already provides via DB cache.
+
+---
+
+---
+
+## 0-E. The 3 Personal Strategies (Real Funds — This Is The System)
 
 These are the three live strategies running with actual capital. All ecosystem scripts
 exist to serve, protect, and inform these three tracks. Nothing else matters.

@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan"])
     parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -1838,6 +1838,60 @@ def main():
 
             except Exception as e:
                 logger.error(f"personal_scorecard mode failed: {e}")
+
+        elif args.mode == "orb_scan":
+            # ── ORB SCAN → #options-wheel (WEBHOOK_TRADE_SIGNALS) ─────────────
+            # 15-min Opening Range Breakout scan. Fires at 9:50 ET (14:50 UTC).
+            # SPY + QQQ + TQQQ + top wheel candidates from prior-day snapshot.
+            # Research-backed filter stack (SSRN Chuk 2026: 65.4% win rate filtered).
+            # Intraday bias stored to DB for market_analysis.py cross-consumption.
+            try:
+                from tradier_client import TradierClient
+                tradier = TradierClient()
+                scan = engine.run_orb_scan(tradier=tradier)
+                results  = scan.get("results", {})
+                bias     = scan.get("intraday_bias", "NEUTRAL")
+                date_str = scan.get("date", "")
+
+                bias_emoji = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}.get(bias, "⚪")
+                lines = []
+                for sym, r in results.items():
+                    status = r.get("status", "UNKNOWN")
+                    ss     = r.get("signal_strength", 0)
+                    if status == "UNKNOWN":
+                        continue
+                    status_icon = "▲" if status == "BULLISH" else ("▼" if status == "BEARISH" else "—")
+                    vol_ok  = "✓" if r.get("volume_confirmed") else "✗"
+                    vwap_ok = "✓" if r.get("vwap_aligned") else "✗"
+                    src = r.get("data_source", "?")[:2].upper()  # TR or TD
+                    lines.append(
+                        f"`{sym:<5}` {status_icon} SS:{ss:>3}  vol:{vol_ok} vwap:{vwap_ok}  [{src}]"
+                    )
+
+                if not lines:
+                    lines = ["No breakout signals — market inside range."]
+
+                description = (
+                    f"{bias_emoji} **Intraday ORB Bias: {bias}** — {date_str}\n"
+                    "```\nSym   Dir  SS  vol  vwap  src\n" + "\n".join(lines) + "\n```\n"
+                    "⚡ 15-min ORB | Filters: close-confirm · vol×1.5 · VWAP · VIX 15-25 · no macro"
+                )
+
+                wh = os.getenv("WEBHOOK_TRADE_SIGNALS")
+                if wh:
+                    import requests as _rq
+                    _rq.post(wh, json={"embeds": [{
+                        "title":       "Opening Range Breakout Scanner",
+                        "description": description,
+                        "color":       0x2ecc71 if bias == "BULLISH" else (0xe74c3c if bias == "BEARISH" else 0xf1c40f),
+                        "footer":      {"text": "Research only — not financial advice. SS ≥ 70 = high-confidence setup."},
+                    }]}, timeout=10)
+                    logger.info(f"ORB scan published — intraday bias: {bias}")
+                else:
+                    logger.warning("WEBHOOK_TRADE_SIGNALS not set — ORB scan embed suppressed.")
+
+            except Exception as e:
+                logger.error(f"orb_scan mode failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

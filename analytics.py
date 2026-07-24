@@ -3656,6 +3656,338 @@ class HighFidelityAnalyticsEngine:
 
     # ── POSITION SIZER (Half-Kelly + VIX Scalar) ─────────────────────────────
 
+    # ── ORB ENGINE ────────────────────────────────────────────────────────────
+
+    def calculate_orb(self, symbol: str, tradier=None, orb_minutes: int = 15,
+                      ref_date: str = None) -> dict:
+        """
+        15-min Opening Range Breakout engine.
+
+        Research-backed filter stack (orbsetups.com, SSRN Chuk 2026, Concretum Group):
+          1. Close confirmation — body must close beyond range, not just a wick
+          2. Volume confirmation — breakout bar ≥ 1.5× avg volume of ORB bars
+          3. VWAP alignment — price on correct side of session VWAP
+          4. Range width gate — ORB range ≥ 0.3× ATR14 (too-narrow = no signal)
+          5. VIX regime — 15-25 is the sweet spot; outside degrades edge
+          6. Day-of-week — Tuesday is empirically the weakest ORB day
+          7. Macro event — FOMC/CPI/NFP kills the statistical edge entirely
+
+        Primary data: Tradier /markets/timesales 1-min bars (exact ORB).
+        Fallback: Twelve Data 5-min (3-bar 15-min window, slightly less precise).
+
+        Signal strength 0-100:
+          35 — breakout confirmed (close beyond range)
+          25 — volume confirmed
+          20 — VWAP aligned
+          10 — VIX in 15-25 regime
+          10 — not Tuesday, no macro event
+          -30 penalty if range width < 0.3× ATR14
+
+        Returns dict with: status, orb_high, orb_low, signal_strength, filters, ...
+        Returns {"status": "UNKNOWN"} on data failure.
+        """
+        import math
+        from datetime import date as _date, datetime as _dt
+        today_str = ref_date or _date.today().isoformat()
+        cache_key = f"orb_{symbol}_{today_str}"
+
+        # Return cached result if already calculated today
+        cached = self.db.get_state(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("status") != "UNKNOWN":
+            return cached
+
+        result = {
+            "symbol":             symbol,
+            "date":               today_str,
+            "orb_high":           0.0,
+            "orb_low":            0.0,
+            "orb_range":          0.0,
+            "orb_range_atr_pct":  0.0,
+            "current_price":      0.0,
+            "vwap":               0.0,
+            "status":             "UNKNOWN",
+            "breakout_pct":       0.0,
+            "volume_confirmed":   False,
+            "vwap_aligned":       False,
+            "signal_strength":    0,
+            "data_source":        "none",
+            "filters": {
+                "range_width_ok":  False,
+                "close_confirmed": False,
+                "volume_ok":       False,
+                "vwap_aligned":    False,
+                "vix_ok":          False,
+                "not_tuesday":     False,
+                "no_macro_event":  False,
+            },
+        }
+
+        try:
+            # ── Fetch intraday bars ──────────────────────────────────────────
+            bars = []
+            data_source = "none"
+
+            if tradier and tradier.api_key:
+                # Tradier: fetch 9:30–9:55 ET (25 1-min bars covers ORB + 10 confirm bars)
+                start_et = f"{today_str} 09:30"
+                end_et   = f"{today_str} 09:55"
+                raw = tradier.get_timesales(symbol, start_et, end_et, interval="1min")
+                if raw and len(raw) >= orb_minutes:
+                    bars = raw
+                    data_source = "Tradier"
+
+            if not bars:
+                # Fallback: Twelve Data 5-min (3 bars = 15 min)
+                # start_date/end_date filter to RTH open window
+                td_data = self._execute_query("time_series", {
+                    "symbol":     symbol,
+                    "interval":   "5min",
+                    "outputsize": "10",
+                    "start_date": f"{today_str} 09:30:00",
+                    "end_date":   f"{today_str} 10:00:00",
+                    "timezone":   "America/New_York",
+                })
+                if td_data and "values" in td_data:
+                    raw_td = list(reversed(td_data["values"]))  # oldest first
+                    for b in raw_td:
+                        try:
+                            bars.append({
+                                "time":   b.get("datetime", ""),
+                                "open":   float(b.get("open",  0)),
+                                "high":   float(b.get("high",  0)),
+                                "low":    float(b.get("low",   0)),
+                                "close":  float(b.get("close", 0)),
+                                "volume": int(float(b.get("volume", 0))),
+                                "vwap":   0.0,  # not provided by TD 5-min
+                            })
+                        except (TypeError, ValueError):
+                            continue
+                    if len(bars) >= 3:
+                        data_source = "TwelveData"
+
+            if not bars or len(bars) < 3:
+                result["status"] = "UNKNOWN"
+                return result
+
+            result["data_source"] = data_source
+
+            # ── Calculate ORB window ─────────────────────────────────────────
+            # 1-min Tradier: first 15 bars = 9:30–9:44 (orb_minutes bars)
+            # 5-min TD fallback: first 3 bars = 9:30–9:44
+            n_orb = orb_minutes if data_source == "Tradier" else 3
+            orb_bars = bars[:n_orb]
+            confirm_bars = bars[n_orb:]
+
+            orb_high = max(b["high"]  for b in orb_bars)
+            orb_low  = min(b["low"]   for b in orb_bars)
+            orb_range = orb_high - orb_low
+            orb_avg_vol = sum(b["volume"] for b in orb_bars) / len(orb_bars) if orb_bars else 1
+
+            result["orb_high"]  = round(orb_high, 4)
+            result["orb_low"]   = round(orb_low, 4)
+            result["orb_range"] = round(orb_range, 4)
+
+            # ── ATR14 range width gate ───────────────────────────────────────
+            atr14 = 0.0
+            try:
+                td_daily = self._execute_query("time_series", {
+                    "symbol": symbol, "interval": "1day", "outputsize": "16",
+                })
+                if td_daily and "values" in td_daily:
+                    dv = list(reversed(td_daily["values"]))  # oldest first
+                    true_ranges = []
+                    for i in range(1, len(dv)):
+                        h = float(dv[i]["high"])
+                        l = float(dv[i]["low"])
+                        pc = float(dv[i-1]["close"])
+                        true_ranges.append(max(h-l, abs(h-pc), abs(l-pc)))
+                    if len(true_ranges) >= 14:
+                        atr14 = sum(true_ranges[-14:]) / 14
+            except Exception:
+                pass
+
+            orb_open_price = orb_bars[0]["open"] if orb_bars else orb_high
+            atr_pct = atr14 / orb_open_price if orb_open_price > 0 else 0.01
+            min_range = atr14 * 0.3
+            range_width_ok = orb_range >= min_range and orb_range > 0
+            result["orb_range_atr_pct"] = round(orb_range / atr14, 3) if atr14 > 0 else 0.0
+            result["filters"]["range_width_ok"] = range_width_ok
+
+            # ── VWAP from bars ───────────────────────────────────────────────
+            all_bars = bars
+            if data_source == "Tradier" and confirm_bars and confirm_bars[-1]["vwap"] > 0:
+                session_vwap = confirm_bars[-1]["vwap"]
+            else:
+                # Calculate manually: typical_price × volume / cumulative volume
+                cum_tpv = sum((b["high"]+b["low"]+b["close"])/3 * b["volume"] for b in all_bars)
+                cum_vol = sum(b["volume"] for b in all_bars)
+                session_vwap = cum_tpv / cum_vol if cum_vol > 0 else orb_open_price
+
+            result["vwap"] = round(session_vwap, 4)
+
+            # ── Current price (last close in confirm bars, or last ORB bar) ──
+            last_bar = confirm_bars[-1] if confirm_bars else orb_bars[-1]
+            current_price = last_bar["close"]
+            result["current_price"] = round(current_price, 4)
+
+            # ── Breakout detection (CLOSE confirmation — no wick signals) ────
+            status = "INSIDE"
+            breakout_bar = None
+            breakout_vol = 0
+
+            for bar in confirm_bars:
+                if bar["close"] > orb_high:
+                    # Bullish: close must be above ORB high, not just a wick
+                    if status != "BULLISH" or breakout_bar is None:
+                        status = "BULLISH"
+                        breakout_bar = bar
+                        breakout_vol = bar["volume"]
+                    break  # first close confirmation is the signal
+                elif bar["close"] < orb_low:
+                    if status != "BEARISH" or breakout_bar is None:
+                        status = "BEARISH"
+                        breakout_bar = bar
+                        breakout_vol = bar["volume"]
+                    break
+
+            result["status"] = status
+            result["filters"]["close_confirmed"] = (status in ("BULLISH", "BEARISH"))
+
+            if status == "BULLISH" and orb_high > 0:
+                result["breakout_pct"] = round((current_price - orb_high) / orb_high * 100, 3)
+            elif status == "BEARISH" and orb_low > 0:
+                result["breakout_pct"] = round((current_price - orb_low) / orb_low * 100, 3)
+
+            # ── Volume confirmation ──────────────────────────────────────────
+            vol_ratio = breakout_vol / orb_avg_vol if orb_avg_vol > 0 else 0.0
+            volume_confirmed = vol_ratio >= 1.5 and breakout_bar is not None
+            result["volume_confirmed"] = volume_confirmed
+            result["filters"]["volume_ok"] = volume_confirmed
+            result["vol_ratio"] = round(vol_ratio, 2)
+
+            # ── VWAP alignment ───────────────────────────────────────────────
+            vwap_aligned = False
+            if status == "BULLISH":
+                vwap_aligned = current_price > session_vwap
+            elif status == "BEARISH":
+                vwap_aligned = current_price < session_vwap
+            result["vwap_aligned"] = vwap_aligned
+            result["filters"]["vwap_aligned"] = vwap_aligned
+
+            # ── VIX regime gate (15-25 is sweet spot per SSRN) ──────────────
+            vix_ok = False
+            try:
+                real_vix = self.fetch_real_vix()
+                if real_vix and 15 <= real_vix <= 25:
+                    vix_ok = True
+            except Exception:
+                vix_ok = True  # unknown = allow rather than suppress
+            result["filters"]["vix_ok"] = vix_ok
+
+            # ── Day-of-week gate (Tuesday is empirically weakest for ORB) ───
+            from datetime import date as _d
+            not_tuesday = _d.today().weekday() != 1   # 1 = Tuesday
+            result["filters"]["not_tuesday"] = not_tuesday
+
+            # ── Macro event gate ─────────────────────────────────────────────
+            no_macro = True
+            if tradier and tradier.api_key:
+                try:
+                    no_macro = not tradier.is_macro_event_today()
+                except Exception:
+                    no_macro = True
+            result["filters"]["no_macro_event"] = no_macro
+
+            # ── Signal strength 0-100 ────────────────────────────────────────
+            strength = 0
+            if status in ("BULLISH", "BEARISH"):
+                strength += 35
+            if volume_confirmed:
+                strength += 25
+            if vwap_aligned:
+                strength += 20
+            if vix_ok:
+                strength += 10
+            if not_tuesday and no_macro:
+                strength += 10
+            if not range_width_ok:
+                strength = max(0, strength - 30)   # narrow range = downgrade hard
+            result["signal_strength"] = min(100, strength)
+
+        except Exception as e:
+            logger.warning(f"[ORB] {symbol} calculation failed: {e}")
+            result["status"] = "UNKNOWN"
+
+        # Cache to DB — valid for the calendar day (orb_scan runs once at 9:50 ET)
+        try:
+            self.db.update_state(cache_key, result)
+        except Exception:
+            pass
+
+        return result
+
+    def run_orb_scan(self, tradier=None) -> dict:
+        """
+        Scans SPY, QQQ, TQQQ + top wheel candidates for 15-min ORB breakouts.
+        Stores each result to DB. Returns summary dict for embed building.
+
+        Target symbols: core 3 + up to 5 HIGH-IVR wheel candidates from yesterday's
+        wheel_snapshot_top DB key. Total: ~8 symbols, ~8 Tradier calls.
+
+        Overall intraday bias derived from SPY + QQQ direction:
+          Both BULLISH → BULLISH day
+          Both BEARISH → BEARISH day
+          Mixed/INSIDE → NEUTRAL
+        """
+        import time as _time
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+
+        core_symbols = ["SPY", "QQQ", "TQQQ"]
+
+        # Pull prior-day wheel candidates from DB
+        wheel_syms = []
+        try:
+            snap = self.db.get_state("wheel_snapshot_top")
+            if snap and isinstance(snap, list):
+                wheel_syms = [s["sym"] for s in snap[:5] if "sym" in s]
+        except Exception:
+            pass
+
+        all_symbols = core_symbols + [s for s in wheel_syms if s not in core_symbols]
+        results = {}
+
+        for i, sym in enumerate(all_symbols):
+            if i > 0:
+                _time.sleep(0.4)   # gentle stagger — avoids burst on Tradier (200 req/min)
+            try:
+                results[sym] = self.calculate_orb(sym, tradier=tradier)
+            except Exception as e:
+                logger.warning(f"[ORB scan] {sym} failed: {e}")
+                results[sym] = {"symbol": sym, "status": "UNKNOWN", "signal_strength": 0}
+
+        # Overall intraday bias from SPY + QQQ consensus
+        spy_status = results.get("SPY", {}).get("status", "INSIDE")
+        qqq_status = results.get("QQQ", {}).get("status", "INSIDE")
+        spy_vol    = results.get("SPY", {}).get("volume_confirmed", False)
+        qqq_vol    = results.get("QQQ", {}).get("volume_confirmed", False)
+
+        if spy_status == "BULLISH" and spy_vol and qqq_status in ("BULLISH", "INSIDE"):
+            intraday_bias = "BULLISH"
+        elif qqq_status == "BULLISH" and qqq_vol and spy_status in ("BULLISH", "INSIDE"):
+            intraday_bias = "BULLISH"
+        elif spy_status == "BEARISH" and spy_vol and qqq_status in ("BEARISH", "INSIDE"):
+            intraday_bias = "BEARISH"
+        elif qqq_status == "BEARISH" and qqq_vol and spy_status in ("BEARISH", "INSIDE"):
+            intraday_bias = "BEARISH"
+        else:
+            intraday_bias = "NEUTRAL"
+
+        # Persist intraday bias for cross-script reads
+        self.db.update_state(f"orb_intraday_bias_{today_str}", intraday_bias)
+
+        return {"results": results, "intraday_bias": intraday_bias, "date": today_str}
+
     def kelly_position_size(self, portfolio_value: float, vix: float,
                             win_rate: float = 0.65, avg_win_pct: float = 1.0,
                             avg_loss_pct: float = 1.0, max_pct: float = 0.06) -> dict:

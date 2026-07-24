@@ -312,6 +312,21 @@ def _calculate_bias_score(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception as e:
         logger.warning(f"Bias: TQQQ cycle read failed: {e}")
 
+    # ── 9. ORB intraday bias (from scheduler.py orb_scan DB key) ─────────────
+    try:
+        from datetime import date as _ma_date
+        _orb_key = f"orb_intraday_bias_{_ma_date.today().isoformat()}"
+        orb_bias = db.get_state(_orb_key)
+        if orb_bias == "BULLISH":
+            score += 8
+            details.append("ORB intraday bias: BULLISH (SPY/QQQ broke out above range, +8)")
+        elif orb_bias == "BEARISH":
+            score -= 8
+            details.append("ORB intraday bias: BEARISH (SPY/QQQ broke out below range, -8)")
+        signals["orb_bias"] = orb_bias or "NEUTRAL"
+    except Exception as e:
+        logger.warning(f"Bias: ORB read failed: {e}")
+
     # ── Label ─────────────────────────────────────────────────────────────────
     if score >= 20:
         label = "BULLISH"

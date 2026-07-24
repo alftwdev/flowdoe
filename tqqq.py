@@ -1426,6 +1426,19 @@ class TQQQTacticalSniper:
         except Exception:
             pass  # SentiSense unavailable — scorer continues without this signal
 
+        # ORB cross-signal: QQQ bearish ORB = additional conviction for PUT desk
+        try:
+            from datetime import date as _tq_date
+            _orb_bias = db.get_state(f"orb_intraday_bias_{_tq_date.today().isoformat()}")
+            if _orb_bias == "BEARISH":
+                t += 8
+                ext["orb_top_boost"] = 8
+            elif _orb_bias == "BULLISH":
+                t = max(0, t - 5)
+                ext["orb_top_boost"] = -5
+        except Exception:
+            pass
+
         top_score = min(t, 100)
 
         signals = {

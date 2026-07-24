@@ -69,7 +69,7 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 # ─────────────────────────────────────────────────────────────────────────────
 PRIORITY_ASSETS = {
     "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.45},
-    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.30}
+    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.18}   # updated Jul 23 2026; actual NAV ~$6.18
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1187,7 +1187,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     whale_status, whale_rvol = detect_whale_flow_direction(session, ticker)
 
     # ── Distribution math (original)
-    annual_div = 1.4580 if ticker == "CLM" else 1.4112  # 2026 distribution profiles
+    annual_div = 1.4268 if ticker == "CLM" else 1.3824  # 2026 reset: $0.1189×12 CLM, $0.1152×12 CRF
     y_dist     = (annual_div / price) * 100 if price > 0 else 0
     y_nav      = (annual_div / nav)   * 100 if nav   > 0 else 0
     leverage_ratio  = 1.0
@@ -1382,11 +1382,19 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note  = "Distribution/Caution phase"
         verdict      = f"⚠️ Premium compressed {prem_delta:+.2f}% intra-session — pause DRIP, watch for N-2."
         recommendation = "Pause new DRIP reinvestment; watch for RO filing."
-    elif ro_tier == "ELEVATED" or z_premium >= 1.5 or premium > 25.0:
+    elif z_premium >= 1.5 or premium > 25.0:
+        # True premium elevation — z-score OR absolute threshold confirms expensive
         status       = "⚠️ HIGH PREMIUM"
         income_note  = "Distribution/Caution phase"
         verdict      = "⚠️ Premium extended — pause new buys, target entry < 15% or post-ex-div dip."
         recommendation = "Pause reinvestment; build cash position."
+    elif ro_tier == "ELEVATED":
+        # ELEVATED from non-premium signals (volume anomaly, RO season, dark pool sub-threshold, etc.)
+        # z-score is safe/negative — premium is NOT the risk, something else is. Label accurately.
+        status       = "⚠️ RISK ELEVATED"
+        income_note  = "Caution — monitor closely"
+        verdict      = "⚠️ Risk composite elevated (non-premium) — DRIP may continue, reduce new buys."
+        recommendation = "Monitor EDGAR; reduce new position sizing until risk resolves."
     else:
         status       = "✅ STABLE"
         income_note  = "Accumulation phase"

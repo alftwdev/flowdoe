@@ -77,6 +77,8 @@ SCHEDULE = [
     (12, 50, "morning",            "scheduler",    ["--mode", "morning"],         True),
     # gex removed — calculate_gex_profile() returns 0.0 at this Twelve Data tier;
     # output is always UNKNOWN/suppressed and wastes a subprocess launch.
+    # ORB scan: first read at 9:50 ET = 14:50 UTC (15-min window closes at 9:45 ET)
+    (14, 50, "orb_scan",          "scheduler",    ["--mode", "orb_scan"],        True),
     (13, 28, "macro_am",           "scheduler",    ["--mode", "macro"],           True),
     # ── Signals & Income ────────────────────────────────────────────────────────
     (13, 35, "trending_plays",     "scheduler",    ["--mode", "trending_plays"],  True),
