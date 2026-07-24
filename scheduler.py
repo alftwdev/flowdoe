@@ -83,8 +83,8 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan"])
-    parser.add_argument("--action", type=str, choices=["open", "close"], help="wheel_position mode: open or close a position")
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position"])
+    parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
     parser.add_argument("--strike", type=float, help="wheel_position mode: strike price")
@@ -98,6 +98,9 @@ def main():
     parser.add_argument("--close-fees", type=float, dest="close_fees", default=0.0, help="wheel_position close: total commission paid to close, in dollars")
     parser.add_argument("--close-price", type=float, dest="close_price", help="wheel_position close --status CLOSED: per-share BTC price (e.g. 0.45 if you bought back at $0.45)")
     parser.add_argument("--roll-group", type=str, dest="roll_group_id", help="wheel_position open: shared UUID to link all legs of a roll chain (generate once with: python -c \"import uuid; print(uuid.uuid4())\")")
+    parser.add_argument("--k1", type=float, help="box_position open: lower SPX strike")
+    parser.add_argument("--k2", type=float, help="box_position open: upper SPX strike")
+    parser.add_argument("--loan-amount", type=float, dest="loan_amount", help="box_position open: total dollars borrowed via this box")
     args = parser.parse_args()
 
     engine = HighFidelityAnalyticsEngine()
@@ -1811,12 +1814,64 @@ def main():
                     f"  Seasonal: {_seas_note}"
                 )
 
+                # ── Strategy 4: Box Spread Borrowing ──────────────────────────
+                _box_count = int(engine.db.get_state("box_pos_count") or 0)
+                _box_lines = []
+                _total_loan = 0.0
+                _total_s1256 = 0.0
+                for _bi in range(1, _box_count + 1):
+                    _bp = engine.db.get_state(f"box_pos_{_bi}") or {}
+                    if not isinstance(_bp, dict) or _bp.get("status") != "OPEN":
+                        continue
+                    _loan   = float(_bp.get("loan_amount", 0))
+                    _rate   = float(_bp.get("implied_rate_pct", 0))
+                    _exp    = _bp.get("expiration", "N/A")
+                    _opened = _bp.get("opened_date", "")
+                    _width  = float(_bp.get("width", 0))
+                    _credit = float(_bp.get("credit_per_contract", 0))
+                    try:
+                        from datetime import date as _d2
+                        _exp_dt  = datetime.strptime(_exp, "%Y-%m-%d").date()
+                        _open_dt = datetime.strptime(_opened, "%Y-%m-%d").date()
+                        _total_d = (_exp_dt - _open_dt).days or 1
+                        _elapsed = (_d2.today() - _open_dt).days
+                        _dte_rem = (_exp_dt - _d2.today()).days
+                        # § 1256 mark-to-market accrual: pro-rate total interest cost
+                        _conts   = max(1, round(_loan / (_credit * 100))) if _credit > 0 else 1
+                        _total_interest = (_width - _credit) * _conts * 100
+                        _accrued = _total_interest * (_elapsed / _total_d)
+                        _total_s1256 += _accrued
+                    except Exception:
+                        _dte_rem, _accrued, _conts = "?", 0.0, 1
+                    _total_loan += _loan
+                    _box_lines.append(
+                        f"  #{_bi}: ${_loan:,.0f} @ {_rate:.2f}% | "
+                        f"K{int(_bp.get('k1',0))}/{int(_bp.get('k2',0))} "
+                        f"exp {_exp} ({_dte_rem}d) | §1256 accrued ~${_accrued:,.0f}"
+                    )
+
+                _bsr = engine.db.get_state("box_spread_best_rate") or {}
+                _bsr_rate = _bsr.get("rate_pct")
+                _bsr_stm  = _bsr.get("spread_to_margin")
+                _bsr_date = _bsr.get("date", "N/A")
+                _scan_line = (
+                    f"\n  Last scan ({_bsr_date}): best rate {_bsr_rate:.2f}% | "
+                    f"saving {_bsr_stm:+.2f}% vs margin"
+                ) if _bsr_rate else "\n  No rate scan cached — run: python scheduler.py --mode box_spread_scan"
+
+                strat4 = (
+                    "STRATEGY 4 — BOX SPREAD BORROWING\n"
+                    + ("\n".join(_box_lines) if _box_lines else "  No open positions yet")
+                    + f"\n  Total borrowed: ${_total_loan:,.0f} | §1256 capital loss YTD: ~${_total_s1256:,.0f}"
+                    + _scan_line
+                )
+
                 # ── Carry spread alert flag ────────────────────────────────────
                 alert_note = ""
                 if carry_sp is not None and carry_sp < 5.0:
                     alert_note = f"\n⚠️ CARRY SPREAD COMPRESSED ({carry_sp:+.1f}%) — review margin draw pace"
 
-                msg = f"{strat1}\n\n{strat2}\n\n{strat3}{alert_note}"
+                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}"
 
                 _p_tok = os.getenv("PUSHOVER_API_TOKEN")
                 _p_usr = os.getenv("PUSHOVER_USER_KEY")
@@ -1892,6 +1947,308 @@ def main():
 
             except Exception as e:
                 logger.error(f"orb_scan mode failed: {e}")
+
+        elif args.mode == "box_spread_scan":
+            # ── BOX SPREAD RATE SCANNER → #options-wheel ──────────────────────
+            # Fetches live SPX options chain via Tradier, calculates implied
+            # annualised rate for 100pt and 50pt short boxes at the expiration
+            # nearest to 365 DTE. Compares to FRED 1Y treasury (DGS1, cached)
+            # and the 7.25% E*TRADE margin benchmark.
+            # Caches best_rate to DB ("box_spread_best_rate") for personal_scorecard.
+            # API budget: 1 Tradier SPX chain call. No TD credits consumed.
+            try:
+                from tradier_client import TradierClient
+                _tradier = TradierClient()
+                _box_data = _tradier.get_spx_box_rate(widths=[100, 50], dte_target=365)
+
+                _boxes  = _box_data.get("boxes", {})
+                _margin = _box_data.get("margin_rate", 7.25)
+                _spot   = _box_data.get("spot", 0.0)
+                _ts     = _box_data.get("timestamp", "")
+
+                if not _boxes:
+                    logger.warning("box_spread_scan: no valid box rates — SPX chain may be unavailable")
+                else:
+                    # Fetch/cache FRED DGS1 (1-year treasury rate) — daily cache
+                    _tsy_rate = None
+                    try:
+                        _fred_key = os.getenv("FRED_API_KEY", "")
+                        _cached_tsy = engine.db.get_state("fred_dgs1_cached_date")
+                        from datetime import date as _dt_date
+                        _today_s = _dt_date.today().isoformat()
+                        if _cached_tsy != _today_s and _fred_key:
+                            _fr = requests.get(
+                                "https://api.stlouisfed.org/fred/series/observations",
+                                params={
+                                    "series_id": "DGS1",
+                                    "api_key": _fred_key,
+                                    "file_type": "json",
+                                    "sort_order": "desc",
+                                    "limit": 1,
+                                },
+                                timeout=10,
+                            )
+                            if _fr.ok:
+                                _obs = _fr.json().get("observations", [])
+                                if _obs:
+                                    _tsy_rate = float(_obs[0].get("value", 0))
+                                    engine.db.update_state("fred_dgs1", _tsy_rate)
+                                    engine.db.update_state("fred_dgs1_cached_date", _today_s)
+                        else:
+                            _tsy_rate = float(engine.db.get_state("fred_dgs1") or 0) or None
+                    except Exception:
+                        _tsy_rate = float(engine.db.get_state("fred_dgs1") or 0) or None
+
+                    # Build embed description
+                    _embed_lines = []
+                    _best = None
+                    for _w in sorted(_boxes.keys(), reverse=True):
+                        _bd     = _boxes[_w]
+                        _rate   = _bd["rate_pct"]
+                        _credit = _bd["credit_per_contract"]
+                        _k1, _k2 = int(_bd["k1"]), int(_bd["k2"])
+                        _dte    = _bd["dte"]
+                        _exp    = _bd["expiration"]
+                        _stm    = _bd["spread_to_margin"]
+                        _rate_ba  = _bd.get("rate_pct_bid_ask")
+                        _ba_drag  = _bd.get("ba_drag_pts", 0)
+                        _tsy_vs   = f" | vs 1Y Tsy: `{_rate - _tsy_rate:+.2f}%`" if _tsy_rate else ""
+                        _ba_note  = f"\n┣ Worst-case (legged): `{_rate_ba:.2f}%` (bid/ask drag `{_ba_drag:.1f}pts`)" if _rate_ba else ""
+                        _embed_lines.append(
+                            f"**{_w}pt Box** (K{_k1}/K{_k2} | {_exp} | {_dte}d)\n"
+                            f"┣ Mid rate (combo order): `{_rate:.2f}%`{_tsy_vs}{_ba_note}\n"
+                            f"┣ Credit at mid: `{_credit:.2f}` pts (${_credit*100:.0f} per contract)\n"
+                            f"┗ Saves vs margin: `{_stm:+.2f}%` (${_stm * 1000:,.0f}/yr per $100k)"
+                        )
+                        if _best is None or _rate < _best["rate_pct"]:
+                            _best = _bd
+
+                    _tsy_line = f"\n┣ FRED 1Y Treasury (DGS1): `{_tsy_rate:.2f}%`" if _tsy_rate else ""
+                    _savings_100k = (_margin - _best["rate_pct"]) * 1000
+                    _desc = (
+                        f"**SPX Short Box — Live Rate Scan** | SPX `${_spot:,.0f}` | {_ts}\n"
+                        f"┣ E*TRADE Margin: `{_margin:.2f}%`{_tsy_line}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        + "\n\n".join(_embed_lines)
+                        + f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚡ Best rate: `{_best['rate_pct']:.2f}%` → saves `${_savings_100k:,.0f}/yr` per $100k vs margin\n"
+                        f"📋 Section 1256 — SPX European-style. Log positions: "
+                        f"`python scheduler.py --mode box_position --action open ...`"
+                    )
+
+                    _color = COLOR_GREEN if _savings_100k >= 2500 else (COLOR_YELLOW if _savings_100k >= 1000 else COLOR_RED)
+                    _wh = os.getenv("WEBHOOK_TRADE_SIGNALS")
+                    if _wh:
+                        requests.post(_wh, json={"embeds": [{
+                            "title": "📦 Box Spread Rate Scanner — SPX",
+                            "description": _desc,
+                            "color": _color,
+                            "footer": {"text": "Borrow at implied rate. Not a trade recommendation. Confirm E*TRADE options level 3 + combo order before executing."},
+                        }]}, timeout=10)
+                        logger.info(f"Box spread scan published — best rate: {_best['rate_pct']:.2f}%")
+
+                    # Cache best rate in DB for personal_scorecard and cross-script read
+                    engine.db.update_state("box_spread_best_rate", {
+                        "rate_pct":         _best["rate_pct"],
+                        "width":            _best.get("width"),
+                        "expiration":       _best.get("expiration"),
+                        "dte":              _best.get("dte"),
+                        "spread_to_margin": _best.get("spread_to_margin"),
+                        "date":             _ts,
+                    })
+
+            except Exception as e:
+                logger.error(f"box_spread_scan mode failed: {e}")
+
+        elif args.mode == "box_position":
+            # ── BOX POSITION LOGGER ───────────────────────────────────────────
+            # Manual CLI tracker for open SPX short box positions.
+            # Stores each position to DB. Roll reminders fire at 30/14 DTE via
+            # Pushover. § 1256 accrual shows in Sunday personal_scorecard.
+            #
+            # Usage:
+            #   open:   python scheduler.py --mode box_position --action open \
+            #             --k1 5400 --k2 5500 --expiration 2027-12-19 \
+            #             --premium 95.50 --loan-amount 25000
+            #   close:  python scheduler.py --mode box_position --action close \
+            #             --position-id 1
+            #   status: python scheduler.py --mode box_position --action status
+            try:
+                _action = (args.action or "status").lower()
+                _today = datetime.now().strftime("%Y-%m-%d")
+
+                if _action == "open":
+                    # Validate required args
+                    _missing = [f for f, v in [
+                        ("--k1", args.k1), ("--k2", args.k2),
+                        ("--expiration", args.expiration), ("--premium", args.premium),
+                        ("--loan-amount", args.loan_amount),
+                    ] if v is None]
+                    if _missing:
+                        logger.error(f"box_position open: missing args: {', '.join(_missing)}")
+                    else:
+                        _k1     = float(args.k1)
+                        _k2     = float(args.k2)
+                        _width  = _k2 - _k1
+                        _credit = float(args.premium)    # points per contract
+                        _loan   = float(args.loan_amount)
+                        _exp    = args.expiration         # YYYY-MM-DD
+
+                        # Calculate terms
+                        try:
+                            _exp_date  = datetime.strptime(_exp, "%Y-%m-%d").date()
+                            _dte_open  = (_exp_date - datetime.now().date()).days
+                        except Exception:
+                            _dte_open = 365
+
+                        _rate_pct  = (_width / _credit - 1) * (365 / max(_dte_open, 1)) * 100
+                        _contracts = max(1, round(_loan / (_credit * 100)))
+                        _total_int = (_width - _credit) * _contracts * 100  # total interest $
+
+                        # Assign next sequential ID
+                        _count = int(engine.db.get_state("box_pos_count") or 0) + 1
+                        engine.db.update_state("box_pos_count", _count)
+                        engine.db.update_state(f"box_pos_{_count}", {
+                            "id":                   _count,
+                            "status":               "OPEN",
+                            "k1":                   _k1,
+                            "k2":                   _k2,
+                            "width":                _width,
+                            "expiration":           _exp,
+                            "credit_per_contract":  _credit,
+                            "loan_amount":          _loan,
+                            "contracts":            _contracts,
+                            "implied_rate_pct":     round(_rate_pct, 3),
+                            "annual_interest_usd":  round(_total_int * 365 / max(_dte_open, 1), 0),
+                            "total_interest_usd":   round(_total_int, 0),
+                            "dte_at_open":          _dte_open,
+                            "opened_date":          _today,
+                        })
+                        logger.info(
+                            f"Box position #{_count} opened: K{_k1:.0f}/{_k2:.0f} "
+                            f"exp {_exp} | rate {_rate_pct:.2f}% | "
+                            f"${_loan:,.0f} loan | {_contracts} contract(s)"
+                        )
+                        print(
+                            f"\n✅ Box position #{_count} logged.\n"
+                            f"   Strikes: K{_k1:.0f} / K{_k2:.0f} | Width: {_width:.0f}pt\n"
+                            f"   Expiration: {_exp} ({_dte_open}d)\n"
+                            f"   Credit: {_credit:.2f}pts/contract × {_contracts} = ${_credit*100*_contracts:,.0f}\n"
+                            f"   Implied rate: {_rate_pct:.2f}% annualised\n"
+                            f"   Loan amount: ${_loan:,.0f}\n"
+                            f"   Total interest at expiry: ${_total_int:,.0f}\n"
+                            f"   Saving vs E*TRADE margin (7.25%): "
+                            f"${(7.25 - _rate_pct) / 100 * _loan:,.0f}/yr\n"
+                        )
+
+                        # Roll reminder check — fire Pushover if ≤ 30 DTE on any open box
+                        _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                        _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                        if _p_tok and _p_usr and _dte_open <= 30:
+                            requests.post("https://api.pushover.net/1/messages.json", data={
+                                "token": _p_tok, "user": _p_usr,
+                                "title": f"📦 Box #{_count} — Roll Window Open",
+                                "message": (
+                                    f"Box #{_count} K{_k1:.0f}/{_k2:.0f} expires {_exp} "
+                                    f"({_dte_open}d). Plan roll or balloon payoff. "
+                                    f"Run: python scheduler.py --mode box_spread_scan"
+                                ),
+                                "priority": 1,
+                            }, timeout=10)
+
+                elif _action == "close":
+                    _pid = args.position_id
+                    if not _pid:
+                        logger.error("box_position close: --position-id required")
+                    else:
+                        _bp = engine.db.get_state(f"box_pos_{_pid}") or {}
+                        if not _bp:
+                            logger.error(f"box_position close: position #{_pid} not found")
+                        else:
+                            _bp["status"] = "CLOSED"
+                            _bp["closed_date"] = _today
+                            engine.db.update_state(f"box_pos_{_pid}", _bp)
+                            logger.info(f"Box position #{_pid} marked CLOSED ({_today})")
+                            print(f"\n✅ Box position #{_pid} closed on {_today}.\n")
+
+                elif _action == "status":
+                    _count = int(engine.db.get_state("box_pos_count") or 0)
+                    if _count == 0:
+                        print("\nNo box positions logged yet.\n")
+                    else:
+                        print(f"\n{'='*60}")
+                        print("BOX SPREAD POSITIONS")
+                        print(f"{'='*60}")
+                        for _bi in range(1, _count + 1):
+                            _bp = engine.db.get_state(f"box_pos_{_bi}") or {}
+                            if not _bp:
+                                continue
+                            _st = _bp.get("status", "?")
+                            _exp = _bp.get("expiration", "N/A")
+                            try:
+                                from datetime import date as _d3
+                                _dte_rem = (datetime.strptime(_exp, "%Y-%m-%d").date() - _d3.today()).days
+                                _roll_flag = " ⚠️ ROLL WINDOW" if _dte_rem <= 30 else ""
+                            except Exception:
+                                _dte_rem, _roll_flag = "?", ""
+                            _credit = float(_bp.get("credit_per_contract", 0))
+                            _width  = float(_bp.get("width", 0))
+                            _loan   = float(_bp.get("loan_amount", 0))
+                            _rate   = float(_bp.get("implied_rate_pct", 0))
+                            _saving = (7.25 - _rate) / 100 * _loan
+                            print(
+                                f"  #{_bi} [{_st}] K{int(_bp.get('k1',0))}/{int(_bp.get('k2',0))} "
+                                f"exp {_exp} ({_dte_rem}d){_roll_flag}\n"
+                                f"    Rate: {_rate:.2f}% | Loan: ${_loan:,.0f} | "
+                                f"Saving: ${_saving:,.0f}/yr | Opened: {_bp.get('opened_date','N/A')}"
+                            )
+                        print(f"{'='*60}\n")
+
+                    # Also check all open positions for roll alerts (daily call from market_scheduler)
+                    _count = int(engine.db.get_state("box_pos_count") or 0)
+                    _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                    _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                    for _bi in range(1, _count + 1):
+                        _bp = engine.db.get_state(f"box_pos_{_bi}") or {}
+                        if not isinstance(_bp, dict) or _bp.get("status") != "OPEN":
+                            continue
+                        _exp = _bp.get("expiration", "")
+                        try:
+                            from datetime import date as _d4
+                            _dte_r = (datetime.strptime(_exp, "%Y-%m-%d").date() - _d4.today()).days
+                        except Exception:
+                            continue
+                        _alert_key = f"box_roll_alert_{_bi}_{datetime.now().strftime('%Y-%m')}"
+                        if _dte_r <= 14 and not engine.db.get_state(_alert_key + "_14"):
+                            if _p_tok and _p_usr:
+                                requests.post("https://api.pushover.net/1/messages.json", data={
+                                    "token": _p_tok, "user": _p_usr,
+                                    "title": f"📦 Box #{_bi} — 14 DTE Roll Urgent",
+                                    "message": (
+                                        f"Box #{_bi} K{int(_bp.get('k1',0))}/{int(_bp.get('k2',0))} "
+                                        f"expires {_exp} in {_dte_r}d. "
+                                        f"Roll now or prepare balloon payoff of "
+                                        f"${_bp.get('width',0)*_bp.get('contracts',1)*100:,.0f}."
+                                    ),
+                                    "priority": 1,
+                                }, timeout=10)
+                            engine.db.update_state(_alert_key + "_14", True)
+                        elif _dte_r <= 30 and not engine.db.get_state(_alert_key + "_30"):
+                            if _p_tok and _p_usr:
+                                requests.post("https://api.pushover.net/1/messages.json", data={
+                                    "token": _p_tok, "user": _p_usr,
+                                    "title": f"📦 Box #{_bi} — 30 DTE Roll Window",
+                                    "message": (
+                                        f"Box #{_bi} K{int(_bp.get('k1',0))}/{int(_bp.get('k2',0))} "
+                                        f"expires {_exp} in {_dte_r}d. "
+                                        f"Run box_spread_scan to check current rates before rolling."
+                                    ),
+                                    "priority": 0,
+                                }, timeout=10)
+                            engine.db.update_state(_alert_key + "_30", True)
+
+            except Exception as e:
+                logger.error(f"box_position mode failed: {e}")
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

@@ -128,6 +128,10 @@ ALERT_COOLDOWN_HOURS    = 24
 MINOR_CHANGE_THRESHOLD  = 0.5  # price/score delta below this = minor, do not broadcast
 margin_rate             = 7.25  # E*TRADE benchmark margin rate (%)
 
+# Tier 2 active positions as of Jul 2026: MLPI (~15%) + MAIN (~8%) only.
+# TDAQ and KQQQ are in CLAUDE.md as future candidates, not currently held.
+TIER2_ACTIVE_BLENDED    = 11.5  # blended yield of active Tier 2 positions
+
 # RO composite score weights — N-2 SEC filing is the single highest-conviction signal.
 # EDGAR sources stack: multiple filings in the same cycle = multi-source conviction.
 RO_SCORE_WEIGHTS = {
@@ -215,6 +219,88 @@ def fetch_hy_spread_live() -> float:
         logger.warning(f"FRED HY spread fetch failed: {e}")
     # Fall back to last cached value; if none, use 4.5 (old hardcoded default)
     return float(db.get_state(cache_key) or 4.5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOX SPREAD POSITION READER (DB-only, zero API calls)
+# Box positions are written by scheduler.py --mode box_position --action open.
+# monitor.py reads them to surface DTE countdowns, balloon warnings, and RO
+# dodge context inside the cornerstone pulse. CLM/CRF content never leaves
+# #cornerstone; the box efficiency snippet for #dividend-ccetfs is income-only.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_active_box_positions() -> list:
+    """
+    Returns list of open box spread position dicts from DB.
+    Each dict includes 'dte_current' computed from today's date.
+    Returns [] if no positions or DB read fails.
+    """
+    try:
+        count = int(db.get_state("box_pos_count") or 0)
+        today = datetime.utcnow().date()
+        positions = []
+        for i in range(1, count + 1):
+            bp = db.get_state(f"box_pos_{i}")
+            if not isinstance(bp, dict) or bp.get("status") != "OPEN":
+                continue
+            try:
+                exp_dt = datetime.strptime(bp["expiration"], "%Y-%m-%d").date()
+                bp["dte_current"] = (exp_dt - today).days
+                positions.append(bp)
+            except Exception:
+                pass
+        return positions
+    except Exception as e:
+        logger.warning(f"[Box Positions] DB read failed: {e}")
+        return []
+
+
+def _format_box_pulse_lines(positions: list) -> str:
+    """
+    Formats active box spread positions as embed lines for the cornerstone daily pulse.
+    Shows rate vs margin savings, DTE countdown, balloon warning at ≤60 DTE, and
+    a RO dodge reminder if ro_dodge_active flags are set for CLM or CRF.
+    Returns empty string when no boxes are open.
+    """
+    if not positions:
+        return ""
+    lines = ["┣ 📦 **Box Spread Borrowing:**"]
+    for bp in positions:
+        dte       = bp.get("dte_current", 0)
+        rate      = bp.get("implied_rate_pct", 0.0)
+        k1        = int(bp.get("k1", 0))
+        k2        = int(bp.get("k2", 0))
+        exp       = bp.get("expiration", "?")
+        contracts = int(bp.get("contracts", 1))
+        width     = int(bp.get("width", 100))
+        balloon   = width * contracts * 100
+        loan      = bp.get("loan_amount", balloon)
+        savings   = round(margin_rate - rate, 2)
+        ann_int   = bp.get("annual_interest_usd", round(loan * rate / 100, 2))
+
+        roll_tag = " 🚨 ROLL NOW" if dte <= 30 else (" ⚠️ ROLL SOON" if dte <= 60 else "")
+        lines.append(
+            f"┣   K{k1}/{k2} exp {exp} | "
+            f"Rate `{rate:.2f}%` vs margin `{margin_rate:.2f}%` (saves `{savings:.2f}%`) | "
+            f"DTE `{dte}d`{roll_tag}"
+        )
+        if dte <= 60:
+            lines.append(
+                f"┣   ⚠️ Balloon `${balloon:,}` due {exp} — "
+                f"run box_spread_scan for roll rate. Interest cost: `${ann_int:.0f}/yr`."
+            )
+
+    # RO dodge reminder: if we sold CLM/CRF and are waiting for re-entry,
+    # the balloon is still owed. Sale proceeds should reduce E*TRADE margin
+    # temporarily — NOT assumed to cover the balloon.
+    dodging = [t for t in ("CLM", "CRF") if db.get_state(f"ro_dodge_active_{t}")]
+    if dodging:
+        lines.append(
+            f"┣   🔴 RO DODGE ACTIVE ({'/'.join(dodging)}) — "
+            f"box balloon(s) owed at expiry regardless of share sale. "
+            f"Deploy proceeds → E*TRADE margin paydown until re-entry signal fires."
+        )
+    return "\n".join(lines) + "\n"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -775,12 +861,31 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
 
         # All conditions met — dispatch rebuy alert and mark as fired
         db.update_state(fired_key, datetime.now().strftime("%Y-%m-%d"))
+        db.update_state(f"ro_dodge_active_{ticker}", "")  # clear the dodge flag — re-entry confirmed
+        db.update_state(f"ro_reentry_signal_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+
+        # Box spread context — include in the re-entry embed so the operator knows
+        # to redeploy the margin that was freed during the dodge.
+        _box_positions = read_active_box_positions()
+        _box_lines = ""
+        if _box_positions:
+            _balloon_info = " | ".join([
+                f"K{int(bp.get('k1', 0))}/{int(bp.get('k2', 0))} exp {bp.get('expiration', '?')} "
+                f"(DTE:{bp.get('dte_current', '?')})"
+                for bp in _box_positions
+            ])
+            _box_lines = (
+                f"┣ 📦 Box Spread(s) Active: {_balloon_info}\n"
+                f"┣   Boxes roll on their own schedule — redeploy freed margin into this rebuy\n"
+            )
+
         dip_msg = (
             f"**{ticker} — 🟢 POST-RO DIP: REBUY ZONE**\n"
-            f"┣ Price: ${current_price:.2f} ({pct_below_high:.1f}% below 60D high)\n"
-            f"┣ Premium to NAV: {current_premium:.2f}% (was >20% during RO)\n"
+            f"┣ Price: `${current_price:.2f}` ({pct_below_high:.1f}% below 60D high)\n"
+            f"┣ Premium to NAV: `{current_premium:.2f}%` (was >20% during RO)\n"
             f"┣ RO Cycle: N-2 was previously detected — price has repriced toward NAV\n"
             f"┣ Signal: Premium collapse + price off high = classic post-RO dip pattern\n"
+            f"{_box_lines}"
             f"┣ ⚠️ Verify: Confirm Cornerstone announced 'RO complete' before acting\n"
             f"┣ Action: Rebuy position + resume CS DRIP (call broker to confirm DRIP status)\n"
             f"┗ Note: Keep ≥3 shares at all times to preserve NAV DRIP eligibility"
@@ -796,6 +901,74 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
 
     except Exception as e:
         logger.error(f"[RO Completion Dip Error] {ticker}: {e}")
+        return False
+
+
+def check_yield_floor_reentry(ticker: str, current_price: float, current_premium: float) -> bool:
+    """
+    Second re-entry path: fires when price falls to or below the distribution yield floor
+    (fair value = annual_dist / 0.19) AND an N-2 cycle was detected ≥45 days ago.
+    This catches the bottom even when the 60D-high condition hasn't triggered yet —
+    the structural income buyer floor creates a natural support ceiling from below.
+    Fires once per RO cycle. Complements detect_ro_completion_dip, not a duplicate.
+    """
+    try:
+        n2_key    = f"cornerstone_n2_detected_{ticker}"
+        fired_key = f"cornerstone_floor_reentry_fired_{ticker}"
+        prev_n2   = db.get_state(n2_key, "")
+        already   = db.get_state(fired_key, "")
+        if not prev_n2 or already:
+            return False
+
+        # Require at least 45 days since N-2 detection (give RO time to complete)
+        try:
+            n2_date = datetime.strptime(prev_n2, "%Y-%m-%d").date()
+            age_days = (datetime.utcnow().date() - n2_date).days
+        except Exception:
+            age_days = 0
+        if age_days < 45:
+            return False
+
+        # Fair value floor: annual_dist / 0.19
+        annual_div = 1.4268 if ticker == "CLM" else 1.3824
+        fair_value = round(annual_div / 0.19, 2)
+        if current_price > fair_value:
+            return False
+
+        # All conditions met
+        db.update_state(fired_key, datetime.now().strftime("%Y-%m-%d"))
+        db.update_state(f"ro_dodge_active_{ticker}", "")  # clear dodge flag
+        db.update_state(f"ro_reentry_signal_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+
+        _box_positions = read_active_box_positions()
+        _box_lines = ""
+        if _box_positions:
+            _box_lines = (
+                f"┣ 📦 Box Spread(s) Active — redeploy freed margin into this accumulation zone\n"
+            )
+
+        floor_msg = (
+            f"**{ticker} — 🟢 YIELD FLOOR RE-ENTRY: Accumulation Zone**\n"
+            f"┣ Price: `${current_price:.2f}` at or below fair value `${fair_value}`\n"
+            f"┣ Implied Yield: `{(annual_div / current_price * 100):.1f}%` ≥ 19% structural floor\n"
+            f"┣ Premium to NAV: `{current_premium:.2f}%` (post-RO repricing)\n"
+            f"┣ N-2 Cycle: {age_days}d elapsed — RO likely completed, income buyers absorbing\n"
+            f"{_box_lines}"
+            f"┣ ⚠️ Verify RO is complete before adding position\n"
+            f"┣ Action: Rebuy below fair value = structural alpha — resume DRIP at NAV\n"
+            f"┗ Note: This is the accumulation zone the Feb 2026 pattern eventually reached"
+        )
+        if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+            send_essentials_embed(
+                WEBHOOK_CORNERSTONE,
+                f"🟢 {ticker} — Yield Floor Accumulation Zone",
+                floor_msg, 0x27ae60
+            )
+        logger.info(f"[Yield Floor Re-entry] {ticker} at ${current_price:.2f} ≤ FV ${fair_value} — alert dispatched.")
+        return True
+
+    except Exception as e:
+        logger.error(f"[Yield Floor Re-entry Error] {ticker}: {e}")
         return False
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1281,8 +1454,9 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         # N-2 no longer in recent filings — clear the cycle tracker
         db.update_state(n2_key, "")
 
-    # ── NEW: RO completion dip detector (fires rebuy alert automatically)
+    # ── Re-entry detectors (both run every tick, fire once per RO cycle via DB dedup)
     detect_ro_completion_dip(session, ticker, price, premium)
+    check_yield_floor_reentry(ticker, price, premium)
 
     # ── NEW: 30% premium RO Watch gate (Todd Akin threshold — RO "usually" announced here)
     # Debounced: fires once when premium crosses 30%, resets when it drops back below 25%.
@@ -1367,6 +1541,21 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note  = "Distribution/Caution phase"
         verdict      = "🔴 SELL to ≥3 shares — NAV dilution imminent. ≥3 shares preserves DRIP permanently."
         recommendation = "Halt DRIP; sell to 3-share floor; monitor for RO completion."
+        # Set RO dodge flag so box pulse lines show the balloon reminder
+        db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+        # Inject box context into verdict if boxes are active
+        _active_boxes = read_active_box_positions()
+        if _active_boxes:
+            _bx = " | ".join([
+                f"K{int(b.get('k1', 0))}/{int(b.get('k2', 0))} exp {b.get('expiration', '?')} "
+                f"(DTE:{b.get('dte_current', '?')}, balloon:${int(b.get('width', 100)) * int(b.get('contracts', 1)) * 100:,})"
+                for b in _active_boxes
+            ])
+            verdict += (
+                f"\n┣ 📦 BOX ACTIVE: {_bx}"
+                f"\n┗ Box balloon(s) owed at expiry — NOT retired by this sale. "
+                f"Deploy proceeds → E*TRADE margin paydown until re-entry signal."
+            )
     elif ro_tier == "CRITICAL":
         status       = "🚨 CRITICAL: RO RISK ELEVATED"
         income_note  = "Distribution/Caution phase"
@@ -1637,9 +1826,9 @@ def compute_cornerstone_reports():
             worst_tier = "ELEVATED"
 
     # ── Margin carry spread (Strategy 1 health check) ─────────────────────────
-    # Blended Tier 2 yield (MLPI ~15% + TDAQ ~14% + KQQQ ~15% + MAIN ~8%) ÷ 4 = ~13%
-    # Actual E*TRADE margin rate tracks FEDFUNDS + ~1.25% spread; use whichever is higher.
-    _TIER2_BLENDED = 13.0
+    # Active Tier 2: MLPI (~15%) + MAIN (~8%) only as of Jul 2026.
+    # TDAQ / KQQQ are CLAUDE.md candidates, not currently held.
+    _TIER2_BLENDED = TIER2_ACTIVE_BLENDED  # 11.5% blended
     try:
         from analytics import HighFidelityAnalyticsEngine as _AE
         _snap = _AE().fetch_fred_macro_snapshot()
@@ -1664,6 +1853,35 @@ def compute_cornerstone_reports():
         })
     except Exception:
         pass
+
+    # ── Box spread positions block (Strategy 4 health check) ──────────────────
+    # DB-only read — zero API calls. Surfaces DTE countdown, balloon warnings,
+    # and RO dodge reminder. Content stays in #cornerstone only.
+    _box_positions = read_active_box_positions()
+    _box_lines = _format_box_pulse_lines(_box_positions)
+    if _box_lines:
+        # Persist for income channel snippet (box efficiency metrics only, no CLM/CRF data)
+        try:
+            _best_box = db.get_state("box_spread_best_rate") or {}
+            db.update_state("box_context_daily", {
+                "date": __import__("datetime").date.today().isoformat(),
+                "active_count": len(_box_positions),
+                "positions": [
+                    {
+                        "rate": bp.get("implied_rate_pct"),
+                        "dte": bp.get("dte_current"),
+                        "balloon": bp.get("width", 100) * bp.get("contracts", 1) * 100,
+                        "loan": bp.get("loan_amount"),
+                        "annual_interest": bp.get("annual_interest_usd"),
+                    }
+                    for bp in _box_positions
+                ],
+                "best_available_rate": _best_box.get("rate_pct"),
+                "margin_savings_pct": round(margin_rate - float(_best_box.get("rate_pct") or margin_rate), 2),
+            })
+        except Exception:
+            pass
+        full_report += f"\n\n{_box_lines.rstrip()}"
 
     return full_report, worst_tier, carry_spread
 
@@ -1836,6 +2054,49 @@ def send_daily_pulse(is_test=False):
     color = 0xe74c3c if worst_tier == "CRITICAL" else (0xf1c40f if worst_tier == "ELEVATED" else 0x2ecc71)
     dispatch_cornerstone_alert(title, full_report, color)
     db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
+
+    # ── Income channel box efficiency snippet (once per day, box-active only) ──
+    # Dispatches borrowing-efficiency metrics to #dividend-ccetfs as income context.
+    # NO CLM/CRF data included — this is pure capital-cost optimization content.
+    # Reads box_context_daily written by compute_cornerstone_reports().
+    try:
+        _bctx = db.get_state("box_context_daily") or {}
+        _bctx_date = _bctx.get("date", "")
+        _today_str = datetime.now(pytz.timezone("Pacific/Honolulu")).strftime("%Y-%m-%d")
+        if (_bctx_date == _today_str and int(_bctx.get("active_count", 0)) > 0
+                and HAS_ESSENTIALS and WEBHOOK_DIVIDEND):
+            _bpos    = _bctx.get("positions", [])
+            _avail   = _bctx.get("best_available_rate")
+            _savings = _bctx.get("margin_savings_pct", 0.0)
+            _lines   = []
+            for _p in _bpos:
+                _rate = _p.get("rate") or 0
+                _dte  = _p.get("dte") or "?"
+                _ann  = _p.get("annual_interest") or 0
+                _loan = _p.get("loan") or 0
+                _lines.append(
+                    f"┣ Active: `${_loan:,.0f}` @ `{_rate:.2f}%` | DTE `{_dte}d` | "
+                    f"Interest cost `${_ann:.0f}/yr`"
+                )
+            _avail_line = (
+                f"┣ Best available rate today: `{_avail:.2f}%`\n" if _avail else ""
+            )
+            _snippet = (
+                f"**📦 Box Spread Borrowing — Capital Efficiency**\n"
+                + "\n".join(_lines) + "\n"
+                + _avail_line
+                + f"┣ vs E*TRADE margin `{margin_rate:.2f}%` | "
+                  f"Saving `{_savings:.2f}%` on deployed capital\n"
+                + f"┗ Roll at 30 DTE — check box_spread_scan for new rate"
+            )
+            send_essentials_embed(
+                WEBHOOK_DIVIDEND,
+                "📦 Box Spread Cost-of-Capital",
+                _snippet, 0x3498db
+            )
+            logger.info("Box efficiency snippet dispatched to #dividend-ccetfs.")
+    except Exception as _be:
+        logger.warning(f"Box income snippet failed: {_be}")
 
     # ── Carry spread Pushover alert (once per day when compressed) ────────────
     # Fires separately from the main cornerstone so it arrives as a distinct notification.

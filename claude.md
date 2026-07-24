@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Jul 23 2026*
+*Last updated: Jul 23 2026 (Strategy 4 — Box Spread Borrowing added)*
 
 ---
 
@@ -220,8 +220,9 @@ Rebuy zone: price ≤ $7.51 (CLM) / $7.28 (CRF) → yield ≥ 19% → structural
 All three new signals in monitor.py fire as conditional lines in the #cornerstone pulse embed.
 
 **Guardrails:**
-- Margin never exceeds 25% of portfolio value
-- Internal red line: portfolio drops 15% → stop new margin draws
+- **Combined leverage (margin + box spread balloons) never exceeds 25% of portfolio value**
+  E*TRADE margin balance + all outstanding box balloon amounts = one number. 25% cap applies to both combined, not each separately.
+- Internal red line: portfolio drops 15% → stop new margin draws AND do not open new boxes
 - Keep ~$2k cash buffer (1 month of bills) at all times
 
 ---
@@ -355,6 +356,146 @@ When social conviction AND options setup align → BTO LEAP alert.
 
 ---
 
+### Strategy 4 — SPX Box Spread Borrowing (Structural Low-Rate Loan)
+
+**Status:** Intelligence layer built (Jul 23 2026). E*TRADE options level 3 + SPX combo
+order support required before execution. Call E*TRADE to confirm before Phase D.
+
+**The thesis:** A short SPX box spread is a synthetic fixed-rate loan at ~Treasury + 30–50bps
+(~4.75% today vs 7.25% E*TRADE margin). Borrow at ~4.75%, deploy into CLM/CRF at 19% yield
+= net positive carry of ~14.25% on borrowed capital. The box is OCC-guaranteed, European-style
+(no early assignment), and the interest cost is a §1256 capital loss at Dec 31 — offsets
+TQQQ LEAP profits at tax time. No monthly payments. Balloon due at expiry.
+
+**Why SPX only — CLM/CRF box spreads are impossible:**
+- CLM/CRF have no listed options market (CEF too small)
+- Even if they did, American-style options + no institutional arbitrageurs = put-call parity
+  not enforced = rates far above Treasury
+- Box spreads only work where European-style options + deep institutional OI enforce parity
+- Mechanism: borrow via SPX box → cash in account → use cash to buy CLM/CRF
+
+**The 4-leg structure (short box = receive credit today):**
+```
+Short K1 Call + Long K2 Call + Short K2 Put + Long K1 Put
+  K1 = lower strike | K2 = upper strike | width = K2 − K1
+  Credit received today ≈ width × 100 × (1 − rate × DTE/365)
+  At expiry: owe exactly width × 100 (the "balloon payment")
+
+Example — 100pt box, 357 DTE, SPX ~7,408:
+  Strikes: K1=7400, K2=7500
+  Credit received: ~$9,555 (mid-price execution)
+  Balloon at expiry: $10,000
+  Implied rate: ~4.75%
+  Annual interest cost: ~$445
+  Margin held by E*TRADE: ~$445 (small — OCC guarantees settlement)
+```
+
+**CRITICAL — mid-price execution only:**
+Use a combo order (all 4 legs simultaneously). The mid-price rate is ~4.75%.
+Legging in manually uses bid/ask on each leg — the bid/ask drag alone (~5.75pt)
+pushes the effective rate to 11–19%. NEVER leg into a box spread.
+
+**Balloon payment — how it actually works:**
+```
+At expiry, OCC cash-settles all 4 legs automatically.
+Net settlement = exactly the strike width × $100 per contract.
+For a 100pt box: E*TRADE debits $10,000 from your account.
+You do NOT need to "save up" $10,000 — the ROLL is the default move.
+
+ROLL PROCESS (30 DTE Pushover alert fires from monitor.py):
+  Step 1: Run box_spread_scan to check current available rate
+  Step 2: Open new box (same or larger width, 1-year DTE) → receive new credit (~$9,555+)
+  Step 3: New credit lands in account BEFORE old box expires
+  Step 4: At expiry: OCC debits $10,000 | New credit already in account covers $9,555
+  Step 5: Net cash outlay for the roll: ~$445 (the annual interest spread — and nothing else)
+
+MLPI + MAIN dividends (~$1,300–1,500/year on active holdings) cover the $445 interest
+cost before the balloon even arrives. The box is effectively self-funding from Tier 2 income.
+```
+
+**Combined leverage cap — 25% of portfolio, COMBINED margin + box:**
+```
+Portfolio value: $43,000 → 25% cap = $10,750 total leverage budget
+
+With 1 active box ($9,555 credit):
+  Box obligation: $9,555 → uses $9,555 of the $10,750 budget
+  Remaining margin headroom: $10,750 − $9,555 = $1,195
+  (margin stays minimal until portfolio grows)
+
+At $65,000 portfolio → 25% cap = $16,250:
+  Box obligation: $9,555
+  Remaining for E*TRADE margin: $6,695 → comfortable
+  → Now box + conservative margin work in parallel
+
+RULE: (E*TRADE margin balance + sum of all box balloon obligations) ≤ 25% × portfolio value
+Never compute them separately. They are one combined leverage number.
+```
+
+**Scaling path — from 1 box to a ladder:**
+```
+Month 0:    1× 100pt box (Dec 2027) → $9,555 → buy CLM/CRF → DRIP
+Month 6:    Portfolio grown → open 2nd box (Jun 2028) → $9,555+ → buy more CLM/CRF
+Dec 2027:   Roll Box 1 → Dec 2028 | Jun 2028: Roll Box 2 → Jun 2029
+Result:     Staggered 6-month ladder → balloon payments never coincide
+            Each new box opened at a larger portfolio = naturally larger credit
+```
+
+**RO dodge with active box spreads:**
+```
+monitor.py fires N-2 CRITICAL alert:
+  → Sell 99% CLM/CRF to ≥3 shares (preserves DRIP permanently)
+  → ro_dodge_active_{ticker} DB flag set → box pulse shows balloon reminder
+  → Box balloon is STILL OWED at expiry — selling CLM/CRF does NOT retire the box
+  → Deploy sale proceeds → reduce E*TRADE margin temporarily (no idle cash)
+  → Box continues rolling on its own schedule
+  → MLPI + MAIN dividends keep flowing → buffer accumulates
+
+Re-entry signals (monitor.py fires one or both):
+  Path A: detect_ro_completion_dip() — premium <10% + price ≥10% below 60D high
+  Path B: check_yield_floor_reentry() — price ≤ fair value + 45d since N-2 detected
+  → ro_dodge_active cleared → re-entry embed dispatched → #cornerstone only
+  → Redeploy freed margin + available cash into CLM/CRF rebuy
+  → Resume DRIP at NAV — net shares GREATER than before RO
+```
+
+**§1256 tax treatment:**
+- SPX options are §1256 contracts (60% long-term / 40% short-term capital gains treatment)
+- The implied interest cost is recorded as a capital loss at Dec 31 (mark-to-market)
+- A ~$445 annual interest cost = ~$445 §1256 capital loss
+- This offsets TQQQ LEAP capital gains dollar for dollar
+- CLM/CRF DRIP dividends have NO relation to §1256 — separate tax event
+
+**Ecosystem wiring (what was built Jul 23 2026):**
+```
+tradier_client.py: get_spx_box_rate() — mid-price calc, caches to DB (box_spread_best_rate)
+scheduler.py --mode box_spread_scan: fetches daily rate, publishes to #options-wheel
+scheduler.py --mode box_position --action open|close|status: logs positions to DB
+  → open: stores k1, k2, width, expiration, credit, loan_amount, implied_rate, DTE, interest
+  → status: reads all open positions, fires Pushover at 30 DTE (roll alert) and 14 DTE (urgent)
+  → close: marks position CLOSED (no matching close trade needed — OCC settles automatically)
+market_scheduler.py: box_spread_scan fires 21:15 UTC weekdays (1 Tradier call, 0 TD credits)
+                     box_roll_check fires 21:20 UTC weekdays (0 API calls — DB read only)
+monitor.py: read_active_box_positions() — reads DB, appended to cornerstone daily pulse
+            _format_box_pulse_lines() — DTE countdown + balloon warning ≤60/30 DTE
+            N-2 CRITICAL verdict now includes active box balloon context
+            check_yield_floor_reentry() — second re-entry path via fair value floor
+            Income channel snippet — box efficiency metrics to #dividend-ccetfs (no CLM/CRF data)
+
+Channel routing (locked — never change):
+  CLM/CRF + box context + re-entry signals → #cornerstone (WEBHOOK_CORNERSTONE_RO) ONLY
+  Box rate scan + daily rate → #options-wheel (WEBHOOK_TRADE_SIGNALS)
+  Box efficiency as cost-of-capital metric → #dividend-ccetfs (WEBHOOK_DIVIDEND_CCETFS)
+```
+
+**Phase D — execution gates (DO NOT execute until all confirmed):**
+1. E*TRADE options level 3 approved (call E*TRADE — required for combo orders)
+2. SPX combo order support confirmed on account
+3. Confirm OCC margin requirement for your account type (usually just the net debit)
+4. Run `python scheduler.py --mode box_spread_scan` to verify Tradier chain pulls correctly
+5. Practice with paper: verify the 4 legs at mid-prices sum to the expected credit
+
+---
+
 ## 1. Business Philosophy (Paycheck2Portfolio / Shawn Grady Model)
 
 ```
@@ -374,18 +515,22 @@ Discord Bots     →  Automated business intelligence layer
 - Portfolio = equity
 - Managing from a position of equity
 
-**Velocity Banking mechanic:**
+**Actual cash flow mechanics (Jul 2026 reality — NOT the aspirational Bill Pay model yet):**
 ```
-$6k W2 deposit → E*TRADE
+W2 paycheck → external checking (bills paid from here)
+Simplifi by Quicken → tracks monthly surplus after bills
+Monthly surplus → manually deposited into E*TRADE
+$500/week auto-deposit → E*TRADE (separate stream)
   ↓
-$2k → bills via E*TRADE Bill Pay
-$4k net → margin paydown + dividend accumulation
+Box spread credit → buy CLM/CRF → DRIP at NAV (never touched)
+MLPI + MAIN cash dividends → margin paydown (Tier 2 active only)
+MLPI purchased on dips (cash only, not margin) → expands margin capacity
   ↓
-Monthly divs (MLPI, MAIN, TDAQ, KQQQ) → margin paydown
-CLM/CRF divs → DRIP at NAV only, never touched
-  ↓
-Margin freed → reborrow → buy more CLM/CRF or Tier 2
+Margin freed → reborrow conservatively → more CLM/CRF
 ```
+
+**Note:** E*TRADE Bill Pay is the TARGET design (bills as business expenses). Not yet live.
+Simplifi is the bridge — it surfaces monthly investable surplus for manual deployment.
 
 **Risk guardrails:**
 - Margin never exceeds 25% of portfolio value
@@ -414,10 +559,11 @@ Margin freed → reborrow → buy more CLM/CRF or Tier 2
 |--------|------|-------|-----------|------|
 | MAIN | BDC | ~8% | Monthly | Stability anchor — never cut dividend since 2007 IPO |
 | MLPI | MLP/Energy ETF w/ covered calls | ~15% | Monthly | Real asset base, no K-1 form |
-| TDAQ | TappAlpha 0DTE NASDAQ covered call | ~12–17% | Monthly | Higher yield than JEPQ |
-| KQQQ | Kurv Tech Titans covered call | ~15% | Monthly | AAPL/MSFT/NVDA/META/GOOGL basket |
+| TDAQ | TappAlpha 0DTE NASDAQ covered call | ~12–17% | Monthly | Future candidate — not currently held |
+| KQQQ | Kurv Tech Titans covered call | ~15% | Monthly | Future candidate — not currently held |
 
-**Blended Tier 2 yield:** ~13–15%
+**Active Tier 2 (Jul 2026):** MLPI + MAIN only. Blended yield: ~11.5%
+**TDAQ / KQQQ:** in CLAUDE.md for future reference, not currently held at this portfolio stage.
 **All Tier 2 dividends → margin paydown (never reinvested)**
 
 **MLPI cash-buy strategy (current focus):**

@@ -99,6 +99,13 @@ SCHEDULE = [
     # Pulls 252-day premium history from CEFConnect → updates mu/sigma in DB
     # so monitor.py's z-score uses empirical data, not hardcoded defaults.
     (22, 30, "cef_calibrate",      "scheduler",    ["--mode", "cef_calibrate"],   True),
+    # Box spread rate scan — fetches SPX chain via Tradier, calculates 100pt/50pt
+    # implied rates, compares to FRED DGS1 and 7.25% E*TRADE margin.
+    # 1 Tradier API call; no Twelve Data credits. Caches best rate to DB.
+    (21, 15, "box_spread_scan",    "scheduler",    ["--mode", "box_spread_scan"], True),
+    # Box position roll check — reads open positions, fires Pushover at 30/14 DTE.
+    # Zero API calls (reads DB only). Deduped monthly per position.
+    (21, 20, "box_roll_check",     "scheduler",    ["--mode", "box_position", "--action", "status"], True),
     # IV accumulation — stores daily ATM IV per symbol after close.
     # Accumulating since Jul 11 2026; usable baseline ~30 days; full 52-week IVR after 252 days.
     (21, 30, "store_daily_iv",     "scheduler",    ["--mode", "store_daily_iv"],  True),

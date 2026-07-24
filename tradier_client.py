@@ -538,6 +538,187 @@ class TradierClient:
         return self._cached(cache_key, 21600, _fetch)
 
 
+    def get_spx_box_rate(self, widths: list = None, dte_target: int = 365,
+                         ttl: int = 3600) -> dict:
+        """
+        Calculate implied annualized box spread rate on SPX options.
+
+        Short box: short K1 call + long K2 call + short K2 put + long K1 put.
+        Receive credit today; owe (K2 − K1) at expiry.
+        Implied rate = (width / credit − 1) × (365 / dte).
+
+        SPX options are Section 1256 European-style contracts — no early assignment risk.
+        Put-call parity arbitrage forces the rate to track near the risk-free rate (~Treasury + 30-50bps).
+
+        Returns dict:
+          spot:         float   — SPX spot (SPY×10 fallback)
+          margin_rate:  float   — E*TRADE reference (7.25%)
+          timestamp:    str     — date of calculation (YYYY-MM-DD)
+          boxes:        dict    — keyed by width (int):
+            rate_pct            annualised implied rate as percent
+            credit_per_contract credit received per contract (in index points)
+            width               actual strike width used
+            dte                 days to expiration
+            expiration          YYYY-MM-DD
+            k1 / k2             lower / upper strikes
+            spread_to_margin    margin_rate − rate_pct (positive = saving)
+        """
+        if widths is None:
+            widths = [100, 50]
+        cache_key = f"spx_box_rate_{dte_target}_{'_'.join(str(w) for w in sorted(widths))}"
+
+        def _fetch():
+            result = {
+                "margin_rate": 7.25,
+                "boxes": {},
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%d"),
+                "spot": 0.0,
+            }
+
+            # SPX spot — index quote; fall back to SPY × 10 if index not quoted
+            spot = self.get_spot("SPX")
+            if spot < 100:
+                spy = self.get_spot("SPY")
+                if spy > 0:
+                    spot = spy * 10
+            if spot < 100:
+                logger.warning("[BoxRate] Cannot resolve SPX spot price")
+                return result
+            result["spot"] = round(spot, 2)
+
+            # Find expiration nearest to dte_target (minimum 60 DTE for chain depth)
+            today = datetime.utcnow().date()
+            exps = self.get_expirations("SPX")
+            if not exps:
+                logger.warning("[BoxRate] No SPX expirations returned")
+                return result
+
+            best_exp, best_dte, best_diff = None, None, 9999
+            for exp_str in sorted(exps):
+                try:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if dte < 60:
+                        continue
+                    diff = abs(dte - dte_target)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_exp = exp_str
+                        best_dte = dte
+                except Exception:
+                    continue
+
+            if not best_exp:
+                logger.warning("[BoxRate] No suitable SPX expiration found")
+                return result
+
+            # Fetch chain — filter to ±15% of spot to keep the response lean
+            chain = self.get_options_chain("SPX", best_exp, greeks=False, ttl=ttl)
+            if not chain:
+                logger.warning("[BoxRate] SPX chain empty")
+                return result
+
+            lo_bound = spot * 0.85
+            hi_bound = spot * 1.15
+            chain_map: dict = {}
+            for c in chain:
+                try:
+                    k = float(c.get("strike", 0))
+                    ot = str(c.get("option_type", "")).lower()
+                    if not (lo_bound <= k <= hi_bound):
+                        continue
+                    bid = float(c.get("bid") or 0)
+                    ask = float(c.get("ask") or 0)
+                    if bid <= 0 and ask <= 0:
+                        continue
+                    chain_map[(k, ot)] = {"bid": bid, "ask": ask}
+                except Exception:
+                    continue
+
+            if len(chain_map) < 8:
+                logger.warning(f"[BoxRate] Chain too sparse: {len(chain_map)} legs near ATM")
+                return result
+
+            available_strikes = sorted(set(k for (k, _) in chain_map.keys()))
+
+            for width in widths:
+                try:
+                    # Anchor K1 at the nearest whole-width multiple below spot
+                    k1_target = (int(spot) // width) * width
+                    k1 = min(available_strikes, key=lambda k: abs(k - k1_target))
+                    k2_target = k1_target + width
+                    k2 = min(available_strikes, key=lambda k: abs(k - k2_target))
+                    actual_width = k2 - k1
+
+                    if not (width * 0.7 <= actual_width <= width * 1.3):
+                        logger.info(f"[BoxRate] Width {width}: K{k1}/{k2}={actual_width}pt mismatch, skip")
+                        continue
+
+                    k1_call = chain_map.get((k1, "call"), {})
+                    k2_call = chain_map.get((k2, "call"), {})
+                    k2_put  = chain_map.get((k2, "put"),  {})
+                    k1_put  = chain_map.get((k1, "put"),  {})
+
+                    if not all([k1_call, k2_call, k2_put, k1_put]):
+                        logger.info(f"[BoxRate] Width {width}: missing legs, skip")
+                        continue
+
+                    # Helper: mid price
+                    def _mid(leg):
+                        return (leg["bid"] + leg["ask"]) / 2
+
+                    # Short box credit at MID prices — approximates a combo order fill.
+                    # Mid rate is the relevant benchmark; bid/ask rate is worst-case legging.
+                    credit_mid = (
+                        _mid(k1_call)  # short K1 call
+                        - _mid(k2_call)  # long  K2 call
+                        + _mid(k2_put)   # short K2 put
+                        - _mid(k1_put)   # long  K1 put
+                    )
+                    # Bid/ask worst-case (for reference — shows cost of poor execution)
+                    credit_ba = (
+                        k1_call["bid"]   - k2_call["ask"]
+                        + k2_put["bid"]  - k1_put["ask"]
+                    )
+                    # Bid-ask spread drag: how much credit is lost vs theoretical
+                    ba_drag = round(credit_mid - credit_ba, 2)
+
+                    if credit_mid <= 0 or credit_mid >= actual_width:
+                        logger.info(f"[BoxRate] Width {width}: mid credit {credit_mid:.2f} invalid, skip")
+                        continue
+
+                    # Annualised implied rates
+                    rate_mid = (actual_width / credit_mid - 1) * (365 / best_dte) * 100
+                    rate_ba  = (actual_width / credit_ba  - 1) * (365 / best_dte) * 100 if credit_ba > 0 else None
+
+                    result["boxes"][width] = {
+                        "rate_pct":             round(rate_mid, 3),   # mid = primary signal
+                        "rate_pct_bid_ask":     round(rate_ba,  3) if rate_ba else None,
+                        "credit_per_contract":  round(credit_mid, 2),
+                        "ba_drag_pts":          ba_drag,              # bid/ask execution cost
+                        "width":                actual_width,
+                        "dte":                  best_dte,
+                        "expiration":           best_exp,
+                        "k1":                   k1,
+                        "k2":                   k2,
+                        "spread_to_margin":     round(7.25 - rate_mid, 3),
+                    }
+                    _rate_ba_str = f"{rate_ba:.3f}" if rate_ba is not None else "n/a"
+                    logger.info(
+                        f"[BoxRate] {width}pt box: mid_rate={rate_mid:.3f}% "
+                        f"ba_rate={_rate_ba_str}% "
+                        f"K{k1:.0f}/{k2:.0f} credit_mid={credit_mid:.2f} "
+                        f"ba_drag={ba_drag:.2f}pt DTE={best_dte}"
+                    )
+
+                except Exception as e:
+                    logger.warning(f"[BoxRate] Width {width} failed: {e}")
+
+            return result
+
+        return self._cached(cache_key, ttl, _fetch)
+
+
 def _gex_empty(symbol):
     return {
         "flip_strike": 0.0,
