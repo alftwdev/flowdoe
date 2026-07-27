@@ -828,8 +828,22 @@ def main():
                 _T = _DTE_MID / 365.0
                 _2PI_SQRT = (2 * _math.pi) ** 0.5
 
-                candidate_lines = []   # (meter, ivr, display_line)
-                snapshot_top   = []   # [{sym, ivr, strike}] — top HIGH entries for DB
+                # Fetch RSI-14 per symbol (daily, 1 Twelve Data call each, runs once post-close)
+                def _fetch_rsi(sym):
+                    try:
+                        r = engine._execute_query("rsi", {"symbol": sym, "interval": "1day", "time_period": 14})
+                        if r and r.get("values"):
+                            return float(r["values"][0]["rsi"])
+                    except Exception:
+                        pass
+                    return None
+
+                # Tier buckets: actionable (HIGH + IVR≥35), high-social (HIGH, IV thin), watchlist
+                action_lines  = []   # (ivr, display_line)  — full setup shown
+                high_watch    = []   # (sym, rsi_label)    — HIGH conviction but no valid IV
+                watch_syms    = []   # symbol strings       — NEUTRAL/Watch tier
+                snapshot_top  = []   # [{sym, ivr, strike}] — top HIGH entries for DB
+
                 for play in (plays or []):
                     sym  = play.get("symbol", "")
                     spot = play.get("spot", 0)
@@ -838,72 +852,117 @@ def main():
                     try:
                         meter = play.get("meter", "NEUTRAL")
 
-                        # Real IVR from Tradier (1h cache — no redundant calls).
-                        # Falls back to HV30×1.15 proxy; labels clarify which source.
-                        ivr_val    = 0.0
-                        iv_dec     = 0.0
+                        # RSI-14 context
+                        rsi_val = _fetch_rsi(sym)
+                        if rsi_val is not None:
+                            rsi_icon = "🟢" if rsi_val < 35 else ("🔴" if rsi_val > 65 else "")
+                            rsi_label = f"RSI `{rsi_val:.0f}`{rsi_icon}"
+                        else:
+                            rsi_label = ""
+
+                        # Real IVR from Tradier (1h cache). Falls back to HV30 proxy.
+                        ivr_val     = 0.0
+                        iv_dec      = 0.0
                         iv_reliable = False
-                        iv_label   = ""
+                        iv_label    = ""
+                        iv_thin     = False
                         if _tc3.api_key:
                             try:
                                 _ivr_data = _tc3.get_iv_rank(sym, engine.db)
                                 _cur_iv   = _ivr_data.get("current_iv", 0.0)
                                 if _cur_iv > 0:
-                                    ivr_val    = _ivr_data.get("ivr", 0.0)
-                                    iv_dec     = _cur_iv
+                                    ivr_val     = _ivr_data.get("ivr", 0.0)
+                                    iv_dec      = _cur_iv
                                     iv_reliable = _ivr_data.get("reliable", False)
-                                    iv_label   = f"IVR `{ivr_val:.0f}%`{'✅' if iv_reliable else '~'}"
+                                    iv_label    = f"IVR `{ivr_val:.0f}%`{'✅' if iv_reliable else '~'}"
                             except Exception:
                                 pass
                         if iv_dec == 0.0:
-                            hv30    = engine.calculate_historical_volatility(sym, lookback=30)
-                            iv_dec  = (hv30 * 1.15) / 100.0
-                            ivr_val = min(hv30 * 1.15, 99.0)   # NOT a rank — just IV est
-                            iv_label = f"IV est `{ivr_val:.0f}%`~proxy"
-
-                        # 0.20-delta put strike at DTE_MID via Black-Scholes approximation
-                        strike   = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
-                        # Premium estimate (half-normal approximation of ATM option price)
-                        est_prem = round(strike * iv_dec * _math.sqrt(_T) / _2PI_SQRT * 100)
+                            hv30 = engine.calculate_historical_volatility(sym, lookback=30)
+                            if hv30 > 5.0:
+                                iv_dec   = (hv30 * 1.15) / 100.0
+                                ivr_val  = min(hv30 * 1.15, 99.0)
+                                iv_label = f"IV est `{ivr_val:.0f}%`~proxy"
+                            else:
+                                # HV30 near zero = insufficient price history or illiquid
+                                iv_thin  = True
+                                iv_label = "IV unavailable ⚠️"
 
                         ivr_bar = "🟢" if ivr_val >= 35 else ("🟡" if ivr_val >= 20 else "🔴")
 
-                        # CLAUDE.md decision tree: stocks > $100 → credit spread, not naked CSP
+                        if iv_thin or iv_dec == 0.0:
+                            # Can't price the put — skip setup math
+                            if meter == "HIGH":
+                                high_watch.append((sym, rsi_label))
+                            else:
+                                watch_syms.append(sym)
+                            continue
+
+                        # 0.20-delta put strike via Black-Scholes approximation
+                        strike   = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
+                        est_prem = round(strike * iv_dec * _math.sqrt(_T) / _2PI_SQRT * 100)
+
+                        # Breakeven and monthly return % for context
+                        be_price     = round(strike - est_prem / 100, 2)
+                        monthly_pct  = round((est_prem / 100) / strike * 100, 1) if strike > 0 else 0.0
+
+                        # CLAUDE.md: stocks >$100 → credit spread, not naked CSP
                         if spot > 100:
-                            setup_tag = f"→ spread: sell `${strike}` / buy `${strike - 5}` put · est `${est_prem}` cr"
+                            setup_tag = (
+                                f"Spread: sell `${strike}` / buy `${strike-5}` put"
+                                f" · est `${est_prem}` cr · BE `${be_price}` · ~`{monthly_pct}%`/mo"
+                            )
                         else:
-                            setup_tag = f"→ CSP `${strike}` strike · est `${est_prem}` cr"
+                            setup_tag = (
+                                f"CSP `${strike}` strike · est `${est_prem}` cr"
+                                f" · BE `${be_price}` · ~`{monthly_pct}%`/mo"
+                            )
 
                         if meter == "HIGH" and ivr_val >= 35:
-                            line = f"┣ {ivr_bar} **{sym}** — HIGH | {iv_label} | Δ0.20 {setup_tag}"
+                            rsi_part = f" | {rsi_label}" if rsi_label else ""
+                            line = f"┣ {ivr_bar} **{sym}** `${spot:.2f}` — HIGH | {iv_label}{rsi_part} | Δ0.20 {setup_tag}"
+                            action_lines.append((ivr_val, line))
                             snapshot_top.append({"sym": sym, "ivr": int(ivr_val), "strike": strike})
                         elif meter == "HIGH":
-                            line = f"┣ {ivr_bar} **{sym}** — HIGH conviction | {iv_label} | IV thin — watch"
+                            high_watch.append((sym, rsi_label))
                         else:
-                            line = f"┣ {ivr_bar} **{sym}** — Watch | {iv_label}"
-                        candidate_lines.append((meter, ivr_val, line))
+                            watch_syms.append(sym)
                     except Exception:
                         pass
 
-                # HIGH + IVR>35 first, then HIGH, then Watch; within each tier sort by IVR desc
-                candidate_lines.sort(key=lambda x: (
-                    0 if (x[0] == "HIGH" and x[1] >= 35) else (1 if x[0] == "HIGH" else 2),
-                    -x[1]
-                ))
-                high_count = sum(1 for m, ivr, _ in candidate_lines if m == "HIGH" and ivr >= 35)
+                # Sort actionable by IVR descending
+                action_lines.sort(key=lambda x: -x[0])
+                high_count = len(action_lines)
 
-                if candidate_lines:
-                    if high_count > 0:
-                        sub = f"{high_count} name{'s' if high_count != 1 else ''} where conviction is HIGH and IVR supports premium selling"
-                    else:
-                        sub = "No HIGH conviction + IVR entries today — stand down on new positions"
-                    candidates_payload = (
-                        f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"
-                        f"{sub}\n\n"
-                        + "\n".join(l for _, _, l in candidate_lines[:7])
-                        + f"\n┗ {directive} Stocks >$100 → spread shown."
+                # Build payload in three clean tiers
+                payload_parts = [f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"]
+
+                if action_lines:
+                    payload_parts.append(
+                        f"**ACTIONABLE — {high_count} setup{'s' if high_count != 1 else ''}** "
+                        f"(HIGH conviction + IVR > 35%)\n"
+                        + "\n".join(l for _, l in action_lines)
                     )
                 else:
+                    payload_parts.append(
+                        "**ACTIONABLE — 0 setups today**\n"
+                        "No HIGH conviction + IVR > 35% names — stand down on new positions."
+                    )
+
+                if high_watch:
+                    hw_lines = []
+                    for (hw_sym, hw_rsi) in high_watch:
+                        rsi_part = f" | {hw_rsi}" if hw_rsi else ""
+                        hw_lines.append(f"┣ 🔴 **{hw_sym}** — HIGH social{rsi_part} | verify IV on chain before entering")
+                    payload_parts.append("\n**HIGH SOCIAL — IV unconfirmed** (check Tradier chain manually)\n" + "\n".join(hw_lines))
+
+                if watch_syms:
+                    payload_parts.append(f"\n**ON WATCH** ({len(watch_syms)} names)\n┗ " + " · ".join(watch_syms[:6]))
+
+                payload_parts.append(f"\n\n┗ {directive} Stocks >$100 → spread shown.")
+                candidates_payload = "\n".join(payload_parts)
+
+                if not (action_lines or high_watch or watch_syms):
                     candidates_payload = (
                         f"**IV Environment:** {iv_env} (VIXY `{vixy_z:+.2f}σ`)\n"
                         f"No social candidates surfaced today.\n"
