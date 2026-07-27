@@ -14,7 +14,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-from security import encode_canary
+def encode_canary(user_identifier: int) -> str:
+    """Invisible zero-width Unicode watermark stamped into every embed description."""
+    binary_str = format(int(user_identifier), 'b')
+    return "".join('‌' if bit == '1' else '​' for bit in binary_str)
+
+def decode_canary(leaked_text: str) -> int:
+    """Extracts user ID from leaked text containing zero-width watermark."""
+    binary_str = ""
+    for char in leaked_text:
+        if char == '‌': binary_str += '1'
+        elif char == '​': binary_str += '0'
+    return int(binary_str, 2) if binary_str else None
 
 # Initialize Logger
 logger = logging.getLogger("Essentials_Tools")

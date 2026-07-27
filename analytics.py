@@ -1,4 +1,5 @@
 import os
+import time as _time_module
 import logging
 import requests
 import numpy as np
@@ -12,6 +13,12 @@ logger = logging.getLogger("Rockefeller_Analytics")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+# Twelve Data Grow plan: 144 credits/min.
+# Minimum interval between REST calls = 60/130 ≈ 0.46s → caps any subprocess at ~130 calls/min.
+# Cache hits bypass this entirely (no REST call made).
+_TD_MIN_INTERVAL = 0.46
+_TD_LAST_CALL_TS = 0.0
+
 class HighFidelityAnalyticsEngine:
     def __init__(self):
         self.db = EcosystemDatabase()
@@ -24,6 +31,13 @@ class HighFidelityAnalyticsEngine:
         cached = self.db.get_cached_response(endpoint, params)
         if cached is not None:
             return cached
+        # Rate-guard: keep this process under ~130 TD calls/min (Grow plan: 144/min).
+        # Only live REST calls count — cache hits skip this entirely.
+        global _TD_LAST_CALL_TS
+        elapsed = _time_module.time() - _TD_LAST_CALL_TS
+        if elapsed < _TD_MIN_INTERVAL:
+            _time_module.sleep(_TD_MIN_INTERVAL - elapsed)
+        _TD_LAST_CALL_TS = _time_module.time()
         params["apikey"] = self.api_key
         try:
             r = requests.get(f"{self.base_url}/{endpoint}", params=params, timeout=12)

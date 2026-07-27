@@ -37,7 +37,7 @@ task died — restart it.
 
 ### One-time setup (new PA environment only)
 ```bash
-python seed_cef_premiums.py   # seeds CLM/CRF z-score mu/sigma from CEFConnect history
+python db_tools.py --seed-premiums   # seeds CLM/CRF z-score mu/sigma (one-time)
 ```
 
 ---
@@ -896,7 +896,7 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `audit.py` | ✅ Live | Daily DB maintenance — prunes stale alert locks (>24h), caps audit_logs at 500 rows, runs VACUUM. Runs once/day at 09:39 UTC via cron. |
+| `db_tools.py` | ✅ Live | Unified DB maintenance utility. Replaces audit.py + db_rescue.py + seed_cef_premiums.py. Modes: default = daily maintenance (09:39 UTC cron); `--rescue` = emergency DB recovery; `--seed-premiums` = one-time CLM/CRF z-score init. |
 | `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Live HY spread via FRED (cached daily). New Jul 19: NAV determination month gate (Oct), CEF institutional exit detector (high vol + flat SPY), distribution yield floor (FV at 19% yield target). All zero extra API calls. |
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
 | `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives |
@@ -909,7 +909,7 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Writes bottom_score/top_score to DB for market_analysis.py. New Jul 19: VIXY distribution gate (prevents false CALL entries on calm red days), 12-month seasonal size scalar for both desks. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
-| `seed_cef_premiums.py` | ✅ One-time tool | Run once on PA to seed CLM/CRF z-score mu/sigma from 252-day CEFConnect premium history. Replaces hardcoded defaults (mu=15, sigma=4) with empirical data. |
+| `seed_cef_premiums.py` | 🗑️ Removed | Merged into db_tools.py (`python db_tools.py --seed-premiums`). |
 | `sentisense_client.py` | ✅ Live | SentiSense API client with full DB caching. Trackers added Jul 15: get_reddit_picks (7-day cache), get_sentiment_movers (daily), get_sentiment_leaderboard (daily). Wired into analytics.py trending_plays + futures_social as additional discovery sources. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
 | `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY + SENTISENSE_API_KEY. |
@@ -1144,6 +1144,12 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 - [x] mlpi_entry scheduling gap fixed — mode existed in scheduler.py but had no SCHEDULE entry in market_scheduler.py; added at 17:00 UTC weekdays (✅ Jul 26)
 - [x] CRF NAV fallback corrected — daily_pulse.py had stale 6.30; fixed to 6.18 matching monitor.py (✅ Jul 26)
 - [x] Bias scorer label fixed — market_analysis.py logged `bias_score/8` but scorer has 9 flags; corrected to /9 (✅ Jul 26)
+- [x] VIX / market-analysis sharpening — 4 zero-cost improvements added (✅ Jul 26):
+  1. `tqqq.py` now writes `vix_term_slope` to DB after computing it (VIXY/VXZ ratio)
+  2. `market_analysis.py` Flag 10: VIX term structure (reads `vix_term_slope` from DB; backwardation = -12pts, deep contango = +8pts)
+  3. `market_analysis.py` Flag 11: SPY 50-day SMA regime (above SMA50 = +5/+10, below = -5/-12)
+  4. `market_analysis.py` Flag 12: Market breadth (reads `tqqq_breadth_cache` from DB; ≥70% = +8, ≤35% = -10)
+  5. VIX day-over-day % change: compares FRED VIXCLS to `fred_vix_prev` DB key; +20%+ DoD = -10pts; -15%+ collapse = +8pts. Bias scorer now 12+ signals.
 
 ### Weekly Audit Cadence (ongoing discipline)
 Capital is deployed and compounding. Each week, check for signals that slipped through:
@@ -1160,7 +1166,7 @@ Capital is deployed and compounding. Each week, check for signals that slipped t
 3. Restart `tqqq.py` always-on task (picks up VIXY gate + seasonal calendar)
 4. Add `PORTFOLIO_VALUE_APPROX=<your_value>` to `.env` on PA (required for Kelly sizing + personal scorecard)
 5. Add `personal_scorecard` to PA cron: `0 4 * * 0 python scheduler.py --mode personal_scorecard` (Sundays 04:00 UTC = 18:00 HST)
-6. Run `python seed_cef_premiums.py` once if not already done — seeds CLM/CRF z-score mu/sigma
+6. Run `python db_tools.py --seed-premiums` once if not already done — seeds CLM/CRF z-score mu/sigma
 7. Add `market_analysis.py` as 6th always-on task if not already done
 
 ### Data Infrastructure

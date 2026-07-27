@@ -7,7 +7,7 @@ schedule table, fires each mode as a non-blocking subprocess, and deduplicates
 via the DB so no mode fires twice in the same calendar day even across restarts.
 
 Keep in PythonAnywhere cron (deliberately standalone — contains personal financial data):
-  09:39 UTC         audit.py          — DB maintenance / vacuum
+  09:39 UTC         db_tools.py       — DB maintenance / vacuum (replaces audit.py)
   06:00 UTC         daily_pulse.py    — SimpleFIN balance snapshot → Pushover only (never Discord)
 
 Everything else is handled here, including:
@@ -70,7 +70,7 @@ SCHEDULE = [
     # CME equity futures trade ~23h/day (Sun 18:00 UTC – Fri 21:00 UTC).
     # Four boards cover Asian close/European open, US pre-market, RTH open, PM.
     ( 7,  0, "cross_asset_asia",   "cross_asset",  [],                            True),  # 21:00 HST (Asian close / EU pre)
-    (12, 45, "cross_asset_premarket","cross_asset", [],                            True),  # 02:45 HST (US pre-market)
+    (12, 35, "cross_asset_premarket","cross_asset", [],                            True),  # 02:35 HST (US pre-market — 15 min before morning brief)
     (14,  0, "cross_asset_am",     "cross_asset",  [],                            True),  # 04:00 HST (cash open)
     (18, 45, "cross_asset_pm",     "cross_asset",  [],                            True),  # 08:45 HST (mid-session)
     # ── Market Analysis & Macro ──────────────────────────────────────────────────
@@ -93,7 +93,7 @@ SCHEDULE = [
     (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
     (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
-    (20, 16, "eod",                "scheduler",    ["--mode", "eod"],             True),
+    (20, 20, "eod",                "scheduler",    ["--mode", "eod"],             True),  # was 20:16 — 6 min gap avoids concurrent TD burst
     (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
     # CEF premium z-score calibration — 22:30 UTC daily, after US cash close.
     # Pulls 252-day premium history from CEFConnect → updates mu/sigma in DB
