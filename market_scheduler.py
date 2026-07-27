@@ -106,6 +106,10 @@ SCHEDULE = [
     # Box position roll check — reads open positions, fires Pushover at 30/14 DTE.
     # Zero API calls (reads DB only). Deduped monthly per position.
     (21, 20, "box_roll_check",     "scheduler",    ["--mode", "box_position", "--action", "status"], True),
+    # MLPI entry signal — XLE ≤ -1.5% or DGS10 +8bps AND MLPI ≤ -0.5% → Pushover + Discord.
+    # Runs intraday during RTH so dip alerts fire while market is open to act.
+    # 0 Twelve Data credits: reads XLE price (1 call) and MLPI price (1 call) — well within budget.
+    (17,  0, "mlpi_entry",       "scheduler",    ["--mode", "mlpi_entry"],      True),
     # IV accumulation — stores daily ATM IV per symbol after close.
     # Accumulating since Jul 11 2026; usable baseline ~30 days; full 52-week IVR after 252 days.
     (21, 30, "store_daily_iv",     "scheduler",    ["--mode", "store_daily_iv"],  True),

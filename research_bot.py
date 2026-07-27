@@ -384,12 +384,11 @@ def build_income_intel(engine, tradier, ticker: str) -> tuple:
         bias_line  = _market_bias_line(db)
 
         # CLM/CRF get fair-value floor context
+        # FV = annual_dist / 0.19 — keeps floor in sync with 2026 distribution reset
         fv_line = ""
-        if ticker == "CLM":
-            fv = 7.51
-            fv_line = f"┣ Fair value floor: `${fv}` (19% yield target){' 🟢 at/below — accumulate' if spot <= fv else ' 🔴 above — wait'}\n"
-        elif ticker == "CRF":
-            fv = 7.28
+        _ANN_DIST = {"CLM": 1.4268, "CRF": 1.3824}
+        if ticker in _ANN_DIST:
+            fv = round(_ANN_DIST[ticker] / 0.19, 2)
             fv_line = f"┣ Fair value floor: `${fv}` (19% yield target){' 🟢 at/below — accumulate' if spot <= fv else ' 🔴 above — wait'}\n"
 
         desc = (

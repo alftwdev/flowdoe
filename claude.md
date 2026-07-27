@@ -358,8 +358,10 @@ When social conviction AND options setup align → BTO LEAP alert.
 
 ### Strategy 4 — SPX Box Spread Borrowing (Structural Low-Rate Loan)
 
-**Status:** Intelligence layer built (Jul 23 2026). E*TRADE options level 3 + SPX combo
-order support required before execution. Call E*TRADE to confirm before Phase D.
+**Status:** Intelligence layer built (Jul 23 2026). Execution DEFERRED until portfolio reaches ~$100k.
+At $43k the benefit (~$239/yr interest savings) is too small relative to the execution complexity
+and combined leverage headroom consumed. Revisit when portfolio ≥ $100k.
+Phase D gates still apply when ready — see bottom of this section.
 
 **The thesis:** A short SPX box spread is a synthetic fixed-rate loan at ~Treasury + 30–50bps
 (~4.75% today vs 7.25% E*TRADE margin). Borrow at ~4.75%, deploy into CLM/CRF at 19% yield
@@ -1136,6 +1138,12 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 - [x] Iron condors purged — removed from scheduler.py, tradier_client.py, market_scheduler.py; strategy is BTO LEAP calls/puts + wheel CSPs/CCs only (✅ Jul 19)
 - [x] CLM/CRF distribution reset cycle signals — NAV determination month gate, CEF institutional exit detector (high vol + flat SPY), distribution yield floor; all wired into monitor.py RO score and pulse embed (✅ Jul 19)
 - [x] TQQQ false signal forensic analysis — Jul 17 2026 signal validated against actual CLM/CRF price history; VIXY gate confirmed working (✅ Jul 19)
+- [x] DB key mismatch fix — `personal_scorecard` was reading `clm_premium_z`/`crf_premium_z` but monitor.py writes `clm_last_z_premium`/`crf_last_z_premium`; corrected in scheduler.py (✅ Jul 26)
+- [x] Accumulation readiness surfaced in morning brief — market_analysis.py now reads `{ticker}_acc_status`/`{ticker}_acc_detail` from DB and injects into CROSS-CHANNEL SIGNALS block (✅ Jul 26)
+- [x] research_bot.py fair-value floors computed dynamically — was hardcoded 7.51/7.28; now `annual_dist / 0.19` so floors auto-track if distribution changes (✅ Jul 26)
+- [x] mlpi_entry scheduling gap fixed — mode existed in scheduler.py but had no SCHEDULE entry in market_scheduler.py; added at 17:00 UTC weekdays (✅ Jul 26)
+- [x] CRF NAV fallback corrected — daily_pulse.py had stale 6.30; fixed to 6.18 matching monitor.py (✅ Jul 26)
+- [x] Bias scorer label fixed — market_analysis.py logged `bias_score/8` but scorer has 9 flags; corrected to /9 (✅ Jul 26)
 
 ### Weekly Audit Cadence (ongoing discipline)
 Capital is deployed and compounding. Each week, check for signals that slipped through:

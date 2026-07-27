@@ -388,7 +388,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
                     predicted_direction=bias["label"],
                     entry_price=spy_price,
                     target_days=1,
-                    notes=f"bias_score={bias['bias_score']}/8",
+                    notes=f"bias_score={bias['bias_score']}/9",
                 )
     except Exception:
         pass
@@ -528,9 +528,19 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception:
         pass
 
+    # Accumulation readiness — written by monitor.py every loop tick
+    acc_lines = []
+    for _tkr in ("CLM", "CRF"):
+        _status = db.get_state(f"{_tkr}_acc_status") or ""
+        _detail = db.get_state(f"{_tkr}_acc_detail") or ""
+        if _status:
+            acc_lines.append(f"{_tkr}: {_status}" + (f" ({_detail})" if _detail else ""))
+    acc_line = "┣ Accumulation: " + " | ".join(acc_lines) + "\n" if acc_lines else ""
+
     signals_section = (
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
+        f"{acc_line}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
         f"{mlpi_entry_line}"

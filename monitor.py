@@ -1810,6 +1810,16 @@ def compute_cornerstone_reports():
     with requests.Session() as session:
         for ticker in PRIORITY_ASSETS:
             text, tier, score = get_ticker_report(session, ticker, spy_cache)
+            # Append accumulation readiness to each ticker's block (daily pulse only —
+            # computed every loop tick in get_ticker_report and stored in DB, but
+            # never surfaced to Discord until now).
+            _acc_status = db.get_state(f"{ticker}_acc_status") or ""
+            _acc_detail = db.get_state(f"{ticker}_acc_detail") or ""
+            if _acc_status:
+                _acc_icon = "✅" if "OPEN" in _acc_status else ("⚠️" if "CAUTION" in _acc_status else "🔴")
+                text = text.rstrip("\n") + f"\n┣ Acc. Gate: {_acc_icon} {_acc_status}\n"
+                if _acc_detail and "OPEN" not in _acc_status:
+                    text = text.rstrip("\n") + f"\n┣   {_acc_detail[:120]}\n"
             reports.append(text)
             if TIER_RANK.get(tier, 0) > TIER_RANK.get(worst_tier, 0):
                 worst_tier = tier
@@ -2111,7 +2121,7 @@ def send_daily_pulse(is_test=False):
                     _carry_data = db.get_state("carry_spread_data") or {}
                     _msg = (
                         f"Carry spread compressed to {carry_spread:+.1f}%\n"
-                        f"Tier 2 yield {_carry_data.get('tier2_yield', 13.0):.1f}% "
+                        f"Tier 2 yield {_carry_data.get('tier2_yield', TIER2_ACTIVE_BLENDED):.1f}% "
                         f"vs margin {_carry_data.get('margin_rate', margin_rate):.2f}%\n"
                         + ("CRITICAL: spread near zero — pause new margin draws" if carry_spread < 2.0
                            else "WARNING: positive carry shrinking — monitor rate")
