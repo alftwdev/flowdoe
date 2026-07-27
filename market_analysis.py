@@ -156,7 +156,7 @@ def _fetch_futures_context(engine: HighFidelityAnalyticsEngine) -> dict:
 
 def _calculate_bias_score(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> dict:
     """
-    8-10 boolean flags, each weighted. Sum → bias_score → label.
+    12+ signal flags, each weighted. Sum → bias_score → label.
     BULLISH: ≥ +20 | NEUTRAL: -19 to +19 | BEARISH: ≤ -20
 
     Returns dict with bias_score, label, flags_detail, and raw signal values.
@@ -327,6 +327,94 @@ def _calculate_bias_score(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception as e:
         logger.warning(f"Bias: ORB read failed: {e}")
 
+    # ── 10. VIX term structure (from tqqq.py DB) ─────────────────────────────
+    try:
+        vix_term_slope = float(db.get_state("vix_term_slope") or 0.0)
+        signals["vix_term_slope"] = vix_term_slope
+        if vix_term_slope >= 3.0:
+            score -= 12
+            details.append(f"VIX term slope {vix_term_slope:+.2f} → backwardation/fear (-12)")
+        elif vix_term_slope >= 1.5:
+            score -= 7
+            details.append(f"VIX term slope {vix_term_slope:+.2f} → vol front-loaded (-7)")
+        elif vix_term_slope <= -2.0:
+            score += 8
+            details.append(f"VIX term slope {vix_term_slope:+.2f} → deep contango/calm (+8)")
+        elif vix_term_slope <= -0.5:
+            score += 4
+            details.append(f"VIX term slope {vix_term_slope:+.2f} → contango (+4)")
+    except Exception as e:
+        logger.warning(f"Bias: VIX term slope read failed: {e}")
+        vix_term_slope = 0.0
+        signals["vix_term_slope"] = 0.0
+
+    # ── 11. SPY 50-day SMA (trend regime) ────────────────────────────────────
+    try:
+        spy_ts = engine._execute_query("time_series", {
+            "symbol": "SPY", "interval": "1day", "outputsize": 60
+        })
+        if spy_ts and spy_ts.get("values") and len(spy_ts["values"]) >= 50:
+            closes = [float(v["close"]) for v in spy_ts["values"][:50]]
+            spy_sma50 = round(sum(closes) / 50, 2)
+            spy_spot = float(spy_ts["values"][0]["close"])
+            signals["spy_sma50"] = spy_sma50
+            signals["spy_spot"]  = spy_spot
+            pct_vs_sma = round((spy_spot / spy_sma50 - 1) * 100, 2)
+            if pct_vs_sma > 2.0:
+                score += 10
+                details.append(f"SPY {pct_vs_sma:+.1f}% above SMA50 → trend intact (+10)")
+            elif pct_vs_sma > 0:
+                score += 5
+                details.append(f"SPY {pct_vs_sma:+.1f}% above SMA50 → mildly bullish (+5)")
+            elif pct_vs_sma < -3.0:
+                score -= 12
+                details.append(f"SPY {pct_vs_sma:+.1f}% below SMA50 → trend broken (-12)")
+            elif pct_vs_sma < 0:
+                score -= 5
+                details.append(f"SPY {pct_vs_sma:+.1f}% below SMA50 → momentum shifted (-5)")
+    except Exception as e:
+        logger.warning(f"Bias: SPY SMA50 failed: {e}")
+
+    # ── 12. Market breadth (from tqqq.py DB — % stocks above SMA200) ─────────
+    try:
+        breadth = db.get_state("tqqq_breadth_cache")
+        if breadth is not None:
+            breadth = float(breadth)
+            signals["breadth"] = breadth
+            if breadth >= 70:
+                score += 8
+                details.append(f"Breadth {breadth:.0f}% above SMA200 → broad participation (+8)")
+            elif breadth <= 35:
+                score -= 10
+                details.append(f"Breadth {breadth:.0f}% above SMA200 → narrow market (-10)")
+            elif breadth <= 50:
+                score -= 4
+                details.append(f"Breadth {breadth:.0f}% above SMA200 → deteriorating (-4)")
+    except Exception as e:
+        logger.warning(f"Bias: breadth read failed: {e}")
+
+    # ── VIX day-over-day acceleration ────────────────────────────────────────
+    try:
+        prev_vix = db.get_state("fred_vix_prev")
+        if prev_vix and real_vix:
+            prev_vix = float(prev_vix)
+            vix_chg_pct = round((real_vix - prev_vix) / prev_vix * 100, 1) if prev_vix > 0 else 0.0
+            signals["vix_chg_pct"] = vix_chg_pct
+            if vix_chg_pct >= 20:
+                score -= 10
+                details.append(f"VIX +{vix_chg_pct:.0f}% DoD → vol acceleration (-10)")
+            elif vix_chg_pct >= 10:
+                score -= 5
+                details.append(f"VIX +{vix_chg_pct:.0f}% DoD → vol rising (-5)")
+            elif vix_chg_pct <= -15:
+                score += 8
+                details.append(f"VIX {vix_chg_pct:.0f}% DoD → vol collapsing, fear fading (+8)")
+        # Update previous VIX for next run
+        if real_vix:
+            db.update_state("fred_vix_prev", real_vix)
+    except Exception as e:
+        logger.warning(f"Bias: VIX DoD failed: {e}")
+
     # ── Label ─────────────────────────────────────────────────────────────────
     if score >= 20:
         label = "BULLISH"
@@ -388,7 +476,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
                     predicted_direction=bias["label"],
                     entry_price=spy_price,
                     target_days=1,
-                    notes=f"bias_score={bias['bias_score']}/9",
+                    notes=f"bias_score={bias['bias_score']}/12+",
                 )
     except Exception:
         pass

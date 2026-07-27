@@ -1456,6 +1456,10 @@ class TQQQTacticalSniper:
         # Persist scores to DB for cross-script reads (market_analysis.py morning brief)
         db.update_state("tqqq_bottom_score", bottom_score)
         db.update_state("tqqq_top_score",    top_score)
+        # Write VIX term slope so market_analysis.py bias scorer can read it without a Twelve Data call
+        _vts = signals.get("vix_term_slope", 0.0)
+        if _vts != 0.0:
+            db.update_state("vix_term_slope", round(_vts, 2))
 
         return {"bottom_score": bottom_score, "top_score": top_score, "signals": signals}
 
