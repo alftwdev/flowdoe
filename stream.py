@@ -177,18 +177,38 @@ def _acquire_pid_lock():
     instance was opening its own WebSocket, creating connection storms at every
     restart. Write our PID; if another PID file exists and that process is alive,
     exit immediately so the existing instance keeps running uninterrupted.
+
+    PA container note: always-on tasks run as PID 1 (the container's init process).
+    os.kill(1, 0) always succeeds because PID 1 is the immortal container init —
+    NOT a sign that a previous stream.py is alive. We verify by checking /proc cmdline.
     """
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE) as f:
                 old_pid = int(f.read().strip())
-            # Check if that process is still alive (signal 0 = existence check)
-            os.kill(old_pid, 0)
+
+            # PID 1 = container init process on PythonAnywhere — never a stream.py instance.
+            # A PID file containing 1 is always stale; take over immediately.
+            if old_pid == 1:
+                raise ProcessLookupError("PID 1 is container init, not stream.py")
+
+            # Signal 0 checks existence but doesn't distinguish which process it is.
+            # Verify via /proc cmdline so a recycled PID (another process took the slot)
+            # doesn't falsely block startup.
+            os.kill(old_pid, 0)   # raises ProcessLookupError if process is gone
+            try:
+                with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
+                    cmdline = cf.read().replace(b"\x00", b" ").decode(errors="replace")
+                if "stream" not in cmdline:
+                    raise ProcessLookupError(f"PID {old_pid} is not stream.py ({cmdline[:60]})")
+            except (FileNotFoundError, IOError):
+                raise ProcessLookupError(f"Cannot read /proc/{old_pid}/cmdline — treating as stale")
+
             logger.warning(f"Another stream.py instance (PID {old_pid}) is already running — exiting.")
             sys.exit(0)
         except (ProcessLookupError, ValueError):
-            # Stale PID file — previous process is gone, safe to take over
-            pass
+            # Stale PID file — previous process is gone (or was PID 1), safe to take over
+            logger.info("Stale PID file found — previous instance is gone. Taking over.")
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
