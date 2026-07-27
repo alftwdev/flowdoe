@@ -1579,11 +1579,85 @@ def main():
                 except Exception as e:
                     logger.warning(f"Crypto cycle top score failed: {e}")
 
+                # ── STAKING YIELD RADAR ──────────────────────────────────────
+                # DeFiLlama free API — native PoS liquid staking only.
+                # Cached daily; zero Twelve Data credits consumed.
+                staking_block = ""
+                staking_rows  = []
+                try:
+                    staking_rows = engine.fetch_staking_yields()
+                    if staking_rows:
+                        _margin_rate = float(os.getenv("MARGIN_RATE", "7.25"))
+
+                        def _stk_bar(apy):
+                            if apy >= _margin_rate:    return "🟢"
+                            elif apy >= _margin_rate * 0.7: return "🟡"
+                            else:                       return "🔴"
+
+                        stk_lines = []
+                        for i, row in enumerate(staking_rows[:6]):
+                            bullet = "┗" if i == len(staking_rows[:6]) - 1 else "┣"
+                            stk_lines.append(
+                                f"{bullet} {_stk_bar(row['apy'])} **{row['asset']} → {row['token']}**"
+                                f" `{row['apy']:.2f}%` APY"
+                                f" | {row['platform']} ({row['note']})"
+                                f" | TVL `${row['tvl_b']:.1f}B`"
+                            )
+
+                        best = staking_rows[0]
+                        vs_margin = round(best['apy'] - _margin_rate, 2)
+                        margin_note = (
+                            f"beats margin rate by `{vs_margin:+.2f}%`" if vs_margin > 0
+                            else f"`{abs(vs_margin):.2f}%` below margin rate — cash-only deployment"
+                        )
+                        staking_block = (
+                            "\n\n**💎 STAKING YIELD RADAR** (live PoS rates via DeFiLlama)\n"
+                            + "\n".join(stk_lines)
+                            + f"\n\n┗ Best rate: `{best['apy']:.2f}%` ({best['platform']}) — {margin_note}\n"
+                            "Staking < margin rate (7.25%) = cash-only. Do not borrow to stake.\n"
+                        )
+                except Exception as _se:
+                    logger.debug(f"Staking yield block failed: {_se}")
+
+                payload += staking_block
                 payload += (
                     "─────────────────────────\n"
-                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · CoinGecko · Twelve Data\n"
+                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · CoinGecko · Twelve Data · DeFiLlama\n"
                     "Not financial advice — for informational/educational use only."
                 )
+
+                # ── Income channel staking snippet → #dividend-ccetfs ─────────
+                # Short "passive yield comparison" block — no CLM/CRF data here.
+                if staking_rows and WEBHOOK_INCOME:
+                    try:
+                        _stk_top5 = staking_rows[:5]
+                        snip_lines = [
+                            f"┣ {r['asset']:4} {r['token']:8} `{r['apy']:.2f}%` APY — {r['platform']} ({r['note']})"
+                            for r in _stk_top5[:-1]
+                        ]
+                        snip_lines.append(
+                            f"┗ {_stk_top5[-1]['asset']:4} {_stk_top5[-1]['token']:8} `{_stk_top5[-1]['apy']:.2f}%` APY"
+                            f" — {_stk_top5[-1]['platform']} ({_stk_top5[-1]['note']})"
+                        )
+                        _best_stk = _stk_top5[0]
+                        snip_payload = (
+                            "**Passive cash alternative — beat 0% idle cash**\n"
+                            + "\n".join(snip_lines)
+                            + f"\n\n┣ vs Margin rate: `{_margin_rate:.2f}%` — staking yields below this = cash-only"
+                            "\n┗ Source: DeFiLlama live PoS rates (cached daily, no API key)"
+                        )
+                        _stk_dedupe = f"staking_snippet_{datetime.now().strftime('%Y-%m-%d')}"
+                        if not engine.db.get_state(_stk_dedupe):
+                            send_essentials_embed(
+                                WEBHOOK_INCOME,
+                                "💎 STAKING YIELD RADAR | Top PoS Rates",
+                                snip_payload,
+                                0x9b59b6,
+                            )
+                            engine.db.update_state(_stk_dedupe, True)
+                            logger.info(f"Staking yield snippet dispatched to income channel: {len(_stk_top5)} rows.")
+                    except Exception as _sie:
+                        logger.warning(f"Staking snippet to income channel failed: {_sie}")
 
                 if WEBHOOK_CRYPTO:
                     _crypto_color = COLOR_GREEN if ct_score < 40 else (COLOR_RED if ct_score >= 70 else COLOR_YELLOW)

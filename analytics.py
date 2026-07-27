@@ -3634,6 +3634,99 @@ class HighFidelityAnalyticsEngine:
                 logger.warning(f"[Binance Derivatives] {binance_sym} failed: {e}")
         return results
 
+    # ── CRYPTO STAKING YIELD RADAR ────────────────────────────────────────────
+    # DeFiLlama yields.llama.fi/pools — free, no API key, no rate limit.
+    # Curated to native PoS liquid staking only (single asset, no LP pairs).
+    # Cached once per day in DB. Zero Twelve Data credits consumed.
+
+    # Curated staking watchlist: {project_slug: (display_name, platform_note)}
+    _STAKING_WATCHLIST = {
+        # ETH liquid staking — major retail-accessible protocols
+        "lido":                         ("stETH",   "Lido",         "ETH", "any wallet"),
+        "rocket-pool":                  ("rETH",    "Rocket Pool",  "ETH", "decentralized"),
+        "coinbase-wrapped-staked-eth":  ("cbETH",   "Coinbase",     "ETH", "US-friendly"),
+        "binance-staked-eth":           ("wbETH",   "Binance",      "ETH", "Binance account"),
+        "ether.fi-stake":               ("weETH",   "ether.fi",     "ETH", "any wallet"),
+        # SOL liquid staking — highest native PoS yields
+        "jito-liquid-staking":          ("jitoSOL", "Jito",         "SOL", "Phantom/Solflare"),
+        "jupiter-staked-sol":           ("jupSOL",  "Jupiter",      "SOL", "Solana wallet"),
+        "marinade-liquid-staking":      ("mSOL",    "Marinade",     "SOL", "any Solana wallet"),
+        "binance-staked-sol":           ("bnSOL",   "Binance",      "SOL", "Binance account"),
+        # TRX staking — high yield, niche (Tron network)
+        "tr-energy":                    ("TRX",     "TR Energy",    "TRX", "TronLink wallet"),
+    }
+
+    def fetch_staking_yields(self) -> list:
+        """
+        Fetches live PoS staking APYs from DeFiLlama yields API.
+        Returns list of dicts sorted by APY descending, max 8 entries.
+        Cached once per calendar day in DB key 'staking_yields_cache'.
+
+        Free endpoint — no API key, no credits, no rate limit.
+        """
+        cache_key      = "staking_yields_cache"
+        cache_date_key = "staking_yields_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        if self.db.get_state(cache_date_key) == today_str:
+            cached = self.db.get_state(cache_key)
+            if cached:
+                try:
+                    return cached if isinstance(cached, list) else []
+                except Exception:
+                    pass
+
+        try:
+            r = requests.get("https://yields.llama.fi/pools", timeout=12)
+            r.raise_for_status()
+            pools = r.json().get("data", [])
+        except Exception as e:
+            logger.warning(f"[StakingYields] DeFiLlama fetch failed: {e}")
+            cached = self.db.get_state(cache_key)
+            return cached if isinstance(cached, list) else []
+
+        results = []
+        seen_projects = set()
+        for p in pools:
+            proj   = p.get("project", "")
+            sym    = p.get("symbol", "").upper()
+            apy    = p.get("apy") or 0.0
+            tvl    = p.get("tvlUsd") or 0.0
+            chain  = p.get("chain", "")
+            stable = p.get("stablecoin", False)
+
+            if proj not in self._STAKING_WATCHLIST:
+                continue
+            if proj in seen_projects:
+                continue
+            if stable or apy <= 0 or tvl < 50_000_000:
+                continue
+            # Exclude LP pairs
+            if "-" in sym or "/" in sym:
+                continue
+
+            meta = self._STAKING_WATCHLIST[proj]
+            results.append({
+                "token":    meta[0],
+                "platform": meta[1],
+                "asset":    meta[2],
+                "note":     meta[3],
+                "apy":      round(float(apy), 2),
+                "tvl_b":    round(tvl / 1e9, 2),
+                "chain":    chain,
+                "project":  proj,
+            })
+            seen_projects.add(proj)
+
+        results.sort(key=lambda x: x["apy"], reverse=True)
+        results = results[:8]
+
+        if results:
+            self.db.update_state(cache_key, results)
+            self.db.update_state(cache_date_key, today_str)
+
+        return results
+
     # ── VIX-ADJUSTED WHEEL PARAMETERS ────────────────────────────────────────
     # Tastytrade empirical: at 16 VIX the market implies ~1% daily move.
     # Higher VIX → sell further OTM to maintain edge; scale down size.
