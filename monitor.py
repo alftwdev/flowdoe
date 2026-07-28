@@ -1039,9 +1039,7 @@ def check_accumulation_readiness(session, ticker: str, vixy_z: float,
                 "ready":       False,
                 "status":      "WAIT — Elevated Premium (>15% to NAV)",
                 "detail":      (
-                    f"Premium: {premium:.1f}% to NAV — buying at this spread compounds downside. "
-                    f"Target entry: premium < 15% (ideally near NAV during ex-div dip or post-RO). "
-                    f"Historical: CLM/CRF at 15%+ premium = elevated RO announcement risk window."
+                    f"Premium: {premium:.1f}% to NAV — target entry below 15% (ex-div dip or post-RO)."
                 ),
                 "down_streak": 0,
             }
