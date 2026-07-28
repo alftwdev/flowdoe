@@ -95,6 +95,11 @@ SCHEDULE = [
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 20, "eod",                "scheduler",    ["--mode", "eod"],             True),  # was 20:16 — 6 min gap avoids concurrent TD burst
     (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
+    # Ex-div reaction check — 20:35 UTC daily (after US close, after macro_pm).
+    # Phase 1 (ex-div day): snapshots closing price to DB.
+    # Phase 2 (T+1): compares drop to distribution → Pushover if OVERSHOOT or UNDERSHOOT.
+    # 0 TD credits on non-ex-div days; max 14 credits on ex-div days. Deduped per symbol/date.
+    (20, 35, "exdiv_check",        "scheduler",    ["--mode", "exdiv_check"],     True),
     # CEF premium z-score calibration — 22:30 UTC daily, after US cash close.
     # Pulls 252-day premium history from CEFConnect → updates mu/sigma in DB
     # so monitor.py's z-score uses empirical data, not hardcoded defaults.

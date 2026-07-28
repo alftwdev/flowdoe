@@ -625,10 +625,38 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             acc_lines.append(f"{_tkr}: {_status}" + (f" ({_detail})" if _detail else ""))
     acc_line = "┣ Accumulation: " + " | ".join(acc_lines) + "\n" if acc_lines else ""
 
+    # Ex-div reaction signals — written by scheduler.py exdiv_check (20:35 UTC)
+    # Only surfaces OVERSHOOT/UNDERSHOOT; EFFICIENT is noise-suppressed.
+    _exdiv_parts = []
+    for _sym in ("MLPI", "MAIN", "JEPI", "JEPQ", "SCHD", "O", "ARCC"):
+        try:
+            _r = db.get_state(f"exdiv_reaction_{_sym}")
+            if not _r or not isinstance(_r, dict):
+                continue
+            _v = _r.get("verdict", "")
+            if _v not in ("OVERSHOOT", "UNDERSHOOT"):
+                continue
+            _ex = _r.get("ex_date", "")
+            # Only surface if the reaction is from the last 2 calendar days
+            from datetime import date as _ma_d, timedelta as _ma_td
+            try:
+                _age = (_ma_d.today() - _ma_d.fromisoformat(_ex)).days
+                if _age > 2:
+                    continue
+            except Exception:
+                continue
+            _emoji = "🟢" if _v == "OVERSHOOT" else "🔴"
+            _eff   = int((_r.get("efficiency", 1.0)) * 100)
+            _exdiv_parts.append(f"{_sym} {_emoji} {_v} ({_eff}% of dist)")
+        except Exception:
+            continue
+    exdiv_line = "┣ Ex-Div: " + " | ".join(_exdiv_parts) + "\n" if _exdiv_parts else ""
+
     signals_section = (
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"{acc_line}"
+        f"{exdiv_line}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
         f"{mlpi_entry_line}"

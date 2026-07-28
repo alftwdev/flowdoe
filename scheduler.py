@@ -611,6 +611,60 @@ def main():
             except Exception as e:
                 logger.error(f"Social-first CC ETF radar failed: {e}")
 
+        # ── EX-DIV REACTION CHECK — post-close daily (20:35 UTC) ─────────────
+        # Checks two things every evening:
+        #   Phase 1: if today is an ex-div date for any watched symbol →
+        #            snapshot closing price into DB as pre_ex_price.
+        #   Phase 2: if yesterday was an ex-div date →
+        #            compare today's price to pre_ex_price, classify reaction
+        #            (OVERSHOOT / UNDERSHOOT / EFFICIENT), fire Pushover.
+        # Zero TD credits on non-ex-div days (all price calls are cached daily).
+        # Max 14 TD credits on ex-div days (7 symbols × 2 calls each).
+        # Output: Pushover personal alert only (financial signal, never Discord).
+        elif args.mode == "exdiv_check":
+            logger.info("Executing Ex-Div Reaction Tracker...")
+            try:
+                signals = engine.track_exdiv_reaction()
+                if not signals:
+                    logger.info("ExDiv check: no ex-div events today — nothing to report.")
+                else:
+                    pushover_token = os.getenv("PUSHOVER_APP_TOKEN", "")
+                    pushover_user  = os.getenv("PUSHOVER_USER_KEY", "")
+                    import requests as _req
+                    for sig in signals:
+                        emoji   = sig["emoji"]
+                        verdict = sig["verdict"]
+                        sym     = sig["symbol"]
+                        eff_pct = round(sig["efficiency"] * 100, 0)
+                        drop    = sig["drop_pct"]
+                        dist    = sig["dist_amt"]
+                        pre     = sig["pre_price"]
+                        now     = sig["now_price"]
+                        conviction = sig["conviction"]
+
+                        if verdict == "EFFICIENT":
+                            logger.info(f"ExDiv {sym}: EFFICIENT — no Pushover needed.")
+                            continue   # no signal worth paging for
+
+                        msg = (
+                            f"{emoji} {sym} EX-DIV REACTION: {verdict}\n"
+                            f"Pre-ex: ${pre:.2f} → Today: ${now:.2f} (−{abs(drop):.2f}%)\n"
+                            f"Distribution: ${dist:.4f} | Efficiency: {eff_pct:.0f}%\n"
+                            f"Signal: {conviction}\n"
+                            f"{sig['note']}"
+                        )
+                        if pushover_token and pushover_user:
+                            _req.post("https://api.pushover.net/1/messages.json", data={
+                                "token":    pushover_token,
+                                "user":     pushover_user,
+                                "title":    f"ExDiv {verdict}: {sym}",
+                                "message":  msg[:512],
+                                "priority": 1 if verdict == "OVERSHOOT" else 0,
+                            }, timeout=10)
+                        logger.info(f"ExDiv Pushover dispatched: {sym} {verdict}")
+            except Exception as e:
+                logger.error(f"exdiv_check mode failed: {e}")
+
         elif args.mode == "wheel_signals":
             # Both modules dispatch to WEBHOOK_INCOME (#dividend-ccetfs), not WEBHOOK_TRADE_SIGNALS
             # — wheeling these Tier 2 holdings (MAIN/MLPI/GPIQ/KQQQ/TDAQ) for long-term income is

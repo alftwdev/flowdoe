@@ -3670,6 +3670,136 @@ class HighFidelityAnalyticsEngine:
         "tr-energy":                    ("TRX",     "TR Energy",    "TRX", "TronLink wallet"),
     }
 
+    # ── EX-DIV REACTION TRACKER ──────────────────────────────────────────────
+    # Watchlist: Tier 2 active holds + income universe (not CLM/CRF — they are
+    # CEFs tracked by monitor.py's premium/NAV engine, not this ex-div path).
+    EXDIV_WATCHLIST = ["MLPI", "MAIN", "JEPI", "JEPQ", "SCHD", "O", "ARCC"]
+
+    def track_exdiv_reaction(self) -> list:
+        """
+        Two-phase daily ex-div post-price reaction tracker. Run after US close.
+
+        Phase 1 — ex-div day: fetch closing price → store as pre_ex_price in DB.
+        Phase 2 — T+1 day:    compare current price to pre_ex_price.
+          • OVERSHOOT  (drop > dist × 1.05): market oversold this ex-div → re-entry window.
+          • UNDERSHOOT (drop < dist × 0.50): distribution priced in pre-ex → no edge.
+          • EFFICIENT  (everything else):     normal pricing, no actionable signal.
+
+        API budget: 2 TD credits per symbol (price + dividends history, both cached daily).
+        Total: 7 symbols × 2 = 14 TD credits max. Ex-div days are rare so most runs
+        hit the cache and cost 0 credits.
+
+        Returns list of signal dicts (empty on non-ex-div days).
+        """
+        from datetime import date as _date, timedelta as _td
+        today     = _date.today()
+        yesterday = today - _td(days=1)
+        signals   = []
+
+        for sym in self.EXDIV_WATCHLIST:
+            try:
+                div_history = self._fetch_dividend_history(sym, span="2Y")
+                if not div_history:
+                    continue
+
+                last_div   = div_history[0]
+                ex_str     = last_div.get("ex_date", "")
+                amount     = float(last_div.get("amount", 0.0))
+                if not ex_str or amount == 0:
+                    continue
+
+                from datetime import datetime as _dt
+                ex_date = _dt.strptime(ex_str, "%Y-%m-%d").date()
+
+                # ── Phase 1: today IS the ex-div date → snapshot pre-ex closing price ──
+                if ex_date == today:
+                    pd_ = self._execute_query("price", {"symbol": sym})
+                    price = float((pd_ or {}).get("price", 0.0))
+                    if price > 0:
+                        self.db.update_state(f"exdiv_pre_price_{sym}", price)
+                        self.db.update_state(f"exdiv_pre_date_{sym}",  today.isoformat())
+                        self.db.update_state(f"exdiv_amount_{sym}",    amount)
+                        logger.info(f"ExDiv snapshot {sym}: pre_ex=${price:.2f} dist=${amount:.4f} ({ex_str})")
+                    continue
+
+                # ── Phase 2: yesterday was ex-div date → measure reaction ──────────────
+                if ex_date != yesterday:
+                    continue
+
+                reaction_key = f"exdiv_reaction_fired_{sym}_{yesterday.isoformat()}"
+                if self.db.get_state(reaction_key):
+                    continue   # already processed today
+
+                pre_price = float(self.db.get_state(f"exdiv_pre_price_{sym}") or 0.0)
+                dist_amt  = float(self.db.get_state(f"exdiv_amount_{sym}")    or amount)
+                if pre_price == 0:
+                    continue
+
+                pd_ = self._execute_query("price", {"symbol": sym})
+                now_price = float((pd_ or {}).get("price", 0.0))
+                if now_price == 0:
+                    continue
+
+                actual_drop = pre_price - now_price
+                drop_pct    = (actual_drop / pre_price) * 100
+                efficiency  = actual_drop / dist_amt if dist_amt > 0 else 1.0
+
+                if efficiency > 1.05:
+                    verdict    = "OVERSHOOT"
+                    conviction = "RE-ENTRY WINDOW"
+                    score      = 2
+                    emoji      = "🟢"
+                    note = (
+                        f"Price dropped ${actual_drop:.3f} vs distribution ${dist_amt:.4f} "
+                        f"({(efficiency-1)*100:.0f}% overshoot) — market oversold this ex-div. "
+                        f"Historical edge: buy the overshoot, target pre-ex price within 3–5 sessions."
+                    )
+                elif efficiency < 0.50:
+                    verdict    = "UNDERSHOOT"
+                    conviction = "PRICED-IN / EXIT WATCH"
+                    score      = -1
+                    emoji      = "🔴"
+                    note = (
+                        f"Price dropped only ${actual_drop:.3f} vs distribution ${dist_amt:.4f} "
+                        f"({efficiency*100:.0f}% of expected drop) — distribution was priced in pre-ex. "
+                        f"No re-entry edge. Monitor for continued weakness; consider trimming if thesis weakens."
+                    )
+                else:
+                    verdict    = "EFFICIENT"
+                    conviction = "NEUTRAL"
+                    score      = 0
+                    emoji      = "⚪"
+                    note = (
+                        f"Drop ${actual_drop:.3f} ≈ distribution ${dist_amt:.4f} "
+                        f"({efficiency*100:.0f}% efficiency) — efficient pricing. No edge."
+                    )
+
+                result = {
+                    "symbol":      sym,
+                    "verdict":     verdict,
+                    "conviction":  conviction,
+                    "emoji":       emoji,
+                    "score":       score,
+                    "ex_date":     yesterday.isoformat(),
+                    "pre_price":   round(pre_price, 4),
+                    "now_price":   round(now_price, 4),
+                    "drop_pct":    round(drop_pct, 3),
+                    "dist_amt":    dist_amt,
+                    "efficiency":  round(efficiency, 3),
+                    "note":        note,
+                }
+
+                # Persist for morning brief cross-channel read
+                self.db.update_state(f"exdiv_reaction_{sym}",   result)
+                self.db.update_state(reaction_key,              verdict)
+                signals.append(result)
+                logger.info(f"ExDiv reaction {sym}: {verdict} (eff={efficiency:.2f} drop={drop_pct:.2f}%)")
+
+            except Exception as e:
+                logger.warning(f"track_exdiv_reaction: {sym} failed: {e}")
+
+        return signals
+
     def fetch_staking_yields(self) -> list:
         """
         Fetches live PoS staking APYs from DeFiLlama yields API.
