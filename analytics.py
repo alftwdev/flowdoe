@@ -1614,6 +1614,53 @@ class HighFidelityAnalyticsEngine:
             return float(np.std(log_returns) * np.sqrt(252) * 100)
         except Exception: return 20.0
 
+    def fetch_symbol_enrichment(self, symbol: str) -> dict:
+        """
+        Single 252-bar fetch: 52-week range position, RSI14, HV21.
+        Used by research_bot /query to enrich the equity intel block.
+        Costs 1 Twelve Data credit per unique (symbol, outputsize) combo;
+        cached by _execute_query so repeated calls within a session are free.
+        Returns {} on failure — callers must handle missing keys gracefully.
+        """
+        try:
+            data = self._execute_query("time_series", {
+                "symbol": symbol, "interval": "1day", "outputsize": "252"
+            })
+            if not data or "values" not in data or len(data["values"]) < 20:
+                return {}
+            vals    = data["values"]           # Twelve Data returns newest-first
+            closes  = np.array([float(v["close"]) for v in vals])
+            highs   = np.array([float(v["high"])  for v in vals])
+            lows    = np.array([float(v["low"])   for v in vals])
+
+            high_52   = float(highs.max())
+            low_52    = float(lows.min())
+            spot      = closes[0]
+            range_pct = ((spot - low_52) / (high_52 - low_52) * 100) if high_52 > low_52 else 50.0
+
+            # RSI14 — oldest-first slice of last 15 closes
+            c14 = closes[:15][::-1]
+            gains  = np.maximum(np.diff(c14), 0)
+            losses = np.abs(np.minimum(np.diff(c14), 0))
+            avg_g  = gains.mean()
+            avg_l  = losses.mean()
+            rsi14  = 100.0 if avg_l == 0 else round(100 - 100 / (1 + avg_g / avg_l), 1)
+
+            # HV21 (annualised)
+            log_r = np.log(closes[1:22] / closes[0:21])
+            hv21  = round(float(np.std(log_r) * np.sqrt(252) * 100), 1)
+
+            return {
+                "low_52":    round(low_52, 2),
+                "high_52":   round(high_52, 2),
+                "range_pct": round(range_pct, 1),
+                "rsi14":     float(rsi14),
+                "hv21":      hv21,
+            }
+        except Exception as e:
+            logger.warning(f"fetch_symbol_enrichment {symbol}: {e}")
+            return {}
+
     def calculate_vrp(self, symbol="SPY"):
         """
         Volatility Risk Premium = ATM IV - HV30. Implied vol systematically overstates realized vol
