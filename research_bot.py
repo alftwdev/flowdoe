@@ -18,13 +18,17 @@ Data sources wired in:
 
 import os
 import math
+import json
+import base64
 import asyncio
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+import requests as _requests
 import discord
 from discord import app_commands
+import anthropic
 
 from analytics import HighFidelityAnalyticsEngine
 from tradier_client import TradierClient
@@ -58,9 +62,10 @@ _SEASONAL_CALL_SCALAR = {
 class QueryBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
-        self.tree    = app_commands.CommandTree(self)
-        self.engine  = HighFidelityAnalyticsEngine()
-        self.tradier = TradierClient()
+        self.tree     = app_commands.CommandTree(self)
+        self.engine   = HighFidelityAnalyticsEngine()
+        self.tradier  = TradierClient()
+        self.claude   = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -849,7 +854,237 @@ def route_query(engine, tradier, ticker: str) -> tuple:
     return build_equity_intel(engine, tradier, ticker)
 
 
+# ── Chart vision helpers ───────────────────────────────────────────────────────
+
+_VISION_PROMPT = """
+You are a professional technical analyst. Analyze this trading chart and return ONLY a valid JSON
+object — no markdown, no code fences, no extra text. Use these exact keys:
+
+{
+  "pattern":        "brief pattern name (e.g. Bull flag, Double bottom, H&S, Range breakout)",
+  "timeframe_guess":"timeframe if visible on chart (e.g. 1H, 4H, Daily) or 'Unknown'",
+  "bias":           "BULLISH" or "BEARISH" or "NEUTRAL",
+  "entry":          <float — realistic entry price readable from chart>,
+  "stop":           <float — stop loss price where the setup is invalidated>,
+  "tp1":            <float — first profit target>,
+  "tp2":            <float — second, more extended profit target>,
+  "rr1":            <float — R:R ratio to TP1, e.g. 1.5>,
+  "rr2":            <float — R:R ratio to TP2, e.g. 2.8>,
+  "quality":        "A" (3+ confluences, clean structure) or "B" (moderate) or "C" (speculative),
+  "key_level":      "brief: what is the entry based on? e.g. 'breakout above descending trendline'",
+  "conversation":   "2-3 sentence plain-language read of the setup — what you see, why this entry, what invalidates it"
+}
+
+Rules:
+  - entry, stop, tp1, tp2 must be prices derivable from what is visible on the chart.
+  - rr1 = abs(tp1 - entry) / abs(entry - stop), rr2 = abs(tp2 - entry) / abs(entry - stop).
+  - If prices are unclear or the chart is low-resolution, estimate conservatively.
+  - quality A = clean structure + 3+ confluences. B = 1-2 confluences. C = single signal.
+  - Return ONLY the JSON. Nothing else.
+""".strip()
+
+
+def _fetch_image_b64(url: str) -> tuple:
+    """Download image from Discord CDN and return (base64_str, media_type)."""
+    try:
+        r = _requests.get(url, timeout=10)
+        r.raise_for_status()
+        ct = r.headers.get("content-type", "image/png").split(";")[0].strip()
+        if ct not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            ct = "image/png"
+        return base64.standard_b64encode(r.content).decode("utf-8"), ct
+    except Exception as e:
+        logger.warning(f"Image download failed: {e}")
+        return None, None
+
+
+def _call_vision(claude_client: anthropic.Anthropic, img_b64: str, media_type: str) -> dict:
+    """Send chart image to Claude vision and parse the structured JSON response."""
+    msg = claude_client.messages.create(
+        model="claude-haiku-4-5-20251001",   # fast + cheap for vision parse
+        max_tokens=512,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type":  "image",
+                    "source": {
+                        "type":       "base64",
+                        "media_type": media_type,
+                        "data":       img_b64,
+                    },
+                },
+                {"type": "text", "text": _VISION_PROMPT},
+            ],
+        }],
+    )
+    raw = msg.content[0].text.strip()
+    # Strip accidental markdown fences if model adds them
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw)
+
+
+def _format_analyze_response(setup: dict, ticker: str | None, engine, tradier) -> tuple:
+    """
+    Format vision setup into Discord embed description.
+    If ticker provided, cross-reference live options data for wheel overlay.
+    """
+    bias     = setup.get("bias", "NEUTRAL")
+    pattern  = setup.get("pattern", "—")
+    tf       = setup.get("timeframe_guess", "—")
+    entry    = setup.get("entry", 0.0)
+    stop     = setup.get("stop", 0.0)
+    tp1      = setup.get("tp1", 0.0)
+    tp2      = setup.get("tp2", 0.0)
+    rr1      = setup.get("rr1", 0.0)
+    rr2      = setup.get("rr2", 0.0)
+    quality  = setup.get("quality", "B")
+    key_lvl  = setup.get("key_level", "—")
+    convo    = setup.get("conversation", "—")
+
+    bias_icon = "🟢" if bias == "BULLISH" else ("🔴" if bias == "BEARISH" else "🟡")
+    q_icon    = "🔵" if quality == "A" else ("🟡" if quality == "B" else "🟠")
+
+    risk_per_share = round(abs(entry - stop), 2) if entry and stop else 0
+
+    desc = (
+        f"**Pattern:** {pattern}  ·  **Timeframe:** {tf}\n"
+        f"**Bias:** {bias_icon} {bias}  ·  **Setup Quality:** {q_icon} Grade {quality}\n"
+        f"**Key Level:** {key_lvl}\n\n"
+        f"**Trade Setup**\n"
+        f"┣ Entry:  `${entry:,.2f}`\n"
+        f"┣ Stop:   `${stop:,.2f}`  (risk `${risk_per_share}` / share)\n"
+        f"┣ TP1:    `${tp1:,.2f}`  ({rr1:.1f}:1 R:R)\n"
+        f"┗ TP2:    `${tp2:,.2f}`  ({rr2:.1f}:1 R:R)\n\n"
+    )
+
+    # Wheel overlay — only if ticker provided and entry > 0
+    if ticker and entry > 0:
+        try:
+            db       = engine.db
+            iv_pct, ivr, _, strike, iv_reliable = _iv_and_strike(tradier, db, ticker, entry)
+            if iv_pct:
+                iv_dec   = iv_pct / 100
+                est_prem = round(strike * iv_dec * math.sqrt(_T) / (2 * math.pi) ** 0.5 * 100)
+                bep      = round(strike - est_prem / 100, 2)
+
+                # Key overlay: does chart stop sit above the CSP break-even?
+                # If BEP < chart stop → CSP is protected even if chart setup fails
+                if bep < stop:
+                    bep_note = f"✅ BEP `${bep}` < chart stop `${stop}` — CSP protected even if setup fails"
+                else:
+                    bep_note = f"⚠️ BEP `${bep}` > chart stop `${stop}` — chart stop does not protect CSP"
+
+                em = round(entry * iv_dec * math.sqrt(_T), 2)
+
+                desc += (
+                    f"**Wheel Overlay ({ticker})**\n"
+                    f"┣ IVR: `{ivr:.0f}%`  ·  ATM IV: `{iv_pct:.1f}%`\n"
+                    f"┣ CSP: STO `${strike}` put · 37 DTE · est `${est_prem}` credit · BEP `${bep}`\n"
+                    f"┣ Expected Move (37 DTE): ±`${em}`\n"
+                    f"┗ {bep_note}\n\n"
+                )
+        except Exception:
+            pass
+
+    # Ecosystem bias alignment check
+    try:
+        db        = engine.db
+        mkt_bias  = _db_int(db, "market_analysis_bias")
+        bottom    = _db_int(db, "tqqq_bottom_score")
+        top       = _db_int(db, "tqqq_top_score")
+        vix       = _db_float(db, "fred_vix")
+
+        aligned = []
+        conflict = []
+
+        if bias == "BULLISH":
+            if mkt_bias >= 2:   aligned.append("market BULLISH")
+            elif mkt_bias <= -2: conflict.append("market BEARISH")
+            if bottom >= 55:    aligned.append("LEAP CALL desk active")
+            if top >= 55:       conflict.append("LEAP PUT desk active")
+            if vix and vix >= 25: conflict.append(f"VIX elevated `{vix:.0f}`")
+        elif bias == "BEARISH":
+            if mkt_bias <= -2:   aligned.append("market BEARISH")
+            elif mkt_bias >= 2:  conflict.append("market BULLISH")
+            if top >= 55:        aligned.append("LEAP PUT desk active")
+            if bottom >= 55:     conflict.append("LEAP CALL desk active")
+            if vix and vix < 16: conflict.append(f"VIX calm `{vix:.0f}` — no fear")
+
+        if aligned or conflict:
+            a_str = " · ".join(aligned) if aligned else "none"
+            c_str = " · ".join(conflict) if conflict else "none"
+            align_icon = "🟢" if aligned and not conflict else ("🔴" if conflict and not aligned else "🟡")
+            desc += (
+                f"**Ecosystem Alignment**\n"
+                f"┣ {align_icon} Aligned: {a_str}\n"
+                f"┗ ⚠️ Conflicting: {c_str}\n\n"
+            )
+    except Exception:
+        pass
+
+    desc += f"**Analysis**\n{convo}"
+
+    color = 0x2ecc71 if bias == "BULLISH" else (0xe74c3c if bias == "BEARISH" else 0xf1c40f)
+    return desc, color
+
+
 # ── Slash commands ─────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="analyze", description="Upload any chart screenshot — get AI trade setup + live wheel overlay.")
+@app_commands.describe(
+    chart="Chart screenshot (PNG/JPG from TradingView or any platform)",
+    ticker="Optional: ticker for live wheel/options overlay (e.g. HIMS, PLTR)"
+)
+async def analyze_chart(interaction: discord.Interaction,
+                        chart: discord.Attachment,
+                        ticker: str = None):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    ticker_up = ticker.upper().strip() if ticker else None
+    logger.info(f"/analyze {ticker_up or 'no ticker'} by {interaction.user} — {chart.filename}")
+
+    if not chart.content_type or not chart.content_type.startswith("image/"):
+        await interaction.followup.send(
+            "Please attach a chart image (PNG or JPG).", ephemeral=True
+        )
+        return
+
+    try:
+        # 1. Download image
+        img_b64, media_type = await asyncio.to_thread(_fetch_image_b64, chart.url)
+        if not img_b64:
+            await interaction.followup.send(
+                "Could not download the image. Try again or paste the chart URL.", ephemeral=True
+            )
+            return
+
+        # 2. Vision analysis
+        setup = await asyncio.to_thread(_call_vision, bot.claude, img_b64, media_type)
+
+        # 3. Format with optional live overlay
+        desc, color = await asyncio.to_thread(
+            _format_analyze_response, setup, ticker_up, bot.engine, bot.tradier
+        )
+
+        title = f"📸 CHART ANALYSIS{f' — {ticker_up}' if ticker_up else ''}"
+        embed = discord.Embed(title=title, description=desc, color=color)
+        embed.set_thumbnail(url=chart.url)
+        embed.set_footer(text="Claude Vision · Tradier IV overlay · Ecosystem confluence  |  Research only.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except json.JSONDecodeError:
+        await interaction.followup.send(
+            "Vision model returned an unexpected format — try a clearer chart screenshot.", ephemeral=True
+        )
+    except Exception as e:
+        logger.error(f"/analyze critical failure: {e}")
+        await interaction.followup.send(
+            "Analysis failed — try again in a moment.", ephemeral=True
+        )
+
 
 @bot.tree.command(name="query", description="On-demand intel: spot, IV, wheel setup, sentiment, macro, LEAP context.")
 @app_commands.describe(ticker="Ticker symbol (e.g. HIMS, PLTR, COIN, BTC, SCHD, CLM, TQQQ)")

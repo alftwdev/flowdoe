@@ -308,6 +308,95 @@ class HighFidelityAnalyticsEngine:
             logger.warning(f"TD fundamentals fetch failed for {symbol}: {e}")
             return None
 
+    def sweep_and_grade_signal_ledger(self) -> dict:
+        """
+        Grades all PENDING signal_ledger entries whose target_date <= today.
+        Fetches current price for each ticker and scores WIN/LOSS:
+          - market_direction: BULLISH = price must be ABOVE entry; BEARISH = below.
+          - tqqq_call / clm_floor: BULLISH = current price >= entry (or +5% threshold for calls).
+          - tqqq_put: BEARISH = current price <= entry.
+          - wheel_csp: WIN if current price >= strike (stayed OTM).
+        Returns dict with counts per signal_type.
+        """
+        from datetime import date as _date
+        pending = self.db.get_pending_predictions()
+        if not pending:
+            return {}
+
+        tickers = list({p["ticker"] for p in pending if p["ticker"]})
+        prices  = {}
+        try:
+            quotes = self._fetch_twelve_data_quotes(tickers)
+            for sym, q in quotes.items():
+                prices[sym] = float(q.get("close", 0) or 0)
+        except Exception:
+            pass
+
+        counts: dict = {}
+        for p in pending:
+            ticker    = p["ticker"]
+            direction = (p["predicted_direction"] or "").upper()
+            entry     = float(p["entry_price"] or 0)
+            sig_type  = p["signal_type"]
+            current   = prices.get(ticker, 0)
+
+            if current == 0 or entry == 0:
+                continue
+
+            # Direction grading
+            if direction in ("BULLISH", "UP"):
+                correct = current > entry
+            elif direction in ("BEARISH", "DOWN"):
+                correct = current < entry
+            else:
+                # NEUTRAL: within ±1% of entry = WIN
+                correct = abs(current - entry) / entry <= 0.01
+
+            # tqqq_call: require +5% move to call it a WIN (strict threshold)
+            if sig_type == "tqqq_call" and direction == "BULLISH":
+                correct = current >= entry * 1.05
+
+            outcome = "WIN" if correct else "LOSS"
+            score   = 1.0 if correct else 0.0
+
+            self.db.grade_prediction(
+                p["id"], current, outcome, score,
+                notes=f"entry={entry:.2f} current={current:.2f}"
+            )
+            counts[sig_type] = counts.get(sig_type, {"wins": 0, "total": 0})
+            counts[sig_type]["total"] += 1
+            if correct:
+                counts[sig_type]["wins"] += 1
+
+        return counts
+
+    def get_signal_ledger_winrates(self, days_back: int = 30) -> dict:
+        """
+        Returns per-signal-type win rates from signal_ledger for the scorecard.
+        Returns dict: {signal_type: {wins, total, win_rate, label}}
+        """
+        rows   = self.db.get_scorecard_window(days_back)
+        result = {}
+        _labels = {
+            "tqqq_call":         "TQQQ LEAP CALL",
+            "tqqq_put":          "TQQQ LEAP PUT",
+            "market_direction":  "Market Direction (SPY)",
+            "clm_floor":         "CLM/CRF Floor Buy",
+            "crf_floor":         "CLM/CRF Floor Buy",
+            "wheel_csp":         "Wheel CSP",
+            "btc_sentiment":     "BTC Sentiment",
+        }
+        for row in rows:
+            st = row["signal_type"]
+            if st not in result:
+                result[st] = {"wins": 0, "total": 0, "label": _labels.get(st, st)}
+            result[st]["total"] += 1
+            if row["outcome"] == "WIN":
+                result[st]["wins"] += 1
+        for st, d in result.items():
+            d["win_rate"] = round(d["wins"] / d["total"] * 100, 1) if d["total"] else 0.0
+        return result
+
     def calculate_accuracy_rating(self, predicted_move, actual_close):
         try:
             predicted_move = float(predicted_move)
@@ -2631,25 +2720,31 @@ class HighFidelityAnalyticsEngine:
             f"┣ SPY Daily Target Accuracy: `{spy_trend['avg_7d']}%` (7D) | `{spy_trend['avg_30d']}%` (30D) — `{spy_trend['sample_size']}` sessions logged\n"
         )
 
-        # ── SECTOR WIN RATES ─────────────────────────────────────────────
+        # ── SIGNAL LEDGER WIN RATES (from signal_ledger table) ──────────
         sector_lines = []
-        sectors = [
-            ("tqqq",        "TQQQ Sniper"),
-            ("cornerstone", "Cornerstone RO Risk"),
-            ("forex",       "Macro Risk Regime"),
-        ]
-        for sector, display in sectors:
+        ledger_rates = self.get_signal_ledger_winrates(days_back=30)
+
+        # Fixed sector-based signals (cornerstone / forex)
+        for sector, display in [("cornerstone", "Cornerstone RO Risk"), ("forex", "Macro Risk Regime")]:
             wr = self.get_ledger_winrate(sector)
             if wr and wr.get("total", 0) > 0:
-                sector_lines.append(
-                    f"┣ {display}: `{wr['win_rate']}%` ({wr['wins']}/{wr['total']} graded)"
-                )
+                sector_lines.append(f"┣ {display}: `{wr['win_rate']}%` ({wr['wins']}/{wr['total']} graded)")
+            elif sector == "cornerstone":
+                sector_lines.append(f"┣ {display}: No alerts fired — all clear ✅")
             else:
-                # Cornerstone 0/0 is not a gap — it means no RO risk fired, which is a win for holders
-                if sector == "cornerstone":
-                    sector_lines.append(f"┣ {display}: No alerts fired — all clear ✅")
-                else:
-                    sector_lines.append(f"┣ {display}: No graded calls yet — building track record")
+                sector_lines.append(f"┣ {display}: Building track record")
+
+        # Signal-ledger signals
+        _order = ["market_direction", "tqqq_call", "tqqq_put", "clm_floor", "wheel_csp", "btc_sentiment"]
+        for st in _order:
+            d = ledger_rates.get(st)
+            if d and d["total"] > 0:
+                bar = "🟢" if d["win_rate"] >= 65 else ("🟡" if d["win_rate"] >= 45 else "🔴")
+                sector_lines.append(
+                    f"┣ {d['label']}: {bar} `{d['win_rate']}%` ({d['wins']}/{d['total']} graded · 30d)"
+                )
+        if not any(ledger_rates.get(st, {}).get("total", 0) > 0 for st in _order):
+            sector_lines.append("┣ Signal ledger: accumulating — graded calls appear here weekly")
 
         # ── WHEEL OUTCOME DISTRIBUTION (90-day closed positions) ─────────
         income_block = ""

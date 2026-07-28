@@ -357,6 +357,16 @@ def main():
             except Exception as e:
                 logger.error(f"Cornerstone ledger sweep failed: {e}")
 
+            # Grade signal_ledger entries (tqqq_call, tqqq_put, market_direction,
+            # clm_floor, wheel_csp) whose target_date has passed.
+            try:
+                counts = engine.sweep_and_grade_signal_ledger()
+                if counts:
+                    summary = ", ".join(f"{st}:{d['wins']}/{d['total']}" for st, d in counts.items())
+                    logger.info(f"Signal ledger graded: {summary}")
+            except Exception as e:
+                logger.error(f"Signal ledger sweep failed: {e}")
+
             # ── MARKET ANALYSIS: Single Unified EOD Recap + reverse-feed conviction sync ──
             # Folds SPY/QQQ tape audits and the VIX CVR reversal signal directly into the one
             # recap below — four separate end-of-day embeds collapsed into one report.
