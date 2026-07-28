@@ -2166,41 +2166,7 @@ def check_and_escalate_if_critical():
 # MAIN MONITOR LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_ws_callback():
-    """
-    Returns a WebSocket callback that fires an immediate escalation check when CLM,
-    CRF, or VIXY price moves. The check runs in a thread so the WS receive loop is
-    never blocked by the REST calls inside compute_cornerstone_reports().
-
-    Debounce: at most one WS-triggered escalation per 60 seconds to prevent
-    callback storms during volatile intraday sessions.
-    """
-    _last_ws_check = [0.0]  # mutable container for closure state
-
-    def _ws_price_callback(symbol: str, price: float, event: dict):
-        if symbol not in ("CLM", "CRF", "VIXY"):
-            return
-        now = time.monotonic()
-        if now - _last_ws_check[0] < 300.0:
-            return
-        _last_ws_check[0] = now
-        logger.info(f"[WS] {symbol} price update ${price:.4f} — triggering immediate escalation check")
-        t = threading.Thread(target=_ws_escalation_check, daemon=True)
-        t.start()
-
-    return _ws_price_callback
-
-
-def _ws_escalation_check():
-    """Runs check_and_escalate_if_critical() from the WebSocket callback thread."""
-    try:
-        check_and_escalate_if_critical()
-    except Exception as e:
-        logger.error(f"[WS Escalation] Error: {e}")
-
-
 def run_monitor():
-    import threading
     tz_h = pytz.timezone('Pacific/Honolulu')
 
     # CLI test/force mode — fires once and exits

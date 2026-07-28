@@ -325,6 +325,14 @@ class TradierClient:
             else:
                 pc_tag = "🟡 BALANCED"
 
+            # Sanity check: flip_strike outside ±30% of spot = chain data anomaly
+            if not (spot * 0.70 <= flip_strike <= spot * 1.30):
+                logger.warning(
+                    f"[GEX] flip_strike ${flip_strike:.0f} outside ±30% of spot "
+                    f"${spot:.2f} — Tradier chain anomaly, suppressing GEX embed"
+                )
+                return _gex_empty(symbol)
+
             return {
                 "flip_strike": flip_strike,
                 "current_spot": spot,
