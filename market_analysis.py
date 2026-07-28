@@ -652,11 +652,37 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             continue
     exdiv_line = "┣ Ex-Div: " + " | ".join(_exdiv_parts) + "\n" if _exdiv_parts else ""
 
+    # Q1 tax character note (Jan–Mar only) — shows after-tax yield if 1099-DIV data is seeded.
+    # Source: db_tools.py --seed-tax-character (run once after 1099-DIV arrives each January).
+    _tax_note = ""
+    if now_utc.month in (1, 2, 3):
+        _marginal = float(os.getenv("MARGINAL_TAX_RATE", "22")) / 100
+        _tax_parts = []
+        for _ts, _ad in (("clm", 1.4268), ("crf", 1.3824)):
+            _tc = db.get_state(f"{_ts}_dist_tax_char") or {}
+            if not isinstance(_tc, dict) or "roc_pct" not in _tc:
+                continue
+            _nav_k = f"{_ts}_last_nav"
+            _nav   = float(db.get_state(_nav_k) or (6.45 if _ts == "clm" else 6.18))
+            _hl_y  = _ad / _nav * 100
+            _at_y  = _hl_y * (
+                (_tc["roc_pct"] / 100) * 1.0
+                + (_tc["qdi_pct"] / 100) * 0.85
+                + (_tc["ord_pct"] / 100) * (1 - _marginal)
+            )
+            _tax_parts.append(
+                f"{_ts.upper()} ROC {_tc['roc_pct']:.0f}% → est. after-tax yield {_at_y:.1f}%"
+                f" (headline {_hl_y:.1f}%)"
+            )
+        if _tax_parts:
+            _tax_note = "┣ Tax char (" + str(now_utc.year - 1) + " 1099): " + " | ".join(_tax_parts) + "\n"
+
     signals_section = (
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"{acc_line}"
         f"{exdiv_line}"
+        f"{_tax_note}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
         f"{mlpi_entry_line}"

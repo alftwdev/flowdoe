@@ -1949,11 +1949,40 @@ def main():
                 try: hy_str = f"{float(hy):.2f}%"
                 except Exception: hy_str = str(hy)
 
+                # CLM/CRF 1099-DIV tax character (seeded once/year via db_tools --seed-tax-character)
+                _marginal = float(os.getenv("MARGINAL_TAX_RATE", "22")) / 100
+                _tax_lines = []
+                for _tc_sym, _ann_dist in (("CLM", 1.4268), ("CRF", 1.3824)):
+                    _tc = engine.db.get_state(f"{_tc_sym.lower()}_dist_tax_char") or {}
+                    if not isinstance(_tc, dict) or "roc_pct" not in _tc:
+                        continue
+                    _roc = _tc["roc_pct"] / 100
+                    _qdi = _tc["qdi_pct"] / 100
+                    _ord = _tc["ord_pct"] / 100
+                    _yr  = _tc.get("year", "?")
+                    # After-tax effective yield: ROC deferred, QDI at 15%, ord at marginal rate
+                    # Uses fallback NAV to compute headline yield denominator
+                    _nav = float(engine.db.get_state(f"{_tc_sym.lower()}_last_nav") or
+                                 (6.45 if _tc_sym == "CLM" else 6.18))
+                    _headline_yield = _ann_dist / _nav * 100
+                    _after_tax_yield = _headline_yield * (
+                        _roc * 1.0        # ROC: not taxed now (deferred)
+                        + _qdi * (1 - 0.15)   # QDI: 15% LTCG rate (assumed)
+                        + _ord * (1 - _marginal)  # Ordinary: at marginal rate
+                    )
+                    _tax_lines.append(
+                        f"  {_tc_sym} ({_yr} 1099): ROC {_tc['roc_pct']:.0f}% | "
+                        f"QDI {_tc['qdi_pct']:.0f}% | Ord {_tc['ord_pct']:.0f}% | "
+                        f"After-tax yield ~{_after_tax_yield:.1f}% (headline {_headline_yield:.1f}%)"
+                    )
+                _tax_char_block = ("\n" + "\n".join(_tax_lines)) if _tax_lines else ""
+
                 strat1 = (
                     f"STRATEGY 1 — CLM/CRF SNOWBALL\n"
                     f"  {carry_line}\n"
                     f"  CLM z-score: {clm_z} | CRF z-score: {crf_z}\n"
                     f"  HY spread: {hy_str}"
+                    f"{_tax_char_block}"
                 )
 
                 # ── Strategy 2: Wheel Performance ─────────────────────────────

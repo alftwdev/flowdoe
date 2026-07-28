@@ -10,6 +10,12 @@ Usage:
     python db_tools.py --rescue         # emergency DB recovery (same as db_rescue.py)
     python db_tools.py --rescue /path/to/other.db
     python db_tools.py --seed-premiums  # one-time CEF z-score initialization
+    python db_tools.py --seed-tax-character CLM --roc 58 --qdi 42 --ord 0 --year 2025
+    python db_tools.py --seed-tax-character CRF --roc 61 --qdi 39 --ord 0 --year 2025
+
+    Values come from Box 1a (ordinary), 1b (qualified), 2a (cap gains), 3 (ROC)
+    on the annual 1099-DIV. Run once each January after the form arrives.
+    Displayed in Sunday personal_scorecard Pushover and Q1 morning brief.
 
 PythonAnywhere cron (daily maintenance — keep this entry, remove audit.py entry):
     09:39 UTC    python db_tools.py
@@ -247,14 +253,64 @@ def seed_cef_premiums():
     logger.info("Seed complete. monitor.py and cef_calibrate will maintain these values going forward.")
 
 
+# ── CEF distribution tax character (annual — run once after 1099-DIV arrives) ─
+
+def seed_tax_character(ticker: str, roc_pct: float, qdi_pct: float,
+                       ord_pct: float, year: int):
+    """
+    Store CLM/CRF 1099-DIV tax character in DB.
+
+    Source: IRS 1099-DIV received in January for the prior tax year.
+      Box 1a (total ordinary dividends) → split into Box 1b (qualified) + remainder (ordinary)
+      Box 2a (total capital gain distributions) — rare for CLM/CRF, include in ord_pct if present
+      Box 3 (non-dividend distributions / return of capital) → roc_pct
+
+    roc_pct + qdi_pct + ord_pct must sum to 100.
+
+    After running this, personal_scorecard (Sunday Pushover) and the Q1 morning
+    brief will show the after-tax effective yield alongside the headline yield.
+    """
+    from database import EcosystemDatabase
+    total = roc_pct + qdi_pct + ord_pct
+    if abs(total - 100.0) > 0.5:
+        logger.error(f"Percentages must sum to 100 (got {total:.1f}). Aborting.")
+        return False
+
+    ticker = ticker.upper()
+    if ticker not in ("CLM", "CRF"):
+        logger.error("ticker must be CLM or CRF")
+        return False
+
+    db   = EcosystemDatabase()
+    data = {
+        "ticker":   ticker,
+        "year":     year,
+        "roc_pct":  round(roc_pct, 1),
+        "qdi_pct":  round(qdi_pct, 1),
+        "ord_pct":  round(ord_pct, 1),
+        "recorded": datetime.now().isoformat(),
+    }
+    db.update_state(f"{ticker.lower()}_dist_tax_char", data)
+    logger.info(f"Stored {ticker} {year} tax character: ROC={roc_pct:.1f}% | QDI={qdi_pct:.1f}% | Ord={ord_pct:.1f}%")
+    logger.info(f"  Will appear in Sunday personal_scorecard and Q1 morning briefs.")
+    return True
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ecosystem DB maintenance utility")
-    parser.add_argument("--rescue",         nargs="?", const="rockefeller_state.db",
-                        metavar="PATH",     help="Emergency DB recovery (default: rockefeller_state.db)")
-    parser.add_argument("--seed-premiums",  action="store_true",
+    parser.add_argument("--rescue",            nargs="?", const="rockefeller_state.db",
+                        metavar="PATH",        help="Emergency DB recovery")
+    parser.add_argument("--seed-premiums",     action="store_true",
                         help="One-time CLM/CRF z-score initialization")
+    parser.add_argument("--seed-tax-character", metavar="TICKER",
+                        help="Store 1099-DIV tax character for CLM or CRF (requires --roc/--qdi/--ord/--year)")
+    parser.add_argument("--roc",  type=float, default=0.0, help="Return of capital %%")
+    parser.add_argument("--qdi",  type=float, default=0.0, help="Qualified dividend income %%")
+    parser.add_argument("--ord",  type=float, default=0.0, help="Ordinary dividend %%")
+    parser.add_argument("--year", type=int,   default=datetime.now().year - 1,
+                        help="Tax year of the 1099-DIV (default: prior year)")
     args = parser.parse_args()
 
     if args.rescue:
@@ -262,6 +318,10 @@ if __name__ == "__main__":
     elif args.seed_premiums:
         seed_cef_premiums()
         success = True
+    elif args.seed_tax_character:
+        success = seed_tax_character(
+            args.seed_tax_character, args.roc, args.qdi, args.ord, args.year
+        )
     else:
         success = run_daily_maintenance()
 
