@@ -139,7 +139,9 @@ Never fetch the same SentiSense endpoint twice in a session.
 Scripts communicate through the DB, never by importing each other.
 
 ```
-stream.py   → DB: vixy_last_price, vixy_z_score (WebSocket, real-time)
+stream.py   → DB: vixy_price_realtime (WebSocket, real-time raw price only)
+                   note: VIXY z-score is NOT written by stream.py — monitor.py
+                   computes it independently via 20-bar Twelve Data REST fetch.
 monitor.py  → DB: clm_premium_z, crf_premium_z, clm_last_price, crf_last_price,
                    clm_last_nav, crf_last_nav, hy_spread_cached, carry_spread_data,
                    clm_floor_{date} signal_ledger entries
