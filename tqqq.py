@@ -595,7 +595,7 @@ class TQQQTacticalSniper:
             # overbought (z ≥ 3.0) to override this gate.
             if contract == "PUT" and vix_z < 0.5:
                 try:
-                    _bias = int(db.get_state("market_analysis_bias") or 0)
+                    _bias = int((db.get_state("market_analysis_bias") or {}).get("score", 0))
                 except (TypeError, ValueError):
                     _bias = 0
                 if _bias >= 2 and z_score < 3.0:

@@ -1955,7 +1955,7 @@ def main():
                 # CLM/CRF z-scores from DB (monitor.py writes clm_last_z_premium / crf_last_z_premium)
                 clm_z = engine.db.get_state("clm_last_z_premium") or "N/A"
                 crf_z = engine.db.get_state("crf_last_z_premium") or "N/A"
-                hy    = engine.db.get_state("hy_spread_cached") or "N/A"
+                hy    = engine.db.get_state("fred_hy_spread_value") or "N/A"
                 try: hy_str = f"{float(hy):.2f}%"
                 except Exception: hy_str = str(hy)
 

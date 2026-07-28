@@ -10,7 +10,7 @@ Data sources wired in:
   SentiSense — sentiment score, institutional 13F flow, insider cluster,
                congressional trades (all daily-cached)
   DB         — tqqq_bottom/top score, market_analysis_bias, vixy_price_realtime,
-               fred_vix, fred_hy_spread, fred_yield_spread, vix_term_slope
+               fred_vix_value, fred_hy_spread_value, fred_yield_spread, vix_term_slope
                (written by ecosystem scripts, read-only here)
   Twelve Data via HighFidelityAnalyticsEngine — spot, HV30, OHLCV matrix,
                52-week range, RSI14, HV21 (via fetch_symbol_enrichment)
@@ -114,8 +114,8 @@ def _market_bias_line(db) -> str:
 
 
 def _macro_line(db) -> str:
-    vix   = _db_float(db, "fred_vix")
-    hy    = _db_float(db, "fred_hy_spread")
+    vix   = _db_float(db, "fred_vix_value")
+    hy    = _db_float(db, "fred_hy_spread_value")
     yc    = _db_float(db, "fred_yield_spread")
     vixy  = _db_float(db, "vixy_price_realtime")
     parts = []
@@ -357,8 +357,8 @@ def _ecosystem_confluence(db, ticker: str, spot: float,
     bias      = _db_int(db, "market_analysis_bias")
     bottom    = _db_int(db, "tqqq_bottom_score")
     top       = _db_int(db, "tqqq_top_score")
-    vix       = _db_float(db, "fred_vix")
-    hy        = _db_float(db, "fred_hy_spread")
+    vix       = _db_float(db, "fred_vix_value")
+    hy        = _db_float(db, "fred_hy_spread_value")
     yc        = _db_float(db, "fred_yield_spread")
     slope     = _db_float(db, "vix_term_slope")    # VIXY/VXZ ratio — written by tqqq.py
     clm_z     = _db_float(db, "clm_last_z_premium")
@@ -611,8 +611,8 @@ def build_tqqq_intel(engine, tradier) -> tuple:
         top    = _db_int(db, "tqqq_top_score")
         bias   = _db_int(db, "market_analysis_bias")
         vixy   = _db_float(db, "vixy_price_realtime")
-        vix    = _db_float(db, "fred_vix")
-        hy     = _db_float(db, "fred_hy_spread")
+        vix    = _db_float(db, "fred_vix_value")
+        hy     = _db_float(db, "fred_hy_spread_value")
         yc     = _db_float(db, "fred_yield_spread")
         slope  = _db_float(db, "vix_term_slope")
 
@@ -807,7 +807,7 @@ def build_crypto_intel(engine, ticker: str) -> tuple:
         oi_line = f"┣ OI: `${btc_oi/1e9:.2f}B`\n" if btc_oi else ""
 
         # Cross-asset note: crypto ↔ equity cycle link
-        vix   = _db_float(db, "fred_vix")
+        vix   = _db_float(db, "fred_vix_value")
         bottom = _db_int(db, "tqqq_bottom_score")
         cross_note = ""
         if bottom >= 55:
@@ -996,7 +996,7 @@ def _format_analyze_response(setup: dict, ticker: str | None, engine, tradier) -
         mkt_bias  = _db_int(db, "market_analysis_bias")
         bottom    = _db_int(db, "tqqq_bottom_score")
         top       = _db_int(db, "tqqq_top_score")
-        vix       = _db_float(db, "fred_vix")
+        vix       = _db_float(db, "fred_vix_value")
 
         aligned = []
         conflict = []
