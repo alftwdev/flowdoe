@@ -448,6 +448,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     """
     Full morning synthesis brief (0800 HST). Returns (title, description, color).
     """
+    now_utc   = datetime.now(timezone.utc)   # used for Q1 tax-char gate (lines below)
     now_label = datetime.now().strftime("%a %b %-d | %H:%M HST")
 
     bias = _calculate_bias_score(engine, db)
