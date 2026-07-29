@@ -57,9 +57,14 @@ LEAP_DELTA_TARGET = 0.72    # deep ITM — high intrinsic, lower theta-decay %
 LEAP_DELTA_BAND = 0.06      # accept delta in [0.66, 0.78]
 LEAP_COOLDOWN_HOURS = 2     # min hours between LEAP entry signals — re-evaluates the bottom on continued downtrends
 LEAP_CUT_THRESHOLD = -30.0  # % underlying move → reassessment alert (not auto-close)
-LEAP_TP1_PCT = 50.0         # % gain → scale 50% out
+LEAP_TP1_PCT = 50.0         # CALL desk: % gain → scale 50% out
 LEAP_TP2_PCT = 100.0        # % gain → close remainder
 LEAP_ROLL_DTE = 90          # DTE remaining → roll forward consideration
+
+# PUT desk TP1 is lower than CALL desk (40% vs 50%) because deep ITM puts lose
+# time premium faster than calls once they go in-the-money (McMillan Ch.16).
+# Taking partial profits sooner preserves gains before theta decay accelerates.
+LEAP_PUT_TP1_PCT = 40.0     # PUT desk: % gain → scale 50% out (earlier than CALL)
 
 # PUT desk (top-hunting) — uses QQQ puts, not TQQQ (better liquidity, lower theta decay)
 LEAP_PUT_DTE_MIN = 180         # 6 months — tops can run; give it time
@@ -1848,10 +1853,10 @@ class TQQQTacticalSniper:
 
     def check_leap_position_status(self, tqqq_spot: float):
         """
-        Monitors all open LEAP positions. Alert thresholds:
+        Monitors all open LEAP CALL positions. Alert thresholds:
         - -30% underlying move → reassessment flag (review thesis; LEAP has time, not auto-cut)
-        - +50% → scale out 50% of position
-        - +100% → close remainder
+        - +50% (LEAP_TP1_PCT) → scale 50% out; roll-up suggestion if >120 DTE remaining
+        - +100% (LEAP_TP2_PCT) → close remainder
         - 90 DTE remaining → roll forward consideration
         - Monthly check-in while holding (every 30 calendar days)
         """
@@ -1921,10 +1926,17 @@ class TQQQTacticalSniper:
                         0x2ecc71, "TP2"
                     )
                 elif pnl_proxy >= LEAP_TP1_PCT and f"TP1_{today_str}" not in last_alert:
+                    _roll_up_note = (
+                        f"┣ 🔄 Roll-Up Option (McMillan): use TP1 proceeds to open a fresh TQQQ CALL at a higher strike "
+                        f"(same 270-540 DTE). Sells intrinsic at current price, resets DTE, maintains delta — "
+                        f"more efficient than holding a decaying deep ITM position.\n"
+                        if dte_remaining > 120 else ""
+                    )
                     _fire(
                         "✅ TQQQ LEAP | FIRST TARGET HIT",
                         base_line
                         + "┣ Scale out 50% of position — hold remainder for the full double.\n"
+                        + _roll_up_note
                         + "┗ 📌 Proceeds from the 50% scale: route → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         0x2ecc71, "TP1"
                     )
@@ -2315,11 +2327,12 @@ class TQQQTacticalSniper:
                     )
                     pos["last_alert"] = f"TP2_{today_str}"
 
-                elif pnl_proxy >= LEAP_TP1_PCT and f"TP1_{today_str}" not in last_alert:
+                elif pnl_proxy >= LEAP_PUT_TP1_PCT and f"TP1_{today_str}" not in last_alert:
                     send_essentials_embed(
                         WEBHOOK_TRADE_SIGNALS, "LEAP PUT DESK | 📊 TP1 — Scale 50% Out",
                         f"┣ QQQ PUT ${strike:.2f} exp {expiry_str}\n"
-                        f"┣ P&L proxy `+{pnl_proxy:.1f}%` — sell half, let remainder ride.\n"
+                        f"┣ P&L proxy `+{pnl_proxy:.1f}%` — early TP1 (40% gate; ITM puts lose time value fast)\n"
+                        f"┣ Sell 50% of position. Let remainder ride toward +100%.\n"
                         f"┗ 📌 Proceeds from the 50% scale: route → MLPI (cash buy) → margin headroom expands → DCA more CLM/CRF on margin.",
                         color_val
                     )
