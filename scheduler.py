@@ -2123,7 +2123,30 @@ def main():
                 if carry_sp is not None and carry_sp < 5.0:
                     alert_note = f"\n⚠️ CARRY SPREAD COMPRESSED ({carry_sp:+.1f}%) — review margin draw pace"
 
-                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}"
+                # ── Insurance put cadence review (McMillan Ch.25 threshold flag) ──
+                # At $65k+, 30-DTE monthly roll costs accumulate meaningfully vs a
+                # 6-month LEAP put at the same OTM%. Surface once per calendar month.
+                put_cadence_note = ""
+                try:
+                    _pv_sc = float(os.getenv("PORTFOLIO_VALUE_APPROX", "0") or "0")
+                    if _pv_sc >= 65_000:
+                        _cadence_key = f"put_cadence_review_{today_s[:7]}"  # monthly dedup (YYYY-MM)
+                        if not engine.db.get_state(_cadence_key):
+                            engine.db.update_state(_cadence_key, True)
+                            _monthly_budget = _pv_sc * 0.005          # 0.5% of portfolio/month
+                            _6mo_budget     = _monthly_budget * 6      # equivalent 6-month budget
+                            put_cadence_note = (
+                                f"\n\n📋 INSURANCE PUT CADENCE REVIEW (threshold reached)\n"
+                                f"  Portfolio ${_pv_sc:,.0f} ≥ $65k milestone — evaluate put roll cadence:\n"
+                                f"  Current: 30 DTE monthly roll (~${_monthly_budget:,.0f}/mo budget = ${_monthly_budget*12:,.0f}/yr in premium + 12× commissions)\n"
+                                f"  Alternative: 6-month LEAP put (7% OTM QQQ) ~${_6mo_budget:,.0f} upfront, half the roll cost, same coverage\n"
+                                f"  Decide at next put renewal: check if 6-mo QQQ put ≤ ${_6mo_budget:,.0f} and bid/ask spread is tight\n"
+                                f"  No action required now — flag fires once/month until you log a decision"
+                            )
+                except Exception:
+                    pass
+
+                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}{put_cadence_note}"
 
                 _p_tok = os.getenv("PUSHOVER_API_TOKEN")
                 _p_usr = os.getenv("PUSHOVER_USER_KEY")
