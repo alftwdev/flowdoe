@@ -392,19 +392,25 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
 
     for label, q in board.items():
         pct = q["percent_change"]
-        arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "—")
-        color = "🟢" if pct > 0 else ("🔴" if pct < 0 else "⚪")
+        # Dead-band: ±0.05% treated as flat to avoid 🔴▼ on noise (-0.0% prints)
+        if abs(pct) < 0.05:
+            arrow, color = "—", "⚪"
+        else:
+            arrow = "▲" if pct > 0 else "▼"
+            color = "🟢" if pct > 0 else "🔴"
 
         # PDH/PDL context for index proxies only — adds "Above PDH" / "Below PDL" / "Inside range"
+        # Minimum 0.1% buffer before calling a breakout to filter noise-level price deviations.
         ctx = ""
         sym = q["proxy_symbol"]
         if sym in daily_levels and label in INDEX_LABELS:
             pdh = daily_levels[sym]["pdh"]
             pdl = daily_levels[sym]["pdl"]
             spot = q["last"]
-            if spot > pdh:
+            buf = spot * 0.001   # 0.1% of spot price
+            if spot > pdh + buf:
                 ctx = f" | Above PDH {pdh:,.2f} ✅"
-            elif spot < pdl:
+            elif spot < pdl - buf:
                 ctx = f" | Below PDL {pdl:,.2f} 🔴"
             else:
                 ctx = f" | Inside range ({pdl:,.2f}–{pdh:,.2f})"
@@ -454,18 +460,32 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
             fred_macro_line += f"┣ Fed Funds: {ff:.2f}% [FRED]\n"
 
     # ── Session bias from index breadth
+    # Use dead-banded pct (same ±0.05% threshold as arrow/color) so near-flat instruments
+    # don't count as "bulls" and skew the session bias verdict.
     index_pcts = [q["percent_change"] for q in [es_q, nq_q, ym_q, rty_q] if q]
-    bulls = sum(1 for p in index_pcts if p > 0)
+    bulls = sum(1 for p in index_pcts if p > 0.05)
+    bears = sum(1 for p in index_pcts if p < -0.05)
     if bulls == len(index_pcts):
         bias = "All indices green — broad risk-on"
-    elif bulls == 0:
+    elif bears == len(index_pcts):
         bias = "All indices red — broad risk-off"
     elif bulls >= 3:
         bias = "Broad strength — watch lagging index for rotation"
-    elif bulls <= 1:
+    elif bears >= 3:
         bias = "Broad weakness — only isolated green pockets"
     else:
         bias = "Mixed — wait for /ES value area confirmation"
+
+    # ── Market breadth (% stocks above 50D SMA) — from tqqq_breadth_cache in DB, zero API cost
+    breadth_line = ""
+    try:
+        _breadth = db.get_state("tqqq_breadth_cache")
+        if _breadth is not None:
+            _b_pct = float(_breadth) * 100
+            _b_icon = "🟢" if _b_pct >= 60 else ("🔴" if _b_pct <= 35 else "🟡")
+            breadth_line = f"┣ Breadth (% above 50D SMA): {_b_icon} `{_b_pct:.0f}%`\n"
+    except Exception:
+        pass
 
     rows_text = "\n".join(index_rows + commodity_rows)
     return (
@@ -473,6 +493,7 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
         f"{rows_text}\n"
         f"{vix_line}"
         f"{divergence_line}"
+        f"{breadth_line}"
         f"{econ_line}"
         f"{fred_macro_line}"
         f"┗ Bias: {bias}"
@@ -577,7 +598,19 @@ def run_futures_board():
     send_essentials_embed(WEBHOOK_FUTURES, "FUTURES BOARD", payload, _board_color)
     db.update_state("futures_board_last_quotes", board)
     db.update_state("futures_board_last_dispatch", datetime.now().isoformat())
-    logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due})")
+
+    # ── Write NQ directional bias to DB for scorecard cross-reference ──────────
+    # futures_nq_bias_{date}      = morning directional call (written once — first run of day)
+    # futures_nq_actual_dir_{date} = latest actual direction (overwritten every run; EOD = final)
+    # Consumers: analytics.generate_announcements_teaser() + generate_ecosystem_scorecard()
+    _today_str = datetime.now().strftime("%Y-%m-%d")
+    _nq_dir = "BULLISH" if _nq_chg > 0.05 else ("BEARISH" if _nq_chg < -0.05 else "NEUTRAL")
+    _bias_key = f"futures_nq_bias_{_today_str}"
+    if not db.get_state(_bias_key):   # only set once — morning call is the prediction
+        db.update_state(_bias_key, _nq_dir)
+    db.update_state(f"futures_nq_actual_dir_{_today_str}", _nq_dir)  # always update — EOD = final
+
+    logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due}, NQ={_nq_dir})")
 
 # =====================================================================
 # DEEP-DIVE MARKET PROFILE + CHART (ES/NQ) — fires only on gatekeeper approval
