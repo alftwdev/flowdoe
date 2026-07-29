@@ -103,12 +103,13 @@ def _cycle_bias(db) -> str:
 
 def _market_bias_line(db) -> str:
     try:
-        bias = _db_int(db, "market_analysis_bias")
-        if bias >= 2:
-            return f"🟢 BULLISH ({bias:+d}/12 flags)"
-        if bias <= -2:
-            return f"🔴 BEARISH ({bias:+d}/12 flags)"
-        return f"🟡 NEUTRAL ({bias:+d}/12 flags)"
+        raw  = db.get_state("market_analysis_bias") or {}
+        bias = int(raw.get("score", 0)) if isinstance(raw, dict) else int(raw or 0)
+        lbl  = (raw.get("label", "") if isinstance(raw, dict) else "").upper()
+        tag  = lbl if lbl in ("BULLISH", "BEARISH", "NEUTRAL") else (
+               "BULLISH" if bias >= 2 else ("BEARISH" if bias <= -2 else "NEUTRAL"))
+        icon = "🟢" if tag == "BULLISH" else ("🔴" if tag == "BEARISH" else "🟡")
+        return f"{icon} {tag} ({bias:+d})"
     except Exception:
         return "N/A"
 
@@ -542,7 +543,7 @@ def build_equity_intel(engine, tradier, ticker: str) -> tuple:
 
         # SentiSense
         ss_score, ss_lean, ss_mentions = _ss_sentiment(db, ticker)
-        ss_str = f"{ss_lean} (`{ss_score:+.0f}`) · {ss_mentions}" if ss_mentions else ss_lean
+        ss_str = f"{ss_lean} (`{ss_score:+.0f}`)" if ss_lean != "N/A" else "N/A"
 
         inst_line    = _institutional_line(db, ticker)
         insider_str  = _insider_line(db, ticker)
@@ -562,9 +563,20 @@ def build_equity_intel(engine, tradier, ticker: str) -> tuple:
         sigma = matrix.get("sigma", 0.0)
         rsi_str = _rsi_line(rsi14, hv21)
 
+        # Fallback when RSI unavailable: 52w position (always present from enrichment)
+        if rsi_str == "N/A":
+            if range_pct is not None:
+                _pos_tag = ("🔴 overbought zone" if range_pct > 80
+                            else ("🟢 near 52w low" if range_pct < 20 else "🟡 mid-range"))
+                mid_signal_line = f"┣ 52w position: `{range_pct:.0f}%` of range {_pos_tag}\n"
+            else:
+                mid_signal_line = ""
+        else:
+            mid_signal_line = f"┣ {rsi_str}\n"
+
         desc = (
             f"**Spot:** {range_line}\n\n"
-            f"**IV / Wheel Setup**\n"
+            f"**IMPLIED VOLATILITY SETUP**\n"
             f"┣ ATM IV: `{iv_pct:.1f}%`{'  ✅' if iv_reliable else '  ~proxy'}"
             f"  ·  IVR: {env_icon} `{ivr:.0f}%` — {env}\n"
             f"┣ Expected Move ({_DTE_MID} DTE): ±`${em_dollar}` (±`{em_pct}%`){vrp_str}\n"
@@ -578,9 +590,9 @@ def build_equity_intel(engine, tradier, ticker: str) -> tuple:
             f"┣ Insider: {insider_str}\n"
             f"┗ Congressional: {congress_str}\n\n"
             f"**Wheel Score: `{wheel_pts}/100`** — {wheel_tag}\n\n"
-            f"**Market Signal**\n"
+            f"**MARKET SIGNALS**\n"
             f"┣ Order flow: `{flow}` ({sigma:+.2f}σ)\n"
-            f"┣ {rsi_str}\n"
+            f"{mid_signal_line}"
             f"┗ Sentiment: {ss_str}\n\n"
             f"**Ecosystem Confluence**\n"
             f"{confluence}"
@@ -675,7 +687,7 @@ def build_tqqq_intel(engine, tradier) -> tuple:
             f"┣ Yield curve: `{yc:+.2f}%` {yc_tag}\n"
             f"┣ ATM IV: `{iv_pct:.1f}%`{'  ✅' if iv_reliable else '  ~proxy'}\n"
             f"┣ Institutional (13F): {inst_line}\n"
-            f"┣ Sentiment: {ss_lean} (`{ss_score:+.0f}`){f' · {ss_mentions}' if ss_mentions else ''}\n\n"
+            f"┣ Sentiment: {ss_lean} (`{ss_score:+.0f}`)\n\n"
             f"**Ecosystem Confluence**\n"
             f"{confluence}"
         )
@@ -756,7 +768,7 @@ def build_income_intel(engine, tradier, ticker: str) -> tuple:
             f"**Context**\n"
             f"┣ Institutional (13F): {inst_line}\n"
             f"┣ Congressional: {congress_str}\n"
-            f"┣ Sentiment: {ss_lean} (`{ss_score:+.0f}`){f' · {ss_mentions}' if ss_mentions else ''}\n"
+            f"┣ Sentiment: {ss_lean} (`{ss_score:+.0f}`)\n"
             f"┣ Market bias: {bias_line}\n"
             f"┣ TQQQ cycle: {cycle_line}\n\n"
             f"**Ecosystem Confluence**\n"
@@ -834,7 +846,7 @@ def build_crypto_intel(engine, ticker: str) -> tuple:
             f"┣ Equity bias: {bias_line}\n"
             f"┣ Macro: {macro_line}\n"
             f"┣ TQQQ cycle: {cycle_line}\n"
-            f"┗ Sentiment: {ss_lean} (`{ss_score:+.0f}`){f' · {ss_mentions}' if ss_mentions else ''}"
+            f"┗ Sentiment: {ss_lean} (`{ss_score:+.0f}`)"
         )
         return desc, 0xf39c12
 
@@ -1105,7 +1117,7 @@ async def query_asset(interaction: discord.Interaction, ticker: str):
 
         embed = discord.Embed(title=f"📊 {ticker}", description=desc, color=color)
         embed.set_footer(
-            text="Tradier · SentiSense · Twelve Data · FRED  |  Research only — not financial advice."
+            text="ESSENTIALS | Not financial advice, for info purposes only."
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
