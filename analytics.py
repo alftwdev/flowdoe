@@ -2849,9 +2849,9 @@ class HighFidelityAnalyticsEngine:
         nq_actual = self.db.get_state(f"futures_nq_actual_dir_{today_str}", "")
         if nq_bias and nq_actual:
             nq_hit = (nq_bias == nq_actual) or ("NEUTRAL" in nq_bias and "NEUTRAL" in nq_actual)
-            futures_line = f"┣ #futures-trading  /NQ Direction: {nq_bias} → {nq_actual} {('✅' if nq_hit else '❌')}\n"
+            futures_line = f"┣ #futures-trading  Futures Outlook: `{nq_bias}` → Actual `{nq_actual}` {('✅' if nq_hit else '❌')}\n"
         else:
-            futures_line = f"┣ #futures-trading  /NQ Board: 4×/day — overnight, pre-market, open, mid-session\n"
+            futures_line = f"┣ #futures-trading  Futures Outlook: `NEUTRAL` — no intraday bias logged yet\n"
 
         # ── #cornerstone: RO risk status today ──
         ro_tier = self.db.get_state("cornerstone_alert_tier_rank", 0)
@@ -2885,9 +2885,9 @@ class HighFidelityAnalyticsEngine:
         # ── #dividend-ccetfs: income ETF spotlight ──
         etf_spot = self.db.get_state("cc_etf_spotlight_latest")
         if etf_spot:
-            income_line = f"┣ #dividend-ccetfs  Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
+            income_line = f"┣ income-machine    Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
         else:
-            income_line = f"┣ #dividend-ccetfs  Income Screener: running daily — CC ETFs + dividend wheel\n"
+            income_line = f"┣ income-machine    Income Screener: running daily — CC ETFs + dividend wheel\n"
 
         # ── #crypto: Fear & Greed + mover ──
         fng_val = snap.get("fng", {}).get("value", "—")
@@ -2899,7 +2899,7 @@ class HighFidelityAnalyticsEngine:
         crypto_line = f"┣ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
 
         payload = (
-            f"📣 **DAILY ACCURACY INDEX — Public Sample**\n"
+            f"📣 **DAILY ACCURACY INDEX**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**#market-analysis**  SPY Predicted `${predicted:,.2f}` → Actual `${actual:,.2f}` "
             f"| Direction: {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
@@ -2913,8 +2913,7 @@ class HighFidelityAnalyticsEngine:
             f"{income_line}"
             f"{crypto_line}"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"┗ Every number is logged live and never deleted — good sessions and bad ones both. "
-            f"Full signals (TQQQ entries, wheel strikes, morning conviction call) are subscriber-only."
+            f"┗ ESSENTIALS — Not financial advice · Recap overview. Subscribe for live flow state."
         )
         return payload
 
