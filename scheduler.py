@@ -56,7 +56,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
     engine.db.update_state(dedupe_key, True)
 
     bias, score = snap["conviction_bias"], snap["conviction_score"]
-    color = 0x2ecc71 if score >= 2 else (0xe74c3c if score <= -2 else 0x95a5a6)
+    color = 0x2ecc71 if score >= 2 else (0xe74c3c if score <= -2 else 0xf1c40f)
     header = f"⚡ **MARKET ANALYSIS CONVICTION SYNC | {report_label.upper()}**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     footer = f"┗ Master Conviction: {bias} (score {score:+d}/4)\n*Full cross-asset breakdown in Market Analysis.*"
 
