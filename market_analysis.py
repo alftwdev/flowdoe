@@ -490,7 +490,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         snap = engine.fetch_fred_macro_snapshot()
         hy   = engine.fetch_hy_spread()
         real_vix = bias["real_vix"]
-        vix_line = f"`{real_vix:.1f}` (prev close) — {'Calm. Options cheap.' if real_vix < 15 else 'Low vol.' if real_vix < 20 else 'Elevated. Size down.' if real_vix < 30 else 'PANIC. Defensive posture.'}"
+        # Natenberg (1994): daily expected move = annual_IV / sqrt(252)
+        # Shows the options market's 1-std expected daily range — direct VRP context.
+        _edm = real_vix / 15.874   # sqrt(252)
+        _vix_regime = ('Calm. Options cheap.' if real_vix < 15 else
+                       'Low vol.' if real_vix < 20 else
+                       'Elevated. Size down.' if real_vix < 30 else
+                       'PANIC. Defensive posture.')
+        vix_line = f"`{real_vix:.1f}` ±`{_edm:.2f}%`/day — {_vix_regime}"
         yc_line  = f"`{yc['spread']:+.2f}%` {yc['label']}" if yc else "N/A"
         ff_line  = f"`{snap.get('fedfunds', '?')}%` Fed Funds"
         hy_line  = f"`{hy:.2f}%` {'✅ healthy' if hy < 4.5 else '⚠️ stress' if hy < 6 else '🔴 crisis'}" if hy else "N/A"
@@ -617,6 +624,46 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception:
         pass
 
+    # EDGAR cross-channel alert — reads keys written by monitor.py every 5-min tick.
+    # Zero API calls: pure DB reads. Keys: cornerstone_n2_detected_{T}, ro_dodge_active_{T},
+    # cornerstone_30pct_watch_active_{T}. Only surfaces when something is active.
+    edgar_alerts = []
+    try:
+        for _ct in ("CLM", "CRF"):
+            _n2    = db.get_state(f"cornerstone_n2_detected_{_ct}") or ""
+            _dodge = db.get_state(f"ro_dodge_active_{_ct}") or ""
+            _watch = db.get_state(f"cornerstone_30pct_watch_active_{_ct}") or ""
+            if _n2 and _dodge:
+                edgar_alerts.append(f"{_ct} 🔴 N-2 ACTIVE ({_n2}) — RO dodge on, awaiting re-entry")
+            elif _n2:
+                edgar_alerts.append(f"{_ct} ⚠️ N-2 DETECTED ({_n2}) — monitor.py managing, see #cornerstone")
+            elif _watch == "active":
+                edgar_alerts.append(f"{_ct} 👀 30%+ premium watch — pre-N-2 threshold, no filing yet")
+    except Exception:
+        pass
+    edgar_line = "┣ 📋 EDGAR: " + " | ".join(edgar_alerts) + "\n" if edgar_alerts else ""
+
+    # Bollen (2010) mood forward signal — "Twitter Mood Predicts the Stock Market."
+    # Low calmness/high anxiety (SS mood ≤ 25) Granger-causes DJIA declines 2–6 days later.
+    # High euphoria (≥ 75) predicts mean reversion. Source: SentiSense market_mood, cached daily.
+    mood_fwd_line = ""
+    try:
+        _ss_mood = db.get_state("ss_market_mood_score")
+        if _ss_mood is not None:
+            _ssv = float(_ss_mood)
+            if _ssv <= 25:
+                mood_fwd_line = (
+                    f"┣ 🧠 Mood (2–6d lead): Anxiety extreme (`{_ssv:.0f}`) — "
+                    f"elevated anxiety leads market pressure by 2–6 days (Bollen 2010). Stay defensive.\n"
+                )
+            elif _ssv >= 75:
+                mood_fwd_line = (
+                    f"┣ 🧠 Mood (2–6d lead): Euphoria high (`{_ssv:.0f}`) — "
+                    f"mean reversion risk in 2–6 days. Tighten strikes, avoid chasing.\n"
+                )
+    except Exception:
+        pass
+
     # Accumulation readiness — written by monitor.py every loop tick
     acc_lines = []
     for _tkr in ("CLM", "CRF"):
@@ -681,9 +728,11 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     signals_section = (
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
+        f"{edgar_line}"
         f"{acc_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
+        f"{mood_fwd_line}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
         f"{mlpi_entry_line}"
