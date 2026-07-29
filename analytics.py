@@ -918,6 +918,14 @@ class HighFidelityAnalyticsEngine:
                 if ivr_proxy <= ivr_threshold:
                     continue
 
+                # VRP gate (McMillan Vol Buyer's Rule, inverted for sellers):
+                # IV must exceed HV30 by ≥2pp to confirm meaningful seller's edge.
+                # Skip if HV30 unavailable (can't calculate VRP).
+                vrp = round(atm_iv - hv30, 1) if hv30 > 0 else 99.0
+                if hv30 > 0 and vrp < 2.0:
+                    logger.debug(f"{symbol}: IVR ok ({ivr_proxy:.0f}%) but VRP thin ({vrp:+.1f}%) — skipping")
+                    continue
+
                 # Bid/ask spread liquidity check on the ATM-ish strike used for IVR
                 spread_ok, spread_pct = True, 0.0
                 if "bid" in near_term.columns and "ask" in near_term.columns:
@@ -993,6 +1001,7 @@ class HighFidelityAnalyticsEngine:
                     "ivr_proxy": round(float(ivr_proxy), 1),
                     "ivr_source": ivr_source,
                     "iv_hv_ratio": iv_hv_ratio,
+                    "vrp": vrp,
                     "spread_pct": round(spread_pct, 1),
                     "strategy": "CSP (Cash-Secured Put)",
                     "csp_setup": csp_setup,

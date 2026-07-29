@@ -712,10 +712,13 @@ def main():
                                         f"┣ 💰 If Assigned: `${f['div_amount']:.4f}`/share/mo ({f['div_yield']:.1f}% annual) — keep earning while selling CCs\n"
                                         f"┣ Combined Return: Premium `{premium_yield:.2f}%` + Div `{monthly_div_yield:.2f}%` = `{combined_monthly:.2f}%`/mo\n"
                                     )
+                            _vrp = f.get("vrp", 0.0)
                             iv_hv = f.get("iv_hv_ratio")
                             iv_context = (
-                                f"┣ IV/HV Ratio: `{iv_hv:.2f}x` HV30 — selling premium at a `{(iv_hv - 1) * 100:.0f}%` statistical premium to realized vol\n"
-                                if iv_hv and iv_hv > 1.0 else ""
+                                f"┣ VRP: IV `{f['iv']:.1f}%` − HV30 `{f['hv30']:.1f}%` = `{_vrp:+.1f}%` — seller's edge confirmed (IV > RV)\n"
+                                if _vrp > 0 else
+                                f"┣ VRP: `{_vrp:+.1f}%` — IV below realized vol; edge thin (flagged despite gate, verify)\n"
+                                if iv_hv else ""
                             )
                             ivr_src = f.get("ivr_source", "proxy")
                             ivr_label = "IVR" if ivr_src == "Tradier" else "IVR est"
@@ -804,6 +807,29 @@ def main():
                                             )
                                             if WEBHOOK_INCOME:
                                                 send_essentials_embed(WEBHOOK_INCOME, "WHEEL | 50% Profit Target", profit_payload, 0x2ecc71)
+                                    # Post-breach roll-down (McMillan Ch.19): stock below strike,
+                                    # position losing 50–200% of premium. Surface roll-down
+                                    # guidance before reaching deep ITM territory. Zero new API
+                                    # calls — uses already-fetched current_val + entry_prem.
+                                    elif pct_decay <= -50:
+                                        breach_key = f"wheel_breach50_{pos['id']}"
+                                        if not engine.db.get_state(breach_key):
+                                            engine.db.update_state(breach_key, True)
+                                            _est_roll_credit = round(entry_prem * 1.05, 2)
+                                            breach_payload = (
+                                                f"**{pos['symbol']}** | {pos['position_type']} @ `${pos['strike']:.2f}`\n"
+                                                f"┣ Expiration: `{pos['expiration']}` ({dte} DTE)\n"
+                                                f"┣ Entry premium: `${entry_prem:.2f}` | Now worth: `${current_val:.2f}` (`{abs(pct_decay):.0f}%` loss)\n"
+                                                f"┣ Stock is below your strike — position is breached\n"
+                                                f"┣ **Roll-Down Decision (McMillan Rule):**\n"
+                                                f"┣ Option A: Roll down+out for CREDIT — sell this put, sell 1 additional put at lower strike (~`${pos['strike']*0.95:.2f}`), buy 1 put at even lower strike to cap risk. Execute ONLY if net credit ≥ `$0.00`\n"
+                                                f"┣ Option B: Do nothing — hold if thesis intact and {dte} DTE remains; time works for you\n"
+                                                f"┣ Option C: Close now — take the loss, redeploy to a cleaner setup\n"
+                                                f"┗ 🟡 BREACH ALERT — never roll for a debit; if credit unavailable, close or hold"
+                                            )
+                                            if WEBHOOK_INCOME:
+                                                send_essentials_embed(WEBHOOK_INCOME, "WHEEL | Strike Breach — Roll Decision", breach_payload, 0xf1c40f)
+
                                     # 200% loss alert (position value 3x entry = deep ITM breach)
                                     elif pct_decay <= -200:
                                         loss_key = f"wheel_loss200_{pos['id']}"

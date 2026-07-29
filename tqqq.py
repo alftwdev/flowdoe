@@ -1800,10 +1800,25 @@ class TQQQTacticalSniper:
             if is_panic else ""
         )
 
+        # Volatility Buyer's Rule (McMillan Ch.38): buy options when IV ≤ HV — cheap entry.
+        # For TQQQ LEAPs: sourced from Black-Scholes enrichment (bs_iv vs bs_rv20).
+        # Zero new API calls — data already in leap_setup from enrich_leap_with_tradier_chain().
+        if "bs_iv" in leap_setup and "bs_rv20" in leap_setup and leap_setup["bs_rv20"] > 0:
+            _tqqq_vrp = leap_setup["bs_iv"] - leap_setup["bs_rv20"]
+            _vbr_label = (
+                "✅ CHEAP — IV below realized vol, Buyer's Rule confirmed"
+                if _tqqq_vrp <= 0 else
+                f"⚠️ EXPENSIVE — `{_tqqq_vrp:+.1f}%` above realized vol; consider smaller size or wait for fear spike"
+            )
+            vrp_buyer_line = f"┣ Vol Buyer's Rule: TQQQ IV `{leap_setup['bs_iv']:.1f}%` vs RV20 `{leap_setup['bs_rv20']:.1f}%` — {_vbr_label}\n"
+        else:
+            vrp_buyer_line = ""
+
         execution_payload = (
             f"TQQQ @ `${leap_setup['tqqq_spot']:.2f}` | Buy Time on the Pullback\n"
             f"┣ 🎯 BTO LEAP: {contract_line}\n"
             + delta_line + cost_line + liquidity_line + bs_block + breakeven_block
+            + vrp_buyer_line
             + f"┣ Sizing: Max 2-3% of portfolio (TQQQ 3× leveraged = leverage on leverage)"
             + (f" | Seasonal scalar `{get_leap_seasonal_params()[0]:.2f}×` — {get_leap_seasonal_params()[1]}\n"
                if get_leap_seasonal_params()[0] != 1.0 else "\n")
