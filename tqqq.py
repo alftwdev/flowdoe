@@ -336,6 +336,32 @@ class TQQQTacticalSniper:
             logger.error(f"Intraday metrics fetch failed: {e}")
             return None
 
+    def fetch_daily_baseline_qqq_series(self, outputsize=30):
+        """QQQ daily OHLC series for LEAP PUT Greeks — cached once per day alongside TQQQ series."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cache_key = f"qqq_daily_series_{today_str}"
+        cached = db.get_state(cache_key)
+        if cached:
+            try:
+                return pd.DataFrame(cached)
+            except Exception:
+                pass
+
+        params = {"symbol": self.proxy_symbol, "interval": "1day", "outputsize": str(outputsize), "apikey": TWELVE_DATA_API_KEY}
+        try:
+            res = requests.get(f"{self.base_url}/time_series", params=params, timeout=12).json()
+            if "values" not in res:
+                return None
+            df = pd.DataFrame(res["values"])
+            for col in ("open", "high", "low", "close"):
+                df[col] = df[col].astype(float)
+            df = df.iloc[::-1].reset_index(drop=True)
+            db.update_state(cache_key, df.to_dict(orient="list"))
+            return df
+        except Exception as e:
+            logger.error(f"QQQ daily series fetch failed: {e}")
+            return None
+
     def fetch_tqqq_daily_series(self, outputsize=30):
         """TQQQ's own daily OHLC — for ATR% and RV20. Cached once per trading day."""
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1132,9 +1158,18 @@ class TQQQTacticalSniper:
                 "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
                 timeout=8, headers={"User-Agent": "Mozilla/5.0"}
             ).json()
-            result["fear_greed"] = float(fg_res.get("fear_and_greed", {}).get("score", 50.0))
+            fg_score = float(fg_res.get("fear_and_greed", {}).get("score", 50.0))
+            result["fear_greed"] = fg_score
+            db.update_state("fg_last_known_score", fg_score)  # persist for fallback
         except Exception as e:
-            logger.warning(f"CNN Fear & Greed fetch failed: {e}")
+            # Use last known score rather than neutral 50 — on fear days this can be worth
+            # 4-10 pts in the cycle scorer; silently defaulting to neutral underestimates bottom_score.
+            _last_fg = db.get_state("fg_last_known_score")
+            if _last_fg is not None:
+                result["fear_greed"] = float(_last_fg)
+                logger.warning(f"CNN Fear & Greed fetch failed ({e}) — using last cached score {_last_fg:.0f}")
+            else:
+                logger.warning(f"CNN Fear & Greed fetch failed ({e}) — no cached value, defaulting to 50")
 
         # VIX term structure via ETF proxies (VIX9D/VIX3M unavailable at this Twelve Data tier)
         # VIXY = short-term VIX futures (~1-month); VXZ = medium-term VIX futures (~5-month)
@@ -2083,8 +2118,8 @@ class TQQQTacticalSniper:
                         if c.get("option_type", "").lower() != "put":
                             continue
                         strike = float(c.get("strike", 0.0))
-                        if strike <= 0 or strike >= qqq_spot:
-                            continue  # deep ITM puts have strike below spot; skip OTM
+                        if strike <= 0 or strike <= qqq_spot:
+                            continue  # deep ITM puts have strike ABOVE spot; skip OTM (strike ≤ spot)
                         greeks = c.get("greeks") or {}
                         delta = float(greeks.get("delta", 0.0))
                         if delta >= 0 or abs(delta) < 0.40:
@@ -2138,6 +2173,58 @@ class TQQQTacticalSniper:
         except Exception as e:
             logger.warning(f"LEAP PUT Tradier chain lookup failed: {e}")
 
+        return put_setup
+
+    def enrich_leap_put_with_greeks(self, put_setup, qqq_daily=None):
+        """
+        Black-Scholes Greeks for the QQQ LEAP PUT contract.
+        Mirrors enrich_leap_with_greeks() for the CALL desk but uses QQQ spot + put type.
+        Adds: IV vs RV20, theta decay cost, breakeven, and VRP Buyer's Rule flag.
+        """
+        if qqq_daily is None or len(qqq_daily) < 21:
+            return put_setup
+        try:
+            returns = qqq_daily["close"].pct_change().dropna()
+            rv20 = float(returns.tail(20).std() * np.sqrt(252))
+            vix = put_setup.get("vix_price", 18.0)
+            # QQQ IV proxy: RV20 × 1.15 floored by VIX/100 (no TQQQ 3× multiplier)
+            iv_raw = rv20 * 1.15
+            if vix:
+                iv_raw = max(iv_raw, vix / 100.0)
+            iv = max(iv_raw, 0.12)  # 12% floor — QQQ IV rarely below this
+
+            dte = put_setup.get("real_dte", 270)
+            T = dte / 365.0
+            spot = put_setup["qqq_spot"]
+
+            strike = put_setup.get("real_strike")
+            if not strike:
+                strike = find_strike_for_delta(spot, T, RISK_FREE_RATE, iv, LEAP_PUT_DELTA_TARGET, "put")
+
+            greeks = bs_greeks(spot, strike, T, RISK_FREE_RATE, iv, "put")
+            theo_price = bs_price(spot, strike, T, RISK_FREE_RATE, iv, "put")
+
+            theta_per_day = greeks["theta"] * 100      # per contract per day
+            total_theta = abs(theta_per_day) * dte
+            # For a put: breakeven at expiry = strike - premium paid
+            breakeven = strike - theo_price
+            breakeven_pct = (breakeven / spot - 1) * 100  # how far below spot QQQ must be at expiry
+
+            put_setup.update({
+                "bs_strike": round(strike, 2),
+                "bs_iv": round(iv * 100, 1),
+                "bs_rv20": round(rv20 * 100, 1),
+                "bs_delta": round(greeks["delta"], 3),
+                "bs_theta_per_day": round(theta_per_day, 2),
+                "bs_total_theta": round(total_theta, 0),
+                "bs_vega": round(greeks["vega"] * 100, 2),
+                "bs_prob_itm": round(greeks["prob_itm"] * 100, 1),
+                "bs_theo_price": round(theo_price, 2),
+                "bs_breakeven": round(breakeven, 2),
+                "bs_breakeven_pct": round(breakeven_pct, 1),
+            })
+        except Exception as e:
+            logger.warning(f"LEAP PUT Greeks calculation failed: {e}")
         return put_setup
 
     def dispatch_leap_put_signal(self, put_setup):
@@ -2223,10 +2310,36 @@ class TQQQTacticalSniper:
             if is_complacent else ""
         )
 
+        # Black-Scholes block (parallel to CALL desk)
+        bs_block_put = ""
+        if "bs_delta" in put_setup:
+            chain_note = f" (chain mid ${put_setup['real_mid']:.2f})" if "real_mid" in put_setup else ""
+            bs_block_put = (
+                f"┣ Black-Scholes (QQQ IV est. {put_setup['bs_iv']:.1f}% vs RV20 {put_setup['bs_rv20']:.1f}%):\n"
+                f"┃  Theo ${put_setup['bs_theo_price']:.2f}{chain_note} | "
+                f"Delta Δ {put_setup['bs_delta']:.3f} | Prob ITM {put_setup['bs_prob_itm']:.1f}%\n"
+                f"┃  Theta: ${put_setup['bs_theta_per_day']:+.2f}/day per contract"
+                f" | Total decay over DTE: ~${put_setup['bs_total_theta']:.0f}\n"
+                f"┃  Breakeven at expiry: QQQ `${put_setup['bs_breakeven']:.2f}` "
+                f"({put_setup['bs_breakeven_pct']:+.1f}% from now)\n"
+            )
+
+        # Volatility Buyer's Rule (McMillan Ch.38): for PUT buyer, cheap = IV < RV.
+        # When IV < RV the market is underpricing future moves — put is structurally cheap.
+        vrp_put_line = ""
+        if "bs_iv" in put_setup and "bs_rv20" in put_setup and put_setup["bs_rv20"] > 0:
+            _put_vrp = put_setup["bs_iv"] - put_setup["bs_rv20"]
+            _put_vbr_label = (
+                "✅ CHEAP — IV below realized vol, Buyer's Rule confirmed (puts structurally underpriced)"
+                if _put_vrp <= 0 else
+                f"⚠️ EXPENSIVE — `{_put_vrp:+.1f}%` above realized vol; market is pricing fear into puts"
+            )
+            vrp_put_line = f"┣ Vol Buyer's Rule: QQQ IV `{put_setup['bs_iv']:.1f}%` vs RV20 `{put_setup['bs_rv20']:.1f}%` — {_put_vbr_label}\n"
+
         execution_payload = (
             f"QQQ @ `${put_setup['qqq_spot']:.2f}` | Buy Time on the Extension\n"
             f"┣ 🎯 BTO LEAP PUT: {contract_line}\n"
-            + delta_line + cost_line + liquidity_line
+            + delta_line + cost_line + liquidity_line + bs_block_put + vrp_put_line
             + (f"┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)"
                f" | Seasonal scalar `{1/max(get_leap_seasonal_params()[0],0.5):.2f}×` (PUT desk inverts CALL scalar)\n"
                if get_leap_seasonal_params()[0] != 1.0 else
@@ -2267,7 +2380,7 @@ class TQQQTacticalSniper:
 
         for pos in positions:
             try:
-                entry_price = float(pos.get("entry_price", 0.0))
+                entry_price = float(pos.get("entry_qqq_spot") or pos.get("entry_price") or 0.0)
                 strike = float(pos.get("strike", 0.0))
                 premium = float(pos.get("premium", 0.0))
                 expiry_str = pos.get("expiration", "")
@@ -2296,14 +2409,15 @@ class TQQQTacticalSniper:
                         f"┣ Position: QQQ ${strike:.2f} PUT exp {expiry_str} ({dte_remaining} DTE)\n"
                         f"┣ QQQ Spot: ${qqq_spot:.2f} | Put P&L proxy: `{pnl_proxy:+.1f}%`\n"
                     )
-                    send_essentials_embed(
-                        WEBHOOK_TRADE_SIGNALS,
-                        "LEAP PUT DESK | Monthly Check-In",
-                        base_line
-                        + f"┣ Premium paid: ${premium:.2f}/share | Cost basis: ${premium * 100:.0f}/contract\n"
-                        + f"┗ Thesis: QQQ correction to drive PUT into profit. Next alert: {LEAP_ROLL_DTE} DTE or profit target.",
-                        color_val
-                    )
+                    if WEBHOOK_TRADE_SIGNALS:
+                        send_essentials_embed(
+                            WEBHOOK_TRADE_SIGNALS,
+                            "LEAP PUT DESK | Monthly Check-In",
+                            base_line
+                            + f"┣ Premium paid: ${premium:.2f}/share | Cost basis: ${premium * 100:.0f}/contract\n"
+                            + f"┗ Thesis: QQQ correction to drive PUT into profit. Next alert: {LEAP_ROLL_DTE} DTE or profit target.",
+                            color_val
+                        )
                     pos["last_monthly_check"] = today_str
 
                 if pnl_proxy <= LEAP_CUT_THRESHOLD and f"REASSESS_{today_str}" not in last_alert:
@@ -2428,6 +2542,7 @@ class TQQQTacticalSniper:
         put_setup = self.evaluate_leap_put_entry(daily, intraday, vix_price, vix_z, breadth, cycle)
         if put_setup:
             put_setup = self.enrich_leap_put_with_tradier_chain(put_setup)
+            put_setup = self.enrich_leap_put_with_greeks(put_setup, self.fetch_daily_baseline_qqq_series())
             self.dispatch_leap_put_signal(put_setup)
             try:
                 db.log_prediction(
@@ -2440,6 +2555,81 @@ class TQQQTacticalSniper:
                 )
             except Exception:
                 pass
+
+        # ── Strategy journal — log every cycle evaluation (one per day) + signal fires
+        try:
+            _sigs     = cycle.get("signals", {}) if cycle else {}
+            _bottom   = cycle.get("bottom_score", 0)
+            _top      = cycle.get("top_score",    0)
+            _gate     = _sigs.get("distribution_gate_applied", False)
+            _gate_rsn = _sigs.get("distribution_gate_reason", "")
+
+            _confluences = {
+                "bottom_score":      _bottom,
+                "top_score":         _top,
+                "threshold":         CYCLE_BOTTOM_THRESHOLD,
+                "vixy_z":            round(vix_z, 3),
+                "rsi14":             round(_sigs.get("rsi14", 50.0), 1),
+                "breadth_pct":       round((breadth * 100 if breadth and breadth <= 1 else (breadth or 0)), 1),
+                "drawdown_52w_pct":  round(_sigs.get("drawdown_from_high_pct", 0.0), 2),
+                "spy_pc_z":          round(_sigs.get("put_call_ratio_z", 0.0), 3),
+                "vix_term_slope":    round(_sigs.get("vix_term_slope", 0.0), 3),
+                "cnn_fg":            _sigs.get("fear_greed", 50),
+                "above_sma200":      _sigs.get("above_sma200", None),
+                "macd_bullish":      not _sigs.get("macd_bear", True),
+                "distribution_gate": _gate,
+                "gate_reason":       _gate_rsn,
+                "actual_vix":        _sigs.get("real_vix"),
+                "seasonal_scalar":   _sigs.get("seasonal_scalar", 0.0),
+            }
+            _gap      = CYCLE_BOTTOM_THRESHOLD - _bottom
+            _call_event = "SIGNAL_FIRED" if leap_setup else "CYCLE_EVAL"
+            _call_action = "BTO_CALL" if leap_setup else ("WATCH" if _bottom >= 40 else "STAND_DOWN")
+            _thesis = (
+                f"TQQQ cycle: bottom={_bottom}/100, top={_top}/100. "
+                f"VIXY z={vix_z:+.1f}σ, RSI={_sigs.get('rsi14', 50):.0f}, "
+                f"F&G={_sigs.get('fear_greed', 'n/a')}, VIX={_sigs.get('real_vix', 'n/a')}. "
+                + (f"CALL desk FIRED." if leap_setup else f"{_gap:.0f}pts below threshold — no signal.")
+                + (f" Gate: {_gate_rsn}." if _gate else "")
+            )
+            db.log_journal_entry(
+                strategy="TQQQ_CALL",
+                event_type=_call_event,
+                ticker="TQQQ",
+                action=_call_action,
+                conviction=min(5, max(1, _bottom // 20)),
+                thesis=_thesis,
+                confluences=_confluences,
+                conflicts={"threshold_gap": _gap, "gate_applied": _gate, "gate_reason": _gate_rsn},
+                entry_price=leap_setup.get("tqqq_spot", 0.0) if leap_setup else 0.0,
+            )
+            # PUT desk — only log when top_score is notable (≥ 30) or signal fired
+            if _top >= 30 or put_setup:
+                _put_gap  = CYCLE_TOP_THRESHOLD - _top
+                _put_thesis = (
+                    f"QQQ PUT eval: top={_top}/100. "
+                    f"VIXY z={vix_z:+.1f}σ, RSI={_sigs.get('rsi14', 50):.0f}. "
+                    + (f"PUT FIRED." if put_setup else f"{_put_gap:.0f}pts below threshold.")
+                )
+                db.log_journal_entry(
+                    strategy="TQQQ_PUT",
+                    event_type="SIGNAL_FIRED" if put_setup else "CYCLE_EVAL",
+                    ticker="QQQ",
+                    action="BTO_PUT" if put_setup else ("WATCH" if _top >= 40 else "STAND_DOWN"),
+                    conviction=min(5, max(1, _top // 20)),
+                    thesis=_put_thesis,
+                    confluences={
+                        "top_score": _top, "bottom_score": _bottom,
+                        "vixy_z": round(vix_z, 3),
+                        "rsi14": round(_sigs.get("rsi14", 50.0), 1),
+                        "cnn_fg": _sigs.get("fear_greed", 50),
+                        "threshold_gap": _put_gap,
+                    },
+                    conflicts={},
+                    entry_price=put_setup.get("qqq_spot", 0.0) if put_setup else 0.0,
+                )
+        except Exception as _je:
+            logger.debug(f"Journal entry skipped (TQQQ cycle): {_je}")
 
         # Monitor any open LEAP positions (monthly check-ins, TP/stop/roll alerts).
         self.check_leap_position_status(tqqq_spot_now)
@@ -2537,6 +2727,7 @@ if __name__ == "__main__":
             put_setup = sniper.evaluate_leap_put_entry(daily, intraday, vix_price, vix_z, breadth, cycle)
             if put_setup:
                 put_setup = sniper.enrich_leap_put_with_tradier_chain(put_setup)
+                put_setup = sniper.enrich_leap_put_with_greeks(put_setup, sniper.fetch_daily_baseline_qqq_series())
                 sniper.dispatch_leap_put_signal(put_setup)
                 logger.info("LEAP PUT test dispatch complete.")
             else:

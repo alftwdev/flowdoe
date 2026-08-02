@@ -456,6 +456,12 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
             spread_str = f"{yc['spread']:+.2f}%"
             yc_label = yc.get("label", "")
             fred_macro_line += f"┣ Yield Curve (T10-T2): {spread_str} — {yc_label}\n"
+            t30 = yc.get("t30", 0.0)
+            if t30 >= 5.0:
+                t30_flag = yc.get("t30_cef_flag", "")
+                fred_macro_line += f"┣ 30-yr Treasury: {t30:.2f}% {t30_flag} — CEF premium headwind\n"
+            elif t30 > 0:
+                fred_macro_line += f"┣ 30-yr Treasury: {t30:.2f}% ✅ BENIGN\n"
         if ff:
             fred_macro_line += f"┣ Fed Funds: {ff:.2f}% [FRED]\n"
 
@@ -515,7 +521,7 @@ def _fetch_fred_board_macro() -> dict:
         return result
     try:
         result["yield_curve"] = engine.fetch_yield_curve()
-        # Write spread to DB so monitor.py can detect rapid steepening without a separate FRED call.
+        # Write spread + t30 to DB so monitor.py can detect rapid steepening and long-rate pressure.
         if result["yield_curve"]:
             today_str = datetime.now().strftime("%Y-%m-%d")
             if db.get_state("fred_yield_spread_date") != today_str:
@@ -524,6 +530,8 @@ def _fetch_fred_board_macro() -> dict:
                     db.update_state("fred_yield_spread_prev", prev_spread)
                 db.update_state("fred_yield_spread",      result["yield_curve"]["spread"])
                 db.update_state("fred_yield_spread_date", today_str)
+            # Always write full yield curve dict (includes t30) — monitor.py reads fred_yield_curve_data
+            db.update_state("fred_yield_curve_data", result["yield_curve"])
     except Exception as e:
         logger.warning(f"FRED yield curve fetch failed: {e}")
     try:

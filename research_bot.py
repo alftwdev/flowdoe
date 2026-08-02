@@ -68,8 +68,15 @@ class QueryBot(discord.Client):
         self.claude   = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
     async def setup_hook(self):
-        await self.tree.sync()
-        logger.info("Slash commands synced.")
+        guild_id = int(os.getenv("DISCORD_GUILD_ID", "0"))
+        if guild_id:
+            guild = discord.Object(id=guild_id)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            logger.info(f"Slash commands synced to guild {guild_id}.")
+        else:
+            await self.tree.sync()
+            logger.info("Slash commands synced globally (up to 1h propagation).")
 
 bot = QueryBot()
 
@@ -1126,6 +1133,104 @@ async def query_asset(interaction: discord.Interaction, ticker: str):
         await interaction.followup.send(
             "API timeout or data error — try again in a moment.", ephemeral=True
         )
+
+
+@bot.tree.command(name="journal", description="Review recent strategy journal entries. Filter by strategy or ticker.")
+@app_commands.describe(
+    strategy="CLM_CRF | WHEEL | TQQQ_CALL | TQQQ_PUT (leave blank for all)",
+    ticker="Optional ticker filter (e.g. CLM, SOFI, TQQQ)",
+    days="Days back to look (default 7)",
+)
+async def journal_entries(
+    interaction: discord.Interaction,
+    strategy: str = None,
+    ticker: str = None,
+    days: int = 7,
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    logger.info(f"/journal strategy={strategy} ticker={ticker} days={days} by {interaction.user}")
+
+    try:
+        from database import EcosystemDatabase
+        _db = EcosystemDatabase()
+
+        entries = _db.get_journal_entries(
+            strategy=strategy.upper() if strategy else None,
+            ticker=ticker.upper() if ticker else None,
+            days_back=max(1, min(days, 90)),
+            limit=20,
+        )
+
+        if not entries:
+            label = f"{strategy.upper()} " if strategy else ""
+            t_label = f"/{ticker.upper()}" if ticker else ""
+            await interaction.followup.send(
+                f"No journal entries for {label}{t_label} in the last {days} days.",
+                ephemeral=True,
+            )
+            return
+
+        # Format as compact Discord embed
+        lines = []
+        for e in entries:
+            c   = e.get("confluences", {})
+            ev  = e["event_type"]
+            sym = e.get("ticker", "?")
+            act = e.get("action", "?")
+            date_str = e["entry_date"]
+            time_str = (e.get("entry_time") or "")[:5]
+            conv_stars = "★" * e.get("conviction", 1)
+
+            # One-liner summary per entry
+            if e["strategy"] == "CLM_CRF":
+                detail = (
+                    f"Prem z={c.get('premium_z', '?'):+.2f}σ "
+                    f"RO={c.get('ro_score', '?')}/100 ({c.get('ro_tier', '?')}) "
+                    f"Δ{c.get('price_chg_pct', 0):+.1f}% "
+                    f"VIXY z={c.get('vixy_z', '?'):+.2f}σ"
+                ) if isinstance(c.get("premium_z"), (int, float)) else e.get("thesis", "")[:80]
+            elif e["strategy"].startswith("TQQQ"):
+                detail = (
+                    f"btm={c.get('bottom_score', '?')}/100 "
+                    f"top={c.get('top_score', '?')}/100 "
+                    f"RSI={c.get('rsi14', '?')} "
+                    f"F&G={c.get('cnn_fg', '?')} "
+                    f"gate={'YES' if c.get('distribution_gate') else 'no'}"
+                ) if "bottom_score" in c else e.get("thesis", "")[:80]
+            else:  # WHEEL
+                detail = (
+                    f"IVR={c.get('ivr_pct', '?')}% "
+                    f"@${c.get('strike', '?')} "
+                    f"env={c.get('iv_env', '?')}"
+                ) if "ivr_pct" in c else e.get("thesis", "")[:80]
+
+            outcome_badge = f" → {e['outcome']}" if e["outcome"] != "OPEN" else ""
+            lines.append(
+                f"`{date_str} {time_str}` **{ev}** {sym} `{act}` {conv_stars}{outcome_badge}\n"
+                f"  ↳ {detail}"
+            )
+
+        strat_label = strategy.upper() if strategy else "ALL"
+        desc = (
+            f"**STRATEGY JOURNAL** | {strat_label} | last {days}d | {len(entries)} entries\n\n"
+            + "\n".join(lines)
+        )
+
+        # Discord embed limit is 4096 chars
+        if len(desc) > 3900:
+            desc = desc[:3900] + "\n…(truncated)"
+
+        embed = discord.Embed(
+            title="📓 Strategy Journal",
+            description=desc,
+            color=0x2C3E50,
+        )
+        embed.set_footer(text="ESSENTIALS | log_journal_entry auto-writes from monitor/tqqq/scheduler")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    except Exception as e:
+        logger.error(f"/journal critical failure: {e}")
+        await interaction.followup.send("Journal query failed — try again.", ephemeral=True)
 
 
 @bot.tree.error

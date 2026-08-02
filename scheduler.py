@@ -1013,6 +1013,49 @@ def main():
                             line = f"┣ {ivr_bar} **{sym}** `${spot:.2f}` — HIGH | {iv_label}{rsi_part} | Δ0.20 {setup_tag}"
                             action_lines.append((ivr_val, line))
                             snapshot_top.append({"sym": sym, "ivr": int(ivr_val), "strike": strike})
+                            # Strategy journal — log every HIGH wheel setup
+                            try:
+                                _j_earn = play.get("days_to_earnings") or play.get("earnings_days")
+                                _j_conflicts = {}
+                                if spot > 100:
+                                    _j_conflicts["high_price_spread_required"] = True
+                                if not iv_reliable:
+                                    _j_conflicts["iv_proxy_only"] = True
+                                if _j_earn and int(_j_earn) < 45:
+                                    _j_conflicts["earnings_proximity_days"] = int(_j_earn)
+                                _j_setup_type = "SPREAD" if spot > 100 else "CSP"
+                                _j_thesis = (
+                                    f"{sym} {_j_setup_type} setup: IVR {ivr_val:.0f}%, "
+                                    f"Δ0.20 @${strike:.2f}, 30-45 DTE. "
+                                    f"IV env: {iv_env}. VIX regime: {iv_env}."
+                                )
+                                engine.db.log_journal_entry(
+                                    strategy="WHEEL",
+                                    event_type="SETUP_FOUND",
+                                    ticker=sym,
+                                    action="SELL_SPREAD" if spot > 100 else "SELL_CSP",
+                                    conviction=4,
+                                    thesis=_j_thesis,
+                                    confluences={
+                                        "symbol":       sym,
+                                        "spot":         round(spot, 2),
+                                        "strike":       round(strike, 2),
+                                        "ivr_pct":      round(ivr_val, 1),
+                                        "iv_reliable":  iv_reliable,
+                                        "iv_source":    f.get("ivr_source", "proxy"),
+                                        "iv_env":       iv_env,
+                                        "vixy_z":       round(vixy_z, 2),
+                                        "setup_type":   _j_setup_type,
+                                        "delta_target": 0.20,
+                                        "dte_range":    "30-45",
+                                        "earnings_days": _j_earn,
+                                        "rsi_label":    rsi_label,
+                                    },
+                                    conflicts=_j_conflicts,
+                                    entry_price=round(spot, 2),
+                                )
+                            except Exception:
+                                pass
                         elif meter == "HIGH":
                             high_watch.append((sym, rsi_label))
                         else:
@@ -1701,7 +1744,7 @@ def main():
                             else f"`{abs(vs_margin):.2f}%` below margin rate — cash-only deployment"
                         )
                         staking_block = (
-                            "\n\n**💎 STAKING YIELD RADAR** (live PoS rates via DeFiLlama)\n"
+                            "\n\n**STAKING YIELD RADAR** (live rates via DeFiLlama)\n"
                             + "\n".join(stk_lines)
                             + f"\n\n┗ Best rate: `{best['apy']:.2f}%` ({best['platform']}) — {margin_note}\n"
                             "Staking < margin rate (7.25%) = cash-only. Do not borrow to stake.\n"
@@ -1730,17 +1773,25 @@ def main():
                             f" — {_stk_top5[-1]['platform']} ({_stk_top5[-1]['note']})"
                         )
                         _best_stk = _stk_top5[0]
+                        # Log margin rate comparison to DB for personal reference — not broadcast
+                        engine.db.update_state("staking_vs_margin_note", {
+                            "date": datetime.now().strftime("%Y-%m-%d"),
+                            "margin_rate": _margin_rate,
+                            "best_apy": _best_stk["apy"],
+                            "vs_margin": round(_best_stk["apy"] - _margin_rate, 2),
+                            "note": "staking yields below margin rate = cash-only deployment",
+                        })
                         snip_payload = (
                             "**Passive cash alternative — beat 0% idle cash**\n"
+                            "//Staking is locking digital coins in a network to validate transactions, secure blockchains, and earn rewards.\n\n"
                             + "\n".join(snip_lines)
-                            + f"\n\n┣ vs Margin rate: `{_margin_rate:.2f}%` — staking yields below this = cash-only"
-                            "\n┗ Source: DeFiLlama live PoS rates (cached daily, no API key)"
+                            + "\n\n┗ Source: DeFiLlama live Proof of Stake (PoS) rates"
                         )
                         _stk_dedupe = f"staking_snippet_{datetime.now().strftime('%Y-%m-%d')}"
                         if not engine.db.get_state(_stk_dedupe):
                             send_essentials_embed(
                                 WEBHOOK_INCOME,
-                                "💎 STAKING YIELD RADAR | Top PoS Rates",
+                                "STAKING YIELD RADAR | Top Rates",
                                 snip_payload,
                                 0x9b59b6,
                             )

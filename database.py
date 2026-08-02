@@ -157,6 +157,42 @@ class EcosystemDatabase:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_target ON signal_ledger(target_date)")
                 conn.commit()
 
+                # Strategy journal — rich confluence log for all three strategies.
+                # One row per notable event (price drop, signal fired, setup found).
+                # Routine daily observations are deduplicated to one per ticker per day.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS strategy_journal (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        strategy TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        ticker TEXT,
+                        action TEXT,
+                        conviction INTEGER DEFAULT 1,
+                        thesis TEXT,
+                        confluences TEXT,
+                        conflicts TEXT,
+                        entry_price REAL DEFAULT 0,
+                        entry_date TEXT NOT NULL,
+                        entry_time TEXT,
+                        outcome TEXT DEFAULT 'OPEN',
+                        exit_price REAL,
+                        exit_date TEXT,
+                        pnl_pct REAL,
+                        post_mortem TEXT,
+                        signal_ledger_id INTEGER,
+                        FOREIGN KEY(signal_ledger_id) REFERENCES signal_ledger(id)
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_journal_strategy
+                    ON strategy_journal(strategy, entry_date)
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_journal_ticker
+                    ON strategy_journal(ticker, entry_date)
+                """)
+                conn.commit()
+
                 # Graceful column migrations — try each; OperationalError means already exists.
                 for col_sql in [
                     # Lot-engine (session 1)
@@ -682,6 +718,129 @@ class EcosystemDatabase:
         ivr = round(max(0.0, min(100.0, ivr)), 1)
         tag = "LOW IVR" if ivr < 35 else ("ELEVATED IVR" if ivr > 60 else "MID IVR")
         return {"ivr": ivr, "days_history": days, "reliable": days >= 30, "tag": tag, "current_iv": current}
+
+    # ── Strategy Journal — confluence log for all three core strategies ──────────
+
+    # Event types that may repeat multiple times in one day (notable events):
+    _JOURNAL_NOTABLE = {"PRICE_DROP", "RO_ELEVATED", "RO_CRITICAL", "SIGNAL_FIRED", "SETUP_FOUND", "FLOOR_BREACH"}
+
+    def log_journal_entry(self, strategy: str, event_type: str, ticker: str, action: str,
+                          conviction: int, thesis: str, confluences: dict, conflicts: dict,
+                          entry_price: float = 0.0, signal_ledger_id: int = None) -> int:
+        """
+        Write a journal entry for one of the three core strategies.
+
+        strategy:   'CLM_CRF' | 'WHEEL' | 'TQQQ_CALL' | 'TQQQ_PUT'
+        event_type: 'DAILY_OBSERVATION' | 'PRICE_DROP' | 'RO_ELEVATED' | 'RO_CRITICAL' |
+                    'CYCLE_EVAL' | 'SIGNAL_FIRED' | 'SETUP_FOUND' | 'FLOOR_BREACH'
+        action:     'HOLD' | 'ACCUMULATE' | 'DODGE' | 'BTO_CALL' | 'BTO_PUT' |
+                    'SELL_CSP' | 'SELL_SPREAD' | 'PAUSE_DRIP' | 'MONITOR' | 'WATCH' | 'STAND_DOWN'
+        conviction: 1–5 (auto-derived from score by caller)
+        confluences/conflicts: dicts serialized to JSON — all signal inputs at event time
+        Returns new row id, or 0 on dedup/error.
+        """
+        from datetime import date, datetime as _dt
+        today = date.today().isoformat()
+        now_time = _dt.now().strftime("%H:%M:%S")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Deduplicate routine daily entries — one per strategy+ticker+event_type per day.
+                # Notable events (drops, signals, setups) bypass dedup and always write.
+                if event_type not in self._JOURNAL_NOTABLE:
+                    cursor.execute(
+                        "SELECT id FROM strategy_journal "
+                        "WHERE strategy=? AND ticker=? AND event_type=? AND entry_date=?",
+                        (strategy, ticker, event_type, today)
+                    )
+                    if cursor.fetchone():
+                        return 0  # already logged today
+                cursor.execute("""
+                    INSERT INTO strategy_journal
+                        (strategy, event_type, ticker, action, conviction, thesis,
+                         confluences, conflicts, entry_price, entry_date, entry_time,
+                         signal_ledger_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    strategy, event_type, ticker, action, conviction, thesis,
+                    json.dumps(confluences), json.dumps(conflicts),
+                    entry_price, today, now_time, signal_ledger_id
+                ))
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"log_journal_entry failed ({strategy}/{ticker}): {e}")
+            return 0
+
+    def update_journal_outcome(self, entry_id: int, outcome: str, exit_price: float = None,
+                               pnl_pct: float = None, post_mortem: str = "") -> bool:
+        """
+        Fill in the outcome for a journal entry after the fact.
+        outcome: 'WIN' | 'LOSS' | 'NEUTRAL' | 'EXPIRED' | 'CANCELLED'
+        """
+        from datetime import date
+        try:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    UPDATE strategy_journal
+                    SET outcome=?, exit_price=?, exit_date=?, pnl_pct=?, post_mortem=?
+                    WHERE id=?
+                """, (outcome, exit_price, date.today().isoformat(), pnl_pct, post_mortem, entry_id))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"update_journal_outcome failed for id={entry_id}: {e}")
+            return False
+
+    def get_journal_entries(self, strategy: str = None, days_back: int = 14,
+                            event_type: str = None, ticker: str = None,
+                            outcome: str = None, limit: int = 100) -> list:
+        """
+        Query journal entries with optional filters.
+        Returns list of dicts, newest first.
+        confluences and conflicts are returned as parsed dicts (not raw JSON strings).
+        """
+        from datetime import date, timedelta
+        since = (date.today() - timedelta(days=days_back)).isoformat()
+        clauses = ["entry_date >= ?"]
+        params = [since]
+        if strategy:
+            clauses.append("strategy = ?"); params.append(strategy)
+        if event_type:
+            clauses.append("event_type = ?"); params.append(event_type)
+        if ticker:
+            clauses.append("ticker = ?"); params.append(ticker.upper())
+        if outcome:
+            clauses.append("outcome = ?"); params.append(outcome)
+        where = " AND ".join(clauses)
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(f"""
+                    SELECT id, strategy, event_type, ticker, action, conviction,
+                           thesis, confluences, conflicts, entry_price, entry_date,
+                           entry_time, outcome, exit_price, exit_date, pnl_pct, post_mortem
+                    FROM strategy_journal
+                    WHERE {where}
+                    ORDER BY entry_date DESC, id DESC
+                    LIMIT ?
+                """, params + [limit])
+                cols = ["id", "strategy", "event_type", "ticker", "action", "conviction",
+                        "thesis", "confluences", "conflicts", "entry_price", "entry_date",
+                        "entry_time", "outcome", "exit_price", "exit_date", "pnl_pct", "post_mortem"]
+                rows = []
+                for row in cursor.fetchall():
+                    d = dict(zip(cols, row))
+                    for key in ("confluences", "conflicts"):
+                        try:
+                            d[key] = json.loads(d[key]) if d[key] else {}
+                        except Exception:
+                            d[key] = {}
+                    rows.append(d)
+                return rows
+        except Exception as e:
+            logger.error(f"get_journal_entries failed: {e}")
+            return []
 
     def store_cef_premium(self, ticker: str, nav: float, price: float, premium_pct: float,
                           log_date: str = None) -> bool:

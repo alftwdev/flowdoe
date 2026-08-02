@@ -98,13 +98,15 @@ class HighFidelityAnalyticsEngine:
 
     def fetch_yield_curve(self):
         """
-        FRED DGS10 + DGS2 — 10-year and 2-year constant-maturity Treasury yields (daily, H.15).
-        Yield curve inversion (spread < 0) is the most reliable macro recession leading indicator.
-        Returns dict with t10, t2, spread, inverted, label — or None on failure.
+        FRED DGS10 + DGS2 + DGS30 — Treasury yields daily (H.15).
+        T10-T2 spread = recession leading indicator.
+        T30 absolute level = CEF premium pressure signal (income-buyer rotation risk at 5%+).
+        Returns dict with t10, t2, t30, spread, inverted, label — or None on failure.
         """
         try:
             t10 = self._fetch_fred_metric("DGS10")
             t2  = self._fetch_fred_metric("DGS2")
+            t30 = self._fetch_fred_metric("DGS30")
             if t10 == 0.0 or t2 == 0.0:
                 return None
             spread = round(t10 - t2, 3)
@@ -116,8 +118,11 @@ class HighFidelityAnalyticsEngine:
                 label = "⚪ FLAT — uncertainty zone"
             else:
                 label = "🟢 NORMAL — expansion posture"
-            return {"t10": round(t10, 3), "t2": round(t2, 3), "spread": spread,
-                    "inverted": spread < 0, "label": label}
+            # T30 CEF pressure flag: ≥5.0% = income buyer rotation risk; ≥5.5% = serious headwind
+            t30_flag = "🔴 SERIOUS" if t30 >= 5.5 else ("⚠️ ELEVATED" if t30 >= 5.0 else "✅ BENIGN")
+            return {"t10": round(t10, 3), "t2": round(t2, 3), "t30": round(t30, 3),
+                    "spread": spread, "inverted": spread < 0, "label": label,
+                    "t30_cef_flag": t30_flag}
         except Exception:
             return None
 

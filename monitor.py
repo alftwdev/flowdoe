@@ -140,6 +140,8 @@ RO_SCORE_WEIGHTS = {
     "sec_n2a":             50,   # N-2/A amendment — final RO terms/pricing
     "sec_ncsr":             8,   # N-CSR semi-annual — distribution sustainability language
     "sec_def14a":           8,   # DEF 14A proxy — board vote on distribution policy
+    "sec_n14":             20,   # N-14 merger/acquisition — fund structure at risk
+    "sec_corresp":          0,   # SEC comment letter — informational only, no score
     "13f_holder_exit":     12,   # SC 13D/G large holder change
     # Premium / spread signals
     "z_danger":            25,
@@ -157,6 +159,8 @@ RO_SCORE_WEIGHTS = {
     "ro_season":            8,
     # Cross-script signals (lightweight, cached-data reads — no new API calls)
     "yield_steepen":       5,   # T10-T2 spread steepened > 20bps in a session (rate pressure on CEF)
+    "long_rate_pressure":  8,   # 30-yr Treasury ≥ 5.0% — income buyer rotation risk, CEF premium headwind
+    "hy_rapid_widen":      8,   # HY spread widens > 40bps in 5 trading days — credit deterioration signal
     "sentiment_fear":      5,   # SentiSense market mood ≤ 25 (extreme fear = CEF premium risk)
     # Distribution reset cycle signals
     "nav_determination":  12,   # October = NAV lock month; heightened sensitivity window
@@ -169,12 +173,14 @@ RO_SCORE_WEIGHTS = {
 # EDGAR forms watched and their conviction weights.
 # Multiple forms detected simultaneously = conviction stacking.
 EDGAR_FORMS_TO_WATCH = {
-    "N-2":     "sec_n2",       # RO registration
-    "N-2/A":   "sec_n2a",      # RO amendment — final terms
+    "N-2":     "sec_n2",          # RO registration
+    "N-2/A":   "sec_n2a",         # RO amendment — final terms
     "SC 13D":  "13f_holder_exit",
     "SC 13G":  "13f_holder_exit",
-    "N-CSR":   "sec_ncsr",     # Semi-annual — distribution language
-    "DEF 14A": "sec_def14a",   # Proxy — board distribution vote
+    "N-CSR":   "sec_ncsr",        # Semi-annual — distribution language
+    "DEF 14A": "sec_def14a",      # Proxy — board distribution vote
+    "N-14":    "sec_n14",         # Merger/acquisition registration — fund structure change
+    "CORRESP": "sec_corresp",     # SEC comment letter — regulatory scrutiny on active filing
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,6 +432,14 @@ def check_sec_edgar(session, ticker):
             elif form == "DEF 14A" and "DEF 14A" not in seen_forms:
                 flags.append(f"📋 DEF 14A ({date})")
                 seen_forms.add("DEF 14A")
+            elif form == "N-14" and "N-14" not in seen_forms:
+                if age <= RO_RECENCY_DAYS:
+                    flags.append(f"🚨 N-14 MERGER/ACQUISITION REGISTRATION ({date}) — fund structure change")
+                    seen_forms.add("N-14")
+            elif form == "CORRESP" and "CORRESP" not in seen_forms:
+                if age <= RO_RECENCY_DAYS:
+                    flags.append(f"📋 CORRESP SEC COMMENT LETTER ({date}) — regulatory scrutiny on active filing")
+                    seen_forms.add("CORRESP")
 
         if not flags:
             return "No N2/RO detected"
@@ -1145,6 +1159,7 @@ def calculate_ro_risk_score(
     premium_30pct_watch=False,
     yield_steepen=False, sentiment_fear=False,
     nav_determination=False, cef_inst_exit=False, dist_overvalued=False,
+    long_rate_pressure=False, hy_rapid_widen=False,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -1157,6 +1172,8 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["sec_n2"]
     if "N-2/A" in sec_shield:
         score += RO_SCORE_WEIGHTS["sec_n2a"]
+    if "N-14 MERGER" in sec_shield:
+        score += RO_SCORE_WEIGHTS["sec_n14"]
     # N-CSR and DEF 14A are routine filings (semi-annual report, annual proxy) —
     # always present in EDGAR, they don't signal RO risk on their own.
     # Only add weight when already elevated by a real signal (N-2 or z_danger).
@@ -1190,6 +1207,10 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["premium_30pct_watch"]
     if yield_steepen:
         score += RO_SCORE_WEIGHTS["yield_steepen"]
+    if long_rate_pressure:
+        score += RO_SCORE_WEIGHTS["long_rate_pressure"]
+    if hy_rapid_widen:
+        score += RO_SCORE_WEIGHTS["hy_rapid_widen"]
     if sentiment_fear:
         score += RO_SCORE_WEIGHTS["sentiment_fear"]
     if nav_determination:
@@ -1508,6 +1529,36 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     except Exception:
         pass
 
+    # 30-year Treasury ≥ 5.0% = income buyer rotation risk (CEF premium headwind).
+    # Reads from DB key written by cross_asset.py (fetch_yield_curve now returns t30).
+    long_rate_pressure = False
+    try:
+        _yc = db.get_state("fred_yield_curve_data")
+        if isinstance(_yc, dict):
+            _t30 = float(_yc.get("t30", 0.0))
+            long_rate_pressure = _t30 >= 5.0
+            if _t30 > 0:
+                db.update_state("fred_t30_latest", round(_t30, 3))
+    except Exception:
+        pass
+
+    # HY spread rapid widening: > 40bps vs 5-day-ago cached value = credit stress building.
+    hy_rapid_widen = False
+    try:
+        _hy_prev5 = db.get_state("hy_spread_5d_ago")
+        _hy_cur   = credit_spread  # already fetched above
+        if _hy_prev5 is not None and _hy_cur > 0:
+            hy_rapid_widen = (_hy_cur - float(_hy_prev5)) > 0.40
+        # Rolling 5-day update: store today's value under a date key, rotate weekly
+        _today_key = f"hy_spread_hist_{datetime.now().strftime('%a')}"  # Mon/Tue/.../Sun
+        db.update_state(_today_key, round(_hy_cur, 3))
+        # Use Monday's stored value as the 5-day anchor (runs fresh each week)
+        _mon_val = db.get_state("hy_spread_hist_Mon")
+        if _mon_val is not None:
+            db.update_state("hy_spread_5d_ago", float(_mon_val))
+    except Exception:
+        pass
+
     # ── RO composite risk score (upgraded with new signals)
     ro_score, ro_tier = calculate_ro_risk_score(
         sec_shield, z_premium, premium, whale_status, credit_spread,
@@ -1519,6 +1570,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         nav_determination=nav_determination,
         cef_inst_exit=is_cef_inst_exit,
         dist_overvalued=is_dist_overvalued,
+        long_rate_pressure=long_rate_pressure,
+        hy_rapid_widen=hy_rapid_widen,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
@@ -1648,6 +1701,109 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
             db.store_cef_premium(ticker, nav, price, premium)
     except Exception:
         pass
+
+    # ── Strategy journal — log session observation for CLM/CRF
+    try:
+        _signals_fired = []
+        _conflicts     = []
+
+        if is_dark_pool:           _signals_fired.append("dark_pool")
+        if is_compressed:          _signals_fired.append("premium_compression")
+        if macro_underperf:        _signals_fired.append("macro_underperform")
+        if long_rate_pressure:     _signals_fired.append("long_rate_pressure")
+        if hy_rapid_widen:         _signals_fired.append("hy_rapid_widen")
+        if ro_season:              _signals_fired.append("ro_season")
+        if crisis_day:             _signals_fired.append("vixy_crisis")
+        if nav_determination:      _signals_fired.append("nav_determination_month")
+        if is_cef_inst_exit:       _signals_fired.append("cef_inst_exit")
+        if is_dist_overvalued:     _signals_fired.append("dist_overvalued")
+        if holder_exit:            _signals_fired.append("13f_holder_exit")
+
+        _fv = CLM_FAIR_VALUE if ticker == "CLM" else CRF_FAIR_VALUE
+        if price <= _fv:           _signals_fired.append("at_fair_value_floor")
+        if price <= _fv * 0.95:   _signals_fired.append("BELOW_FAIR_VALUE")
+
+        if ex_div_near:
+            _conflicts.append("ex_div_scheduled_dip_suppressor")
+        if spy_chg < -1.0 and price_chg < spy_chg * 0.8:
+            _conflicts.append("broad_market_selling_present")
+        if z_premium < -1.0:
+            _conflicts.append("premium_below_avg_z_negative")
+
+        # Classify the session move
+        _macro_class = (
+            "CEF_SPECIFIC" if price_chg <= -1.5 and abs(spy_chg) < 0.8 else
+            "MACRO"        if spy_chg < -1.0 and price_chg < -1.0 else
+            "STABLE"
+        )
+
+        # Map status → action label
+        _action_map = {
+            "🚨 CRITICAL: N-2 DETECTED":         "DODGE",
+            "🚨 CRITICAL: RO RISK ELEVATED":      "WATCH_EDGAR",
+            "⚠️ WARNING: DARK POOL ACTIVITY":     "MONITOR",
+            "⚠️ WARNING: PREMIUM COMPRESSION":    "PAUSE_DRIP",
+            "⚠️ HIGH PREMIUM":                    "PAUSE_NEW_BUYS",
+            "⚠️ RISK ELEVATED":                   "REDUCE_SIZE",
+            "✅ STABLE":                           "ACCUMULATE" if z_premium <= 0.5 else "HOLD",
+        }
+        _status_clean = status.split(" ⚠️")[0]  # strip stale-price suffix
+        _action = _action_map.get(_status_clean, "HOLD")
+
+        # Conviction: score-based for notable events, otherwise low baseline
+        _conviction = min(5, max(1, ro_score // 20)) if ro_score >= 20 else (
+                      4 if price_chg <= -3.0 else (2 if price_chg <= -1.5 else 1))
+
+        _thesis = (
+            f"{ticker} {price_chg:+.1f}% — classified {_macro_class} (SPY {spy_chg:+.1f}%). "
+            f"RO: {ro_score}/100 ({ro_tier}). Premium z={z_premium:+.2f}σ ({premium:.1f}%). "
+            f"Action: {_action}."
+        )
+
+        _confluences = {
+            "price":           round(price,      4),
+            "nav":             round(nav,         4),
+            "premium_pct":     round(premium,     2),
+            "premium_z":       round(z_premium,   3),
+            "price_chg_pct":   round(price_chg,   2),
+            "spy_chg_pct":     round(spy_chg,     2),
+            "rsi":             round(rsi,          1),
+            "vixy_z":          round(vixy_z,      3),
+            "hy_spread":       round(credit_spread, 3),
+            "t30":             round(db.get_state("fred_t30_latest") or 0.0, 3),
+            "ro_score":        ro_score,
+            "ro_tier":         ro_tier,
+            "signals_fired":   _signals_fired,
+            "macro_classified":_macro_class,
+            "fair_value":      _fv,
+            "status":          _status_clean,
+        }
+
+        # Determine event_type — PRICE_DROP and RO flags bypass daily dedup
+        if "N-2" in sec_shield or ro_tier == "CRITICAL":
+            _event = "RO_CRITICAL"
+        elif ro_tier == "ELEVATED":
+            _event = "RO_ELEVATED"
+        elif price_chg <= -1.5 and _macro_class == "CEF_SPECIFIC":
+            _event = "PRICE_DROP"
+        elif price <= _fv * 0.95:
+            _event = "FLOOR_BREACH"
+        else:
+            _event = "DAILY_OBSERVATION"
+
+        db.log_journal_entry(
+            strategy="CLM_CRF",
+            event_type=_event,
+            ticker=ticker,
+            action=_action,
+            conviction=_conviction,
+            thesis=_thesis,
+            confluences=_confluences,
+            conflicts={"items": _conflicts},
+            entry_price=price,
+        )
+    except Exception as _je:
+        logger.debug(f"Journal entry skipped for {ticker}: {_je}")
 
     return report_text, ro_tier, ro_score
 
@@ -1815,9 +1971,13 @@ def compute_cornerstone_reports():
             _acc_detail = db.get_state(f"{ticker}_acc_detail") or ""
             if _acc_status:
                 _acc_icon = "✅" if "OPEN" in _acc_status else ("⚠️" if "CAUTION" in _acc_status else "🔴")
-                text = text.rstrip("\n") + f"\n┣ Acc. Gate: {_acc_icon} {_acc_status}\n"
                 if _acc_detail and "OPEN" not in _acc_status:
-                    text = text.rstrip("\n") + f"\n┣   {_acc_detail[:120]}\n"
+                    # Two-line block: Acc. Gate is the penultimate, detail line is the last leg
+                    text = text.rstrip("\n") + f"\n┣ Acc. Gate: {_acc_icon} {_acc_status}\n"
+                    text = text.rstrip("\n") + f"\n┗   {_acc_detail[:120]}\n"
+                else:
+                    # Single-line block: Acc. Gate IS the last leg
+                    text = text.rstrip("\n") + f"\n┗ Acc. Gate: {_acc_icon} {_acc_status}\n"
             reports.append(text)
             if TIER_RANK.get(tier, 0) > TIER_RANK.get(worst_tier, 0):
                 worst_tier = tier
@@ -1845,13 +2005,9 @@ def compute_cornerstone_reports():
     except Exception:
         _est_margin = margin_rate
     carry_spread = round(_TIER2_BLENDED - _est_margin, 2)
-    spread_icon = "✅" if carry_spread >= 5.0 else ("⚠️" if carry_spread >= 2.0 else "🚨")
-    full_report += (
-        f"\n\n{spread_icon} **Margin Carry:** Tier 2 `{_TIER2_BLENDED:.1f}%` − margin `{_est_margin:.2f}%`"
-        f" = `{carry_spread:+.1f}%` spread"
-        + (" — COMPRESSING, monitor rate" if carry_spread < 5.0 else "")
-    )
-    # Persist for cross-script reads (market_analysis, personal scorecard)
+    # Persist for cross-script reads (market_analysis, personal scorecard, Pushover breach alert).
+    # NOT appended to full_report — carry spread is a ledger/log signal, not a Discord line item.
+    # Breach alert (< 5%) fires via send_daily_pulse() Pushover path below.
     try:
         db.update_state("carry_spread_data", {
             "date": __import__("datetime").date.today().isoformat(),
