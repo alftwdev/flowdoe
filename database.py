@@ -721,8 +721,9 @@ class EcosystemDatabase:
 
     # ── Strategy Journal — confluence log for all three core strategies ──────────
 
-    # Event types that may repeat multiple times in one day (notable events):
-    _JOURNAL_NOTABLE = {"PRICE_DROP", "RO_ELEVATED", "RO_CRITICAL", "SIGNAL_FIRED", "SETUP_FOUND", "FLOOR_BREACH"}
+    # Event types that may repeat multiple times in one day (bypass daily dedup).
+    # FLOOR_BREACH and DAILY_OBSERVATION are NOT here — daily dedup prevents loop-tick spam.
+    _JOURNAL_NOTABLE = {"PRICE_DROP", "RO_ELEVATED", "RO_CRITICAL", "SIGNAL_FIRED", "SETUP_FOUND"}
 
     def log_journal_entry(self, strategy: str, event_type: str, ticker: str, action: str,
                           conviction: int, thesis: str, confluences: dict, conflicts: dict,

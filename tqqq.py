@@ -1481,6 +1481,7 @@ class TQQQTacticalSniper:
 
         top_score = min(t, 100)
 
+        _seasonal_scalar, _ = get_leap_seasonal_params()
         signals = {
             "rsi14": rsi, "fear_greed": fg,
             "put_call_ratio": pc_ratio, "put_call_ratio_z": pc_z,
@@ -1492,6 +1493,14 @@ class TQQQTacticalSniper:
             "real_vix": ext.get("real_vix"),  # FRED VIXCLS — None if unavailable
             "insider_buys": _insider_buys if "_insider_buys" in dir() else None,
             "insider_sells": _insider_sells if "_insider_sells" in dir() else None,
+            # Journal-facing fields — computed above, surfaced so journal log can read them
+            "macd_hist": macd_hist,
+            "above_sma200": pct_vs_sma200 >= 0,
+            "distribution_gate_applied": is_distribution,
+            "distribution_gate_reason": (
+                "VIXY_z<0 + bearish_MACD + below_EMA21" if is_distribution else ""
+            ),
+            "seasonal_scalar": _seasonal_scalar,
         }
         # Persist scores to DB for cross-script reads (market_analysis.py morning brief)
         db.update_state("tqqq_bottom_score", bottom_score)
@@ -2576,7 +2585,7 @@ class TQQQTacticalSniper:
                 "vix_term_slope":    round(_sigs.get("vix_term_slope", 0.0), 3),
                 "cnn_fg":            _sigs.get("fear_greed", 50),
                 "above_sma200":      _sigs.get("above_sma200", None),
-                "macd_bullish":      not _sigs.get("macd_bear", True),
+                "macd_bullish":      _sigs.get("macd_hist", 0.0) > 0,
                 "distribution_gate": _gate,
                 "gate_reason":       _gate_rsn,
                 "actual_vix":        _sigs.get("real_vix"),

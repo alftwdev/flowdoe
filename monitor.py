@@ -1719,7 +1719,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         if is_dist_overvalued:     _signals_fired.append("dist_overvalued")
         if holder_exit:            _signals_fired.append("13f_holder_exit")
 
-        _fv = CLM_FAIR_VALUE if ticker == "CLM" else CRF_FAIR_VALUE
+        # dist_fair_value already computed above via check_distribution_yield_floor()
+        _fv = dist_fair_value if dist_fair_value > 0 else (7.51 if ticker == "CLM" else 7.28)
         if price <= _fv:           _signals_fired.append("at_fair_value_floor")
         if price <= _fv * 0.95:   _signals_fired.append("BELOW_FAIR_VALUE")
 
@@ -1780,6 +1781,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         }
 
         # Determine event_type — PRICE_DROP and RO flags bypass daily dedup
+        # FLOOR_BREACH is deduplicated (daily) even though it's significant — prevents
+        # hundreds of entries per day while price holds below the floor during the loop.
         if "N-2" in sec_shield or ro_tier == "CRITICAL":
             _event = "RO_CRITICAL"
         elif ro_tier == "ELEVATED":
@@ -1787,7 +1790,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         elif price_chg <= -1.5 and _macro_class == "CEF_SPECIFIC":
             _event = "PRICE_DROP"
         elif price <= _fv * 0.95:
-            _event = "FLOOR_BREACH"
+            _event = "FLOOR_BREACH"   # daily-deduplicated — see _JOURNAL_NOTABLE in database.py
         else:
             _event = "DAILY_OBSERVATION"
 

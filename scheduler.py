@@ -1027,7 +1027,7 @@ def main():
                                 _j_thesis = (
                                     f"{sym} {_j_setup_type} setup: IVR {ivr_val:.0f}%, "
                                     f"Δ0.20 @${strike:.2f}, 30-45 DTE. "
-                                    f"IV env: {iv_env}. VIX regime: {iv_env}."
+                                    f"IV env: {iv_env}. VIXY z={vixy_z:+.2f}σ."
                                 )
                                 engine.db.log_journal_entry(
                                     strategy="WHEEL",
