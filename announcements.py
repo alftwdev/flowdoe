@@ -224,9 +224,24 @@ def build_scorecard_embed(db, week_label: str = None):
     table_header = f"`{'Signal':<18}` | `{'Predicted':<12}` | `{'Actual':<18}` | Score"
     table_sep    = "─" * 60
 
+    # System Heat block — Winner Effect: shows signal accuracy to drive subscription conversion.
+    # Reads last 5 resolved journal entries per strategy. Safe for public Discord (no $ amounts).
+    _heat_parts = []
+    for _strat, _label in [("CLM_CRF", "CLM/CRF signals"), ("TQQQ", "TQQQ LEAP signals"), ("WHEEL", "Wheel setups")]:
+        _h = db.get_system_heat(_strat, last_n=5)
+        if _h["win_rate"] is None:
+            _heat_parts.append(f"┣ {_label}: building data")
+        else:
+            _streak = " 🔥 on streak" if _h["on_streak"] else ""
+            _heat_parts.append(f"┣ {_label}: {_h['wins']}/{_h['total']} ({_h['win_rate']:.0%}) {_h['heat']}{_streak}")
+    if _heat_parts:
+        _heat_parts[-1] = _heat_parts[-1].replace("┣", "┗", 1)
+    _heat_block = "\n🔥 **SYSTEM HEAT (last 5 resolved signals)**\n" + "\n".join(_heat_parts) + "\n"
+
     # Locked content tease — the hook that drives conversion
     locked_tease = (
-        "\n🔒 **Subscribers this week received:**\n"
+        _heat_block
+        + "\n🔒 **Subscribers this week received:**\n"
         "┣ Full morning conviction brief (8-flag bias)\n"
         "┣ TQQQ LEAP desk cycle score + entry alerts\n"
         "┣ Wheel strike targets + Kelly-sized positions\n"

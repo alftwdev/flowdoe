@@ -843,6 +843,40 @@ class EcosystemDatabase:
             logger.error(f"get_journal_entries failed: {e}")
             return []
 
+    def get_system_heat(self, strategy: str, last_n: int = 5) -> dict:
+        """
+        Win rate for the last N resolved journal entries for a strategy.
+        Used by announcements.py to show signal accuracy in #announcements (Winner Effect).
+        Returns dict: wins, total, win_rate (float or None), on_streak (bool), heat (str label).
+        """
+        _WIN_OUTCOMES = {"WIN", "CLOSED", "EXPIRED"}
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT outcome, pnl_pct FROM strategy_journal
+                    WHERE strategy = ? AND outcome != 'OPEN'
+                    ORDER BY entry_date DESC, id DESC
+                    LIMIT ?
+                """, (strategy, last_n))
+                rows = cursor.fetchall()
+                if not rows:
+                    return {"wins": 0, "total": 0, "win_rate": None, "on_streak": False, "heat": "building"}
+                wins = sum(
+                    1 for outcome, pnl in rows
+                    if outcome in _WIN_OUTCOMES or (pnl is not None and float(pnl) > 0)
+                )
+                total = len(rows)
+                rate = wins / total
+                heat = "🔥 hot" if rate >= 0.75 else ("🟡 warm" if rate >= 0.50 else "🔴 cold")
+                return {
+                    "wins": wins, "total": total, "win_rate": rate,
+                    "on_streak": wins == total and total >= 3,
+                    "heat": heat,
+                }
+        except Exception:
+            return {"wins": 0, "total": 0, "win_rate": None, "on_streak": False, "heat": "building"}
+
     def store_cef_premium(self, ticker: str, nav: float, price: float, premium_pct: float,
                           log_date: str = None) -> bool:
         """

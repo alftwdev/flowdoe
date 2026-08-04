@@ -2197,7 +2197,43 @@ def main():
                 except Exception:
                     pass
 
-                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}{put_cadence_note}"
+                # ── 12 Week Year — Quarterly Milestone ────────────────────────
+                # Treat every 12 weeks as a "year" to create urgency (McMillan / 12-Week-Year method).
+                # Tracks snowball pace: Did CLM/CRF share count grow? Is carry healthy? On pace?
+                _milestone_block = ""
+                try:
+                    from datetime import date as _d12, timedelta as _td12
+                    _start_raw = engine.db.get_state("scorecard_start_date")
+                    if not _start_raw:
+                        engine.db.update_state("scorecard_start_date", today_s)
+                        _start_raw = today_s
+                    _start_dt     = _d12.fromisoformat(_start_raw)
+                    _elapsed_days = (_d12.today() - _start_dt).days
+                    _week_num     = max(1, _elapsed_days // 7)
+                    _quarter_week = _week_num % 12        # 0 = quarter boundary
+                    _quarter_num  = (_week_num // 12) + 1
+                    _weeks_left   = 12 - _quarter_week if _quarter_week > 0 else 0
+
+                    if _quarter_week == 0 and _elapsed_days >= 84:
+                        # Quarter boundary — milestone check fires
+                        _milestone_block = (
+                            f"\n\n🎯 QUARTER {_quarter_num} COMPLETE — 12-Week Milestone\n"
+                            f"  Weeks elapsed: {_week_num} total since {_start_raw}\n"
+                            f"  Review: Did CLM/CRF share count grow? Carry spread ≥ 5%?\n"
+                            f"  Wheel win rate improving? LEAP signals calibrated?\n"
+                            f"  Set a Q{_quarter_num + 1} target before next Sunday."
+                        )
+                    else:
+                        _qw_display = _quarter_week if _quarter_week > 0 else 12
+                        _milestone_block = (
+                            f"\n\n📅 12-WEEK YEAR — Q{_quarter_num}, Week {_qw_display}/12\n"
+                            f"  {_weeks_left if _weeks_left > 0 else 0} weeks left in quarter | "
+                            f"System running {_week_num} weeks since {_start_raw}"
+                        )
+                except Exception:
+                    pass
+
+                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}{put_cadence_note}{_milestone_block}"
 
                 _p_tok = os.getenv("PUSHOVER_API_TOKEN")
                 _p_usr = os.getenv("PUSHOVER_USER_KEY")

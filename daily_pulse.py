@@ -572,6 +572,29 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
         lines.append(f"┣ Margin real cost: {bp['margin_real_cost']:+.2f}% (7.25% rate − {bp['cpi_yoy']:.1f}% CPI)")
         lines.append(f"┗ {bp['deploy_urgency']}")
 
+    # ── Section 8: Net Monthly Income (Profit First formula)
+    # Sales (distributions) − Expenses (margin interest) = Profit (net carry)
+    # Pushover only — never Discord. Uses portfolio value + DB carry data. No exact margin balance needed.
+    try:
+        from database import EcosystemDatabase as _DPDB
+        _dp_db = _DPDB()
+        _carry = _dp_db.get_state("carry_spread_data") or {}
+        _carry_spread = _carry.get("spread")
+        _margin_rate = _carry.get("margin_rate", 7.25)
+        BLENDED_YIELD = 19.0   # CLM/CRF + Tier 2 blended per CLAUDE.md
+        _monthly_dist_est = total_brokerage * (BLENDED_YIELD / 100) / 12
+        lines.append("")
+        lines.append("NET MONTHLY INCOME (Profit First)")
+        lines.append(f"┣ Est. distributions: ~${_monthly_dist_est:,.0f}/mo ({BLENDED_YIELD:.0f}% blended on ${total_brokerage:,.0f})")
+        lines.append(f"┣ Margin interest: {_margin_rate:.2f}% rate — check E*TRADE for exact balance")
+        if _carry_spread is not None:
+            _carry_icon = "✅" if _carry_spread >= 5.0 else ("⚠️" if _carry_spread >= 2.0 else "🚨")
+            lines.append(f"┗ Carry spread: {_carry_icon} {_carry_spread:+.1f}% above margin rate — distributions > interest cost")
+        else:
+            lines.append("┗ Carry spread: pending (monitor.py writes carry_spread_data daily)")
+    except Exception:
+        pass
+
     title   = f"💼 Daily Pulse — {today}"
     message = "\n".join(lines)
     return title, message, 0
