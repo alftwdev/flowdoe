@@ -1154,11 +1154,13 @@ class TQQQTacticalSniper:
             logger.warning(f"52w high/low fetch failed: {e}")
 
         try:
-            fg_res = requests.get(
+            _fg_resp = requests.get(
                 "https://production.dataviz.cnn.io/index/fearandgreed/graphdata",
                 timeout=8, headers={"User-Agent": "Mozilla/5.0"}
-            ).json()
-            fg_score = float(fg_res.get("fear_and_greed", {}).get("score", 50.0))
+            )
+            if _fg_resp.status_code != 200 or not _fg_resp.text.strip():
+                raise ValueError(f"HTTP {_fg_resp.status_code} or empty body")
+            fg_score = float(_fg_resp.json().get("fear_and_greed", {}).get("score", 50.0))
             result["fear_greed"] = fg_score
             db.update_state("fg_last_known_score", fg_score)  # persist for fallback
         except Exception as e:

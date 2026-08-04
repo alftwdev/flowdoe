@@ -433,11 +433,11 @@ def check_sec_edgar(session, ticker):
                 flags.append(f"📋 DEF 14A ({date})")
                 seen_forms.add("DEF 14A")
             elif form == "N-14" and "N-14" not in seen_forms:
-                if age <= RO_RECENCY_DAYS:
+                if age <= N2_RECENCY_DAYS:       # same 90-day window as N-2 registrations
                     flags.append(f"🚨 N-14 MERGER/ACQUISITION REGISTRATION ({date}) — fund structure change")
                     seen_forms.add("N-14")
             elif form == "CORRESP" and "CORRESP" not in seen_forms:
-                if age <= RO_RECENCY_DAYS:
+                if age <= HOLDER_RECENCY_DAYS:   # 180-day window — SEC review cycles run long
                     flags.append(f"📋 CORRESP SEC COMMENT LETTER ({date}) — regulatory scrutiny on active filing")
                     seen_forms.add("CORRESP")
 
