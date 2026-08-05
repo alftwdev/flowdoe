@@ -1090,9 +1090,9 @@ def main():
                     payload_parts.append("\n**HIGH SOCIAL — IV unconfirmed** (check Tradier chain manually)\n" + "\n".join(hw_lines))
 
                 if watch_syms:
-                    payload_parts.append(f"\n**ON WATCH** ({len(watch_syms)} names)\n┗ " + " · ".join(watch_syms[:6]))
+                    payload_parts.append(f"\n**ON WATCH** ({len(watch_syms)} names)\n┗ " + " · ".join(watch_syms))
 
-                payload_parts.append(f"\n\n┗ {directive} Stocks >$100 → spread shown.")
+                payload_parts.append(f"\n┗ {directive} Stocks >$100 → spread shown.")
                 candidates_payload = "\n".join(payload_parts)
 
                 if not (action_lines or high_watch or watch_syms):
@@ -1129,8 +1129,6 @@ def main():
                             f"┣ Win rate: `{_kelly['win_rate']:.0%}` | VIX scalar: `{_kelly['vix_scalar']:.2f}×`\n"
                             f"┗ Max per position: `${_kelly['position_dollars']:,.0f}` ({_kelly['position_pct']:.1f}% of `${_port_val:,.0f}` portfolio)"
                         )
-                    elif _port_val == 0:
-                        kelly_footer = "\n\n📐 Set `PORTFOLIO_VALUE_APPROX` in .env for Kelly sizing guidance."
                 except Exception as _ke:
                     logger.debug(f"Kelly sizing footer failed: {_ke}")
 

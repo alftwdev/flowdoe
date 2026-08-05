@@ -2050,6 +2050,63 @@ def compute_cornerstone_reports():
             pass
         full_report += f"\n\n{_box_lines.rstrip()}"
 
+    # ── Cross-Signal Confluence block (DB-only, zero API calls) ───────────────
+    # Surfaces market_analysis_bias, TQQQ cycle scores, VIX term structure,
+    # intraday ORB bias, and HY spread as routine context lines — not just alerts.
+    # This gives the cornerstone operator regime context alongside the CLM/CRF readings.
+    try:
+        _xlines = []
+
+        # Market Analysis bias (market_analysis.py writes this at 0800/1020/1340 HST)
+        _ma_bias = db.get_state("market_analysis_bias") or ""
+        if _ma_bias:
+            _bias_icon = "📈" if "BULL" in _ma_bias.upper() else ("📉" if "BEAR" in _ma_bias.upper() else "➖")
+            _xlines.append(f"┣ Market Bias: {_bias_icon} `{_ma_bias}` (market_analysis.py)")
+
+        # TQQQ cycle scores (tqqq.py writes bottom_score / top_score after each eval)
+        _bot = db.get_state("tqqq_bottom_score")
+        _top = db.get_state("tqqq_top_score")
+        if _bot is not None or _top is not None:
+            _bot_v = int(_bot) if _bot is not None else "—"
+            _top_v = int(_top) if _top is not None else "—"
+            _call_gate = "🟢 CALL gate open" if (_bot is not None and int(_bot) >= 55) else "⬜ no entry"
+            _put_gate  = "🔴 PUT gate open"  if (_top is not None and int(_top) >= 55) else "⬜ no entry"
+            _xlines.append(f"┣ TQQQ Cycle: Bottom `{_bot_v}/100` ({_call_gate}) | Top `{_top_v}/100` ({_put_gate})")
+
+        # VIX term structure (tqqq.py writes vix_term_slope = VIXY/VXZ ratio)
+        _vts = db.get_state("vix_term_slope")
+        if _vts is not None:
+            try:
+                _vts_f = float(_vts)
+                _vts_lbl = "⚠️ backwardation (vol stress)" if _vts_f > 1.05 else ("✅ contango (calm)" if _vts_f < 0.97 else "neutral")
+                _xlines.append(f"┣ VIX Term: `{_vts_f:.3f}` — {_vts_lbl}")
+            except (TypeError, ValueError):
+                pass
+
+        # Intraday ORB bias (scheduler.py writes orb_intraday_bias_{date})
+        _today_key = f"orb_intraday_bias_{__import__('datetime').date.today().isoformat()}"
+        _orb = db.get_state(_today_key) or ""
+        if _orb:
+            _orb_icon = "📈" if "BULL" in _orb.upper() else ("📉" if "BEAR" in _orb.upper() else "➖")
+            _xlines.append(f"┣ ORB Bias: {_orb_icon} `{_orb}` (intraday)")
+
+        # HY Credit Spread — routine line item (not only when breached)
+        _hy = fetch_hy_spread_live()
+        _hy_icon = "🚨" if _hy > 4.5 else ("⚠️" if _hy > 3.8 else "✅")
+        _xlines.append(f"┣ HY Spread: {_hy_icon} `{_hy:.2f}%` (FRED live — threshold 4.5%)")
+
+        # Carry spread summary (already written to DB above — surface for quick check)
+        _cs_icon = "✅" if carry_spread >= 5.0 else ("⚠️" if carry_spread >= 2.0 else "🚨")
+        _xlines.append(f"┗ Carry Spread: {_cs_icon} `{carry_spread:+.1f}%` (Tier 2 yield − margin rate)")
+
+        if _xlines:
+            # Ensure last line has the closing leg marker
+            if not _xlines[-1].startswith("┗"):
+                _xlines[-1] = _xlines[-1].replace("┣", "┗", 1)
+            full_report += "\n\n**📡 Cross-Signal Confluence**\n" + "\n".join(_xlines)
+    except Exception as _xe:
+        logger.warning(f"Cross-signal confluence block failed: {_xe}")
+
     return full_report, worst_tier, carry_spread
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2192,8 +2249,8 @@ def send_daily_pulse(is_test=False):
     # SPY GEX macro context — fires as its own bite-size embed BEFORE the CLM/CRF flowstate.
     # Kept separate so the main flowstate stays clean and readable on mobile.
     # Discord-only (no Pushover/email) — it's context, not an alert.
-    # Note: calculate_gex_profile() returns UNKNOWN at current Twelve Data tier (no real OI data).
-    # This block only activates once Tradier OI is wired — safe to leave in place.
+    # Note: calculate_gex_profile() fires when Tradier OI is available (state != "UNKNOWN").
+    # Confirmed active as of Jul 2026 — Tradier chain is providing real OI data.
     try:
         from analytics import HighFidelityAnalyticsEngine
         gex = HighFidelityAnalyticsEngine().calculate_gex_profile("SPY")
