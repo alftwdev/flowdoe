@@ -2917,7 +2917,7 @@ class HighFidelityAnalyticsEngine:
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**#market-analysis**  SPY Predicted `${predicted:,.2f}` → Actual `${actual:,.2f}` "
             f"| Direction: {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
-            f"┣ Model Score: `{accuracy_score}%` today | `{trend['avg_7d']}%` 7D | `{trend['avg_30d']}%` 30D "
+            f"┣ Price Proximity: `{accuracy_score}%` | Direction Accuracy: `{trend['avg_7d']}%` 7D | `{trend['avg_30d']}%` 30D "
             f"over `{trend['sample_size']}` sessions\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**Channel Accuracy Breakdown**\n"

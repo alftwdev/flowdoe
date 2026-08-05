@@ -40,7 +40,19 @@ ATR_NORMAL = 0.018
 BREADTH_COLLAPSE = 0.35    # % of top-10 QQQ holdings above their own 200D SMA
 BREADTH_STRONG = 0.70
 VIX_CRISIS_Z = 1.5         # VIXY z-score vs its own 20D mean — see fetch_vix() note on why
-RISK_FREE_RATE = 0.045
+def _get_risk_free_rate() -> float:
+    """Read live FEDFUNDS from DB (written daily by analytics.py FRED fetch). Fallback 0.0525."""
+    try:
+        from database import EcosystemDatabase as _RFRDB
+        _snap = _RFRDB().get_state("fred_macro_snapshot") or {}
+        _ff = float(_snap.get("fedfunds") or 0)
+        if 1.0 <= _ff <= 12.0:
+            return round(_ff / 100.0, 4)
+    except Exception:
+        pass
+    return 0.0525  # Fed Funds ~5.25% as of Aug 2026
+
+RISK_FREE_RATE = _get_risk_free_rate()
 LIVE_SIGNAL_COOLDOWN_DAYS = 5  # retained for reference, no longer used as a gate — see execute_sniper_sweep
 
 # =========================================================================
