@@ -2910,7 +2910,7 @@ class HighFidelityAnalyticsEngine:
         if snap.get("crypto_mover"):
             sym, _, _, pct = snap["crypto_mover"]
             crypto_mover = f" | Mover: {sym} `{pct:+.2f}%`"
-        crypto_line = f"┣ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
+        crypto_line = f"┗ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
 
         payload = (
             f"📣 **DAILY ACCURACY INDEX**\n"
@@ -2926,8 +2926,7 @@ class HighFidelityAnalyticsEngine:
             f"{options_line}"
             f"{income_line}"
             f"{crypto_line}"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"┗ ESSENTIALS — Not financial advice · Recap overview. Subscribe for live flow state."
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         return payload
 
