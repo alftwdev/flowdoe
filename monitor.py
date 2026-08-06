@@ -2057,11 +2057,14 @@ def compute_cornerstone_reports():
     try:
         _xlines = []
 
-        # Market Analysis bias (market_analysis.py writes this at 0800/1020/1340 HST)
-        _ma_bias = db.get_state("market_analysis_bias") or ""
-        if _ma_bias:
-            _bias_icon = "📈" if "BULL" in _ma_bias.upper() else ("📉" if "BEAR" in _ma_bias.upper() else "➖")
-            _xlines.append(f"┣ Market Bias: {_bias_icon} `{_ma_bias}` (market_analysis.py)")
+        # Market Analysis bias (market_analysis.py writes a dict: {label, score, date})
+        _ma_raw = db.get_state("market_analysis_bias") or {}
+        _ma_label = (_ma_raw.get("label") or "") if isinstance(_ma_raw, dict) else str(_ma_raw)
+        if _ma_label:
+            _ma_score = _ma_raw.get("score", "") if isinstance(_ma_raw, dict) else ""
+            _bias_icon = "📈" if "BULL" in _ma_label.upper() else ("📉" if "BEAR" in _ma_label.upper() else "➖")
+            _score_str = f" ({_ma_score:+d})" if isinstance(_ma_score, int) else ""
+            _xlines.append(f"┣ Market Bias: {_bias_icon} `{_ma_label}`{_score_str} (market_analysis.py)")
 
         # TQQQ cycle scores (tqqq.py writes bottom_score / top_score after each eval)
         _bot = db.get_state("tqqq_bottom_score")
@@ -2078,7 +2081,7 @@ def compute_cornerstone_reports():
         if _vts is not None:
             try:
                 _vts_f = float(_vts)
-                _vts_lbl = "⚠️ backwardation (vol stress)" if _vts_f > 1.05 else ("✅ contango (calm)" if _vts_f < 0.97 else "neutral")
+                _vts_lbl = "⚠️ backwardation (vol stress)" if _vts_f >= 3.0 else ("✅ contango (calm)" if _vts_f <= -0.5 else "➖ neutral")
                 _xlines.append(f"┣ VIX Term: `{_vts_f:.3f}` — {_vts_lbl}")
             except (TypeError, ValueError):
                 pass
