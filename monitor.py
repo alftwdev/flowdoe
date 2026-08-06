@@ -1222,7 +1222,8 @@ def check_accumulation_readiness(session, ticker: str, vixy_z: float,
                 "ready":       False,
                 "status":      "WAIT — Elevated Premium (>15% to NAV)",
                 "detail":      (
-                    f"Premium: {premium:.1f}% to NAV — target entry below 15% (ex-div dip or post-RO)."
+                    f"Premium {premium:.1f}% to NAV — need < 15.0% ({premium - 15.0:.1f}pts to threshold). "
+                    f"Target entry: ex-div dip or post-RO compression."
                 ),
                 "down_streak": 0,
             }
@@ -1482,8 +1483,13 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         if dist_fair_value > 0 else ""
     )
 
+    _fv_display = dist_fair_value if dist_fair_value > 0 else (7.51 if ticker == "CLM" else 7.28)
+    _vs_fv = round((price - _fv_display) / _fv_display * 100, 1) if _fv_display > 0 else 0.0
+    _vs_fv_str = f"{_vs_fv:+.1f}% vs FV ${_fv_display:.2f}" if price > 0 else ""
+
     return (
         f"{ticker} — {status}\n"
+        f"┣ Price: `${price:.2f}`  {_vs_fv_str}\n"
         f"┣ SEC Filing: {sec['sec_line']}\n"
         f"┣ Premium to NAV: `{premium:.2f}%` {prem_tag}\n"
         f"┣ Holder (13D/G): {sec['holder_line']}\n"
@@ -1865,7 +1871,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
                 _spy_above = float(spy_vals_200[0]["close"]) > (sum(float(v["close"]) for v in spy_vals_200) / len(spy_vals_200))
             _reentry = calculate_reentry_score(
                 ticker=ticker, price=price, nav=nav, premium=premium,
-                z_premium=z_premium, rvol=rvol if rvol else 0.0,
+                z_premium=z_premium, rvol=whale_rvol if whale_rvol else 0.0,
                 vixy_z=vixy_z, credit_spread=credit_spread,
                 spy_above_sma200=_spy_above,
             )
