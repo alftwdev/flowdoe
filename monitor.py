@@ -986,6 +986,175 @@ def check_yield_floor_reentry(ticker: str, current_price: float, current_premium
         return False
 
 # ─────────────────────────────────────────────────────────────────────────────
+# POST-RO RE-ENTRY SCORER
+# Runs only when ro_dodge_active_{ticker} is set (sell-off signal already fired).
+# Counts confluence toward re-entry on a 0-100 weighted score.
+# Gate: >= 60/100 fires the re-entry alert to #cornerstone + Pushover.
+# Score is written to DB every tick so the daily pulse can show progress.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calculate_reentry_score(
+    ticker: str,
+    price: float,
+    nav: float,
+    premium: float,
+    z_premium: float,
+    rvol: float,
+    vixy_z: float,
+    credit_spread: float,
+    spy_above_sma200: bool,
+) -> dict:
+    """
+    Post-RO re-entry confluence scorer. Returns score dict with breakdown.
+    Only meaningful when ro_dodge_active_{ticker} is set in DB.
+    """
+    annual_div = 1.4268 if ticker == "CLM" else 1.3824
+    nav_fallback = 6.45 if ticker == "CLM" else 6.18
+    _nav = nav if nav > 0 else nav_fallback
+
+    fair_value = round(annual_div / 0.19, 2)   # FV at 19% yield target
+    # Re-entry zone: NAV (bottom of post-RO dip) to NAV + 1.5% (max DRIP efficiency)
+    zone_low  = round(_nav * 0.99, 2)
+    zone_high = round(_nav * 1.015, 2)
+
+    score = 0
+    breakdown = []
+
+    # Price at or below fair value floor (+30) — structural income buyer support
+    if price <= fair_value:
+        score += 30
+        breakdown.append(f"Price {price:.2f} <= FV {fair_value:.2f} (+30)")
+    else:
+        gap_pct = round((price - fair_value) / fair_value * 100, 1)
+        breakdown.append(f"Price {price:.2f} vs FV {fair_value:.2f} — {gap_pct}% above floor (0)")
+
+    # Premium < 10% — dilution fully priced in (+20)
+    if premium < 10.0:
+        score += 20
+        breakdown.append(f"Premium {premium:.1f}% < 10% (+20)")
+    elif premium < 15.0:
+        score += 8
+        breakdown.append(f"Premium {premium:.1f}% — partial compression (+8)")
+    else:
+        breakdown.append(f"Premium {premium:.1f}% — still elevated (0)")
+
+    # Premium z-score < 0 — below historical average (+15)
+    if z_premium < 0.0:
+        score += 15
+        breakdown.append(f"Z-score {z_premium:+.2f}s below avg (+15)")
+    elif z_premium < 1.0:
+        score += 5
+        breakdown.append(f"Z-score {z_premium:+.2f}s near avg (+5)")
+    else:
+        breakdown.append(f"Z-score {z_premium:+.2f}s elevated (0)")
+
+    # RVOL normalizing (<= 1.0x) — selling pressure exhausted (+15)
+    if rvol > 0:
+        if rvol <= 1.0:
+            score += 15
+            breakdown.append(f"RVOL {rvol:.2f}x — selling exhausted (+15)")
+        elif rvol <= 1.3:
+            score += 7
+            breakdown.append(f"RVOL {rvol:.2f}x — normalizing (+7)")
+        else:
+            breakdown.append(f"RVOL {rvol:.2f}x — still elevated (0)")
+
+    # 45+ days since N-2 detected — RO process likely complete (+10)
+    try:
+        _n2_date_str = db.get_state(f"cornerstone_n2_detected_{ticker}", "")
+        if _n2_date_str:
+            _n2_date = datetime.strptime(_n2_date_str, "%Y-%m-%d").date()
+            _age_days = (datetime.utcnow().date() - _n2_date).days
+            if _age_days >= 45:
+                score += 10
+                breakdown.append(f"{_age_days}d since N-2 — RO process complete (+10)")
+            else:
+                breakdown.append(f"{_age_days}d since N-2 — wait for 45d (+0, {45 - _age_days}d remaining)")
+        else:
+            breakdown.append("N-2 date unknown (0)")
+    except Exception:
+        _age_days = 0
+
+    # VIXY z < 1.0 — macro calm (+10)
+    if vixy_z < 1.0:
+        score += 10
+        breakdown.append(f"VIXY z {vixy_z:+.2f}s — macro calm (+10)")
+    else:
+        breakdown.append(f"VIXY z {vixy_z:+.2f}s — vol elevated (0)")
+
+    # HY spread < 4.5% — credit not stressed (+5)
+    if credit_spread < 4.5:
+        score += 5
+        breakdown.append(f"HY spread {credit_spread:.2f}% < 4.5% — credit OK (+5)")
+    else:
+        breakdown.append(f"HY spread {credit_spread:.2f}% — credit stressed (0)")
+
+    # SPY above SMA200 — macro tailwind (+5)
+    if spy_above_sma200:
+        score += 5
+        breakdown.append("SPY above SMA200 — bull regime (+5)")
+    else:
+        breakdown.append("SPY below SMA200 — bear regime (0)")
+
+    # Gate check
+    gate_met = score >= 60
+    implied_yield = round(annual_div / price * 100, 1) if price > 0 else 0.0
+
+    return {
+        "score":        score,
+        "gate_met":     gate_met,
+        "breakdown":    breakdown,
+        "fair_value":   fair_value,
+        "zone_low":     zone_low,
+        "zone_high":    zone_high,
+        "implied_yield": implied_yield,
+        "nav_used":     _nav,
+    }
+
+
+def format_reentry_block(ticker: str, r: dict) -> str:
+    """
+    Formats the post-RO re-entry tracker block for the cornerstone embed.
+    No emojis. Backtick-styled data values. Always shows even below gate.
+    """
+    score    = r["score"]
+    gate_met = r["gate_met"]
+    fv       = r["fair_value"]
+    zl       = r["zone_low"]
+    zh       = r["zone_high"]
+    iy       = r["implied_yield"]
+
+    status_line = (
+        f"RE-ENTRY SIGNAL ACTIVE — {score}/100"
+        if gate_met else
+        f"Tracking re-entry — `{score}/100` (gate: 60)"
+    )
+
+    lines = [
+        f"POST-RO RE-ENTRY TRACKER — {ticker}",
+        f"┣ {status_line}",
+        f"┣ Re-entry zone:  `${zl:.2f} – ${zh:.2f}`  (NAV to +1.5% premium — max DRIP efficiency)",
+        f"┣ Fair value floor: `${fv:.2f}`  |  Implied yield at current price: `{iy:.1f}%`",
+        "┣ Confluence breakdown:",
+    ]
+    for item in r["breakdown"]:
+        lines.append(f"┣   {item}")
+
+    if gate_met:
+        lines.append("┗ All gates met — rebuy zone confirmed. Resume DRIP at NAV after fill.")
+    else:
+        remaining = 60 - score
+        # Find top unmet condition
+        unmet = [b for b in r["breakdown"] if "(0)" in b]
+        if unmet:
+            lines.append(f"┗ {remaining}pts needed — closest: {unmet[0].split('(')[0].strip()}")
+        else:
+            lines.append(f"┗ {remaining}pts needed to unlock re-entry signal")
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NEW: MACRO CROSS-CORRELATION ENGINE
 # CLM/CRF dropping harder than SPY on the same session = CEF-specific risk.
 # CLM/CRF dropping less than SPY = macro drag only, no action needed.
@@ -1684,6 +1853,57 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     acc = check_accumulation_readiness(session, ticker, vixy_z, spy_vals_200, premium=premium)
     db.update_state(f"{ticker}_acc_status", acc["status"])
     db.update_state(f"{ticker}_acc_detail", acc["detail"])
+
+    # ── Post-RO re-entry scorer — only runs when a dodge is active for this ticker.
+    # Appends a confluence tracker block to the report and writes score to DB.
+    # Gate >= 60/100 also fires a dedicated Pushover alert (once per RO cycle).
+    _ro_dodge_active = db.get_state(f"ro_dodge_active_{ticker}", "")
+    if _ro_dodge_active:
+        try:
+            _spy_above = False
+            if spy_vals_200 and len(spy_vals_200) >= 200:
+                _spy_above = float(spy_vals_200[0]["close"]) > (sum(float(v["close"]) for v in spy_vals_200) / len(spy_vals_200))
+            _reentry = calculate_reentry_score(
+                ticker=ticker, price=price, nav=nav, premium=premium,
+                z_premium=z_premium, rvol=rvol if rvol else 0.0,
+                vixy_z=vixy_z, credit_spread=credit_spread,
+                spy_above_sma200=_spy_above,
+            )
+            # Persist score for daily pulse display and cross-script reads
+            db.update_state(f"{ticker}_reentry_score", _reentry["score"])
+            db.update_state(f"{ticker}_reentry_zone", {
+                "low": _reentry["zone_low"], "high": _reentry["zone_high"],
+                "fair_value": _reentry["fair_value"],
+            })
+            # Append tracker block to the report
+            _reentry_block = format_reentry_block(ticker, _reentry)
+            report_text = report_text.rstrip("\n") + f"\n\n{_reentry_block}\n"
+            # Fire Pushover once when gate is first met in this RO cycle
+            if _reentry["gate_met"]:
+                _gate_key = f"reentry_gate_fired_{ticker}_{datetime.now().strftime('%Y-%m')}"
+                if not db.get_state(_gate_key):
+                    db.update_state(_gate_key, True)
+                    _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                    _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                    if _p_tok and _p_usr:
+                        requests.post(
+                            "https://api.pushover.net/1/messages.json",
+                            data={
+                                "token": _p_tok, "user": _p_usr,
+                                "title": f"{ticker} — Re-entry Gate Met (60/100)",
+                                "message": (
+                                    f"Post-RO re-entry score: {_reentry['score']}/100\n"
+                                    f"Zone: ${_reentry['zone_low']:.2f}–${_reentry['zone_high']:.2f}\n"
+                                    f"FV: ${_reentry['fair_value']:.2f} | Yield: {_reentry['implied_yield']:.1f}%\n"
+                                    "All confluence conditions met — rebuy zone confirmed."
+                                ),
+                                "priority": 1,
+                            },
+                            timeout=10,
+                        )
+                        logger.info(f"[Re-entry Gate] {ticker} score {_reentry['score']}/100 — Pushover fired.")
+        except Exception as _re_err:
+            logger.warning(f"[Re-entry Scorer] {ticker}: {_re_err}")
 
     # ── Persist key metrics for cross-script reads (market_analysis.py morning brief)
     # Only write z_premium when NAV is valid — nav=0 produces a nonsense z-score
