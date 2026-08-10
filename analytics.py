@@ -886,8 +886,23 @@ class HighFidelityAnalyticsEngine:
                 hv30 = self.calculate_historical_volatility(symbol, lookback=30)
                 spot_data = self._execute_query("price", {"symbol": symbol})
                 spot = float(spot_data.get("price", 0.0)) if spot_data else 0.0
+                if spot == 0.0:
+                    continue
+
+                # RSI-14 filter: skip overbought names (RSI > 65 = assignment risk on reversal)
+                try:
+                    _rsi_data = self._execute_query("rsi", {"symbol": symbol, "interval": "1day",
+                                                             "time_period": 14, "series_type": "close"})
+                    if _rsi_data and "values" in _rsi_data and _rsi_data["values"]:
+                        _rsi14 = float(_rsi_data["values"][0].get("rsi", 50.0))
+                        if _rsi14 > 65:
+                            logger.debug(f"{symbol}: RSI {_rsi14:.1f} > 65 — overbought, skipping Tier2 IV screen")
+                            continue
+                except Exception:
+                    pass
+
                 chain = self._execute_query("options/chain", {"symbol": symbol})
-                if not chain or "data" not in chain or not chain["data"] or spot == 0.0:
+                if not chain or "data" not in chain or not chain["data"]:
                     continue
 
                 df = pd.DataFrame(chain["data"])
@@ -1035,7 +1050,7 @@ class HighFidelityAnalyticsEngine:
         "GOOY": ("YieldMax", "Weekly"),   # Alphabet (Google)
         "AMDY": ("YieldMax", "Weekly"),   # AMD
         "YMAG": ("YieldMax", "Monthly"),  # Mag 7 fund of option income ETFs
-        "YMAX": ("YieldMax", "Weekly"),   # Diversified fund of YieldMax ETFs
+        "YMAX": ("YieldMax", "Weekly"),   # Diversified fund of all YieldMax ETFs (not QQQ)
 
         # Roundhill — 0DTE/covered call income, weekly
         "XDTE": ("Roundhill", "Weekly"),  # S&P 500 0DTE
@@ -1047,6 +1062,11 @@ class HighFidelityAnalyticsEngine:
         "QQQI": ("NEOS", "Monthly"),      # Nasdaq 100
         "SPYI": ("NEOS", "Monthly"),      # S&P 500
         "BTCI": ("NEOS", "Monthly"),      # Bitcoin
+
+        # Goldman Sachs / Innovator — defined-outcome + buffer income
+        "GPIQ": ("Goldman Sachs", "Monthly"),  # S&P 500 Premium Income ETF
+        "XSPI": ("Innovator", "Monthly"),      # S&P 500 Power Buffer + Income
+        "XQQI": ("Innovator", "Monthly"),      # Nasdaq 100 Power Buffer + Income
     }
 
     def generate_new_income_etf_screener(self, min_yield_pct=10.0, min_trading_days=126, tickers=None):
@@ -3434,6 +3454,8 @@ class HighFidelityAnalyticsEngine:
         "SCHD", "DIVO", "XYLD", "QYLD", "RYLD", "SVOL", "FEPI",
         # TappAlpha / Kurv
         "TDAQ", "KQQQ",
+        # Goldman Sachs / Innovator — defined-outcome + buffer income (growing influencer coverage)
+        "GPIQ", "XSPI", "XQQI",
     }
 
     _CC_INCOME_SUBREDDITS = [
@@ -3465,23 +3487,37 @@ class HighFidelityAnalyticsEngine:
                 msgs = r.json().get("messages", [])
                 if not msgs:
                     continue
-                bulls = sum(
-                    1 for m in msgs
-                    if m.get("entities", {}).get("sentiment", {}) and
-                    m["entities"]["sentiment"].get("basic") == "Bullish"
-                )
-                bears = sum(
-                    1 for m in msgs
-                    if m.get("entities", {}).get("sentiment", {}) and
-                    m["entities"]["sentiment"].get("basic") == "Bearish"
-                )
+                from datetime import timezone as _tz
+                _now_ts = datetime.now(tz=_tz.utc).timestamp()
+                bulls, bears, recency_score = 0, 0, 0.0
+                for m in msgs:
+                    _sent = m.get("entities", {}).get("sentiment", {})
+                    if _sent:
+                        if _sent.get("basic") == "Bullish":
+                            bulls += 1
+                        elif _sent.get("basic") == "Bearish":
+                            bears += 1
+                    # Recency weight: messages within last 2h score 1.0, decay to 0.1 over 24h
+                    _created = m.get("created_at", "")
+                    if _created:
+                        try:
+                            from datetime import timezone as _tz2
+                            import email.utils as _eu
+                            _msg_ts = _eu.parsedate_to_datetime(_created).timestamp()
+                            _age_h = (_now_ts - _msg_ts) / 3600
+                            recency_score += max(0.1, 1.0 - _age_h / 24)
+                        except Exception:
+                            recency_score += 0.5
+                    else:
+                        recency_score += 0.5
                 tagged = bulls + bears
                 bull_pct = round(bulls / tagged * 100) if tagged > 0 else 0
                 results[sym] = {
-                    "msg_count": len(msgs),
-                    "bullish":   bulls,
-                    "bearish":   bears,
-                    "bull_pct":  bull_pct,
+                    "msg_count":      len(msgs),
+                    "bullish":        bulls,
+                    "bearish":        bears,
+                    "bull_pct":       bull_pct,
+                    "recency_score":  round(recency_score, 2),
                 }
             except Exception as e:
                 logger.warning(f"[CC Income Social] StockTwits stream {sym} failed: {e}")
@@ -3511,10 +3547,11 @@ class HighFidelityAnalyticsEngine:
             bears = data["bearish"]
             bull_pct = data["bull_pct"]
 
-            # Buzz score: message volume × sentiment conviction
-            # High volume + high bull% = highest score
+            # Buzz score: recency-weighted volume × sentiment conviction
+            # recency_score differentiates tickers even when all hit the 30-msg StockTwits cap
+            recency_score = data.get("recency_score", msg_count * 0.5)
             conviction = (bull_pct / 100) if bulls > bears else (-(100 - bull_pct) / 100)
-            buzz_score = round(msg_count * (1 + abs(conviction)), 1)
+            buzz_score = round(recency_score * (1 + abs(conviction)), 1)
 
             lean = (
                 "BULLISH"    if bull_pct >= 70 else

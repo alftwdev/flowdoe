@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check"])
     parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -992,15 +992,29 @@ def main():
                         strike   = round(spot * _math.exp(-0.84 * iv_dec * _math.sqrt(_T) + 0.5 * iv_dec**2 * _T))
                         est_prem = round(strike * iv_dec * _math.sqrt(_T) / _2PI_SQRT * 100)
 
-                        # Breakeven and monthly return % for context
-                        be_price     = round(strike - est_prem / 100, 2)
-                        monthly_pct  = round((est_prem / 100) / strike * 100, 1) if strike > 0 else 0.0
+                        # est_prem is the SHORT put contract value in dollars (per-share × 100).
+                        # For a naked CSP: displayed directly.
+                        # For a 5-wide spread: long leg costs ~65-70% of short leg at adjacent strike,
+                        # so net credit ≈ 30% of est_prem. Cap at spread_width × 90 ($450) to prevent
+                        # displaying an impossible credit exceeding max spread value ($500).
+                        _short_prem_per_shr = est_prem / 100  # per-share estimate
+                        _spread_width = 5.0
+                        _spread_cr_per_shr = min(_short_prem_per_shr * 0.30, _spread_width * 0.90)
+                        _spread_cr_contract = round(_spread_cr_per_shr * 100)
+
+                        # CSP breakeven: strike − short_prem_per_shr
+                        be_price     = round(strike - _short_prem_per_shr, 2)
+                        monthly_pct  = round(_short_prem_per_shr / strike * 100, 1) if strike > 0 else 0.0
+
+                        # Spread breakeven: strike − net_spread_cr_per_shr
+                        be_spread    = round(strike - _spread_cr_per_shr, 2)
+                        spread_mo_pct = round(_spread_cr_per_shr / strike * 100, 1) if strike > 0 else 0.0
 
                         # CLAUDE.md: stocks >$100 → credit spread, not naked CSP
                         if spot > 100:
                             setup_tag = (
-                                f"Spread: sell `${strike}` / buy `${strike-5}` put"
-                                f" · est `${est_prem}` cr · BE `${be_price}` · ~`{monthly_pct}%`/mo"
+                                f"Spread: sell `${strike}` / buy `${int(strike)-5}` put"
+                                f" · est `${_spread_cr_contract}` cr · BE `${be_spread}` · ~`{spread_mo_pct}%`/mo"
                             )
                         else:
                             setup_tag = (
