@@ -629,7 +629,17 @@ STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 ```
 **Premium income → margin paydown bucket**
 
-**Current data limitation:** IVR and delta are proxy-calculated (HV30-based). With Tradier ($10/mo), these become real options chain values — accurate 0.20 delta strikes, real bid/ask spread check, real OI/volume for liquidity confirmation. Build 52-week IVR by storing daily IV in DB; after 252 days it's a full historical rank. **IVR tracker is live** (`scheduler.py --mode store_daily_iv`, runs daily at 21:30 UTC) — accumulating IV data now, usable baseline in ~30 days.
+**Current data limitation:** IVR and delta are proxy-calculated (HV30-based). With Tradier ($10/mo), these become real options chain values — accurate 0.20 delta strikes, real bid/ask spread check, real OI/volume for liquidity confirmation. **IVR tracker is live** (`scheduler.py --mode store_daily_iv`, daily at 21:30 UTC) — accumulating since Jul 11 2026; usable baseline reached Aug 11 2026; full 52-week rank after 252 trading days.
+
+**Kelly position sizer** (`kelly_position_size()` in `analytics.py`) — updated Aug 2026:
+Uses 126-day VIX percentile rank (arXiv:2508.16598, peer-reviewed Aug 2025) instead of the simple `15/VIX` scalar. 126d lookback validated as optimal — shorter windows (21–63d) produce erratic sizing.
+```
+VIX > 75th pct (126d) → 35% of half-Kelly   (panic regime — drastically reduce)
+VIX > 60th pct        → 60% of half-Kelly   (elevated — moderate reduction)
+VIX < 25th pct        → 100% of half-Kelly  (historically calm — full deploy)
+Neutral               → 85% of half-Kelly
+```
+History stored in DB key `vix_126d_history` (max 252 entries). Regime is backward-looking — the rank builds accuracy over time.
 
 ### TQQQ LEAP Desk — Bidirectional (tqqq.py)
 
@@ -773,7 +783,21 @@ heavily — they set the bias, posture, and conviction level for the day.
 - EOD: recap of what fired, what to watch tomorrow, any strategy adjustments
 - Cross-signals from #cornerstone (RO alerts), #crypto (F&G extremes), #futures (bias)
 
-**Built and live:** `market_analysis.py` — 0800/10:20/13:40 HST briefs with 8-flag bias scorer. Writes `market_analysis_bias` to DB for cross-script consumption.
+**Built and live:** `market_analysis.py` — **3 messages/day** (refactored Aug 2026, down from 10). Writes `market_analysis_bias` to DB for cross-script consumption.
+```
+03:10 HST (13:10 UTC) — Morning Brief (green/yellow/red embed)
+  Sections: Overnight Market Structure (SPY POC/VAH/VAL from DB) · Macro Environment
+  (VIX, yield curve 10Y/2Y, HY spread, CPI, unemployment) · Equity Pulse (SPY/QQQ/VIXY/F&G) ·
+  Cross-Channel Signals (CLM/CRF z-score + accum status + TQQQ deck + wheel) ·
+  Market Intelligence (congressional trades, 30-day recency filter) · Today's Posture + wheel params
+
+07:00 HST (17:00 UTC) — Mid-Session Pulse (lightweight update)
+  Bias score update · SPY/QQQ · VIX · VIXY z · F&G
+
+10:20 HST (20:20 UTC) — EOD Recap (via scheduler.py --mode eod, not market_analysis.py)
+  Session close · morning call accuracy · tomorrow watch items
+```
+Bias scorer: 12+ signals (expanded from original 8). **Never add more standalone embeds to #market-analysis** — the channel ran 10 messages/day before the refactor due to scheduler.py macro dispatches and market_intraday overlapping with market_analysis.py output. Those duplicates were purged.
 
 ### #futures-trading and #crypto — Intelligence / Conviction Channels
 
@@ -894,7 +918,11 @@ RO_SCORE_WEIGHTS = {
     "ro_season": 8,            # mid-Feb to mid-Apr historical window
     "crisis_amplification": 12,# VIXY z-score ≥ 1.5σ
     # Added
-    "dark_pool": 18,           # price drop on below-avg public volume
+    "dark_pool": 18,           # TIERED (Aug 2026): 2-of-3 sessions = full +18pts;
+                               #   single session = +8pts only. Rolling 3-session window
+                               #   stored in DB as dark_pool_session_hist_{ticker}.
+                               #   Multi-session clustering validated by 17-year empirical
+                               #   study — single-session detection fires near-randomly.
     "premium_compression": 15, # fast intra-session premium collapse
     "macro_underperform": 10,  # CEF drops harder than SPY same session
     "13f_holder_exit": 12,     # SC 13D/G large holder change detected
@@ -923,17 +951,18 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 
 | File | Status | Purpose |
 |------|--------|---------|
-| `db_tools.py` | ✅ Live | Unified DB maintenance utility. Replaces audit.py + db_rescue.py + seed_cef_premiums.py. Modes: default = daily maintenance (09:39 UTC cron); `--rescue` = emergency DB recovery; `--seed-premiums` = one-time CLM/CRF z-score init. |
-| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Live HY spread via FRED (cached daily). New Jul 19: NAV determination month gate (Oct), CEF institutional exit detector (high vol + flat SPY), distribution yield floor (FV at 19% yield target). All zero extra API calls. |
+| `db_tools.py` | ✅ Live | Unified DB maintenance utility. Modes: default = daily maintenance (09:39 UTC cron) + auto-prune dated global_state keys older than 45 days; `--rescue` = emergency DB recovery; `--seed-premiums` = one-time CLM/CRF z-score init; `--purge-stale` = one-time cleanup (drops dead tables, removes orphaned keys, grades overdue PENDING signals). |
+| `monitor.py` | ✅ Live | Cornerstone CLM/CRF protection engine. Dark pool detection upgraded Aug 2026: tiered scoring (single session = +8pts; 2-of-3 session cluster = full +18pts). Rolling 3-session window in DB (`dark_pool_session_hist_{ticker}`). All other signals unchanged. |
 | `database.py` | ✅ Live | EcosystemDatabase — state management |
-| `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives |
+| `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives. Aug 2026: wheel VRP gate raised 2→5pp; Kelly sizer upgraded to 126-day VIX percentile rank (arXiv:2508.16598). |
 | `essentials_tools.py` | ✅ Live | Discord embed senders, chart generators |
-| `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 0800 HST morning brief + 10:20 HST intraday pulse + 13:40 HST EOD recap → #market-analysis. 8-flag bias scorer (BULLISH/NEUTRAL/BEARISH). Synthesizes FRED + VIXY + SPY/QQQ + F&G + CLM/CRF z-score + TQQQ cycle + wheel positions. |
+| `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 3 messages/day → #market-analysis (refactored Aug 2026). Morning brief: 03:10 HST (13:10 UTC). Mid-session: 07:00 HST (17:00 UTC). EOD: via scheduler.py --mode eod at 20:20 UTC. 12+ flag bias scorer (BULLISH/NEUTRAL/BEARISH). Includes Overnight Market Structure section (SPY POC/VAH/VAL from DB), macro with 10Y/2Y+unemployment, congressional trades filtered to 30 days. |
 | `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/market_intraday/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/cef_calibrate/mlpi_entry/personal_scorecard. Removed: `gex`, `options_flow`, `spx_income` (iron condor — purged Jul 19). wheel_signals: VIX-adjusted params (Module 4) + earnings proximity on open positions (Module 5) + Kelly position size footer. crypto_social: cycle top score + Tier 3 exit Pushover (triple gate). trending_plays: SS leaderboard as 4th source. mlpi_entry: XLE/MLPI dip signal → Pushover + Discord. personal_scorecard: Pushover-only Sunday recap of all 3 strategies from DB. |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/cef_calibrate/mlpi_entry/personal_scorecard. Removed: `gex`, `options_flow`, `spx_income` (iron condor — purged Jul 19); `market_intraday` (purged Aug 2026 — market_analysis.py always-on handles it); `macro_pm` (purged Aug 2026 — was duplicating morning brief data). `--mode morning` now only writes DB keys and runs conviction sync — no longer dispatches standalone embeds to #market-analysis. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
-| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Real VIX from FRED VIXCLS shown in LEAP embeds. Writes bottom_score/top_score to DB for market_analysis.py. New Jul 19: VIXY distribution gate (prevents false CALL entries on calm red days), 12-month seasonal size scalar for both desks. |
+| `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Aug 2026 upgrades: P/C z-score weight 15→8pts (index PCR weaker than single-name per 2025 research); VIX resolution bonus (+7pts when VIXY/VXZ ratio crosses back below 1.0, sustained 48h; state: `tqqq_vix_backwardation_active` + `tqqq_vix_resolution_ts` in DB). |
+| `daily_pulse.py` | ✅ Live | Personal financial snapshot → Pushover ONLY (never Discord). Runs as standalone PA cron at 06:00 UTC. SimpleFIN balance fetch with cache fallback: if SimpleFIN unreachable, shows yesterday's cached data + ⚠️ banner instead of $0.00 zeros. State stored in `.daily_pulse_state.json` (isolated from ecosystem DB — intentional, contains personal financial data). MARKET REGIME section removed Aug 2026. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
 | `seed_cef_premiums.py` | 🗑️ Removed | Merged into db_tools.py (`python db_tools.py --seed-premiums`). |
@@ -1178,6 +1207,18 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
   4. `market_analysis.py` Flag 12: Market breadth (reads `tqqq_breadth_cache` from DB; ≥70% = +8, ≤35% = -10)
   5. VIX day-over-day % change: compares FRED VIXCLS to `fred_vix_prev` DB key; +20%+ DoD = -10pts; -15%+ collapse = +8pts. Bias scorer now 12+ signals.
 
+### Completed in Aug 2026 Sessions ✅
+- [x] `#market-analysis` channel refactor — 10 messages/day → 3 messages/day; no more duplicate conviction signals or contradicting bias labels (✅ Aug 11)
+- [x] `daily_pulse.py` MARKET REGIME section removed; SimpleFIN cache fallback prevents $0.00 zeros on outage (✅ Aug 11)
+- [x] DB hygiene — `db_tools.py --purge-stale`: dropped 3 dead tables, removed 11 orphaned keys; auto-prune of dated `global_state` keys >45 days added to daily maintenance (✅ Aug 11)
+- [x] `market_scheduler.py` `market_intraday` + `macro_pm` entries removed (caused duplicate channel embeds); `scheduler.py --mode morning` standalone dispatch to #market-analysis removed (✅ Aug 11)
+- [x] `market_analysis.py` morning shifted to 13:10 UTC (was 12:00 UTC) so `scheduler.py --mode morning` (12:50 UTC) writes SPY/QQQ POC/VAH/VAL to DB first; Overnight Market Structure section added; macro section now shows 10Y/2Y rates + unemployment; congressional trades filtered to 30-day recency window (✅ Aug 11)
+- [x] IV tracker seeded — `iv_daily` table had 0 rows despite cron being wired; manual `python scheduler.py --mode store_daily_iv` seeded 23 tickers; usable baseline reached Aug 11 2026 (✅ Aug 11)
+- [x] **Strategy 3 hardening** — Research backtest sweep (Aug 11): VIX resolution bonus (+7pts on backwardation→contango crossover, 88% win rate at +5d per 17yr backtest); P/C z-score weight reduced 15→8pts (index PCR weaker for index options per HarbourFront Quant 2025). DB keys: `tqqq_vix_backwardation_active`, `tqqq_vix_resolution_ts` (✅ Aug 11)
+- [x] **Strategy 2 hardening** — VRP threshold raised 2→5pp in wheel screener (triple-confirmation filter: IVR + IV-HV spread + IV percentile per ORATS/QuantPedia/Schwab 2025); Kelly sizer upgraded to 126-day VIX percentile rank with 4 regime tiers (arXiv:2508.16598, Aug 2025). DB key: `vix_126d_history` (✅ Aug 11)
+- [x] **Strategy 1 hardening** — Dark pool multi-session clustering: rolling 3-session window per ticker; single session = +8pts (was always +18); 2-of-3 sessions = full +18pts. Eliminates false positives from routine low-volume days. DB key: `dark_pool_session_hist_{ticker}` (✅ Aug 11)
+- [x] Research journal entries — 7 informational findings stored in DB as `research_journal_2026-08-11_*` keys (MLPI validation, CEF discount env, PCR index weaker, VIX backwardation rarity, RO oversubscribe note, CEF half-life, wheel backtest IVR essential) (✅ Aug 11)
+
 ### Weekly Audit Cadence (ongoing discipline)
 Capital is deployed and compounding. Each week, check for signals that slipped through:
 1. **Did any monitor.py signals fire?** — Review #cornerstone for any ELEVATED/CRITICAL events
@@ -1187,17 +1228,27 @@ Capital is deployed and compounding. Each week, check for signals that slipped t
 5. **CLM/CRF at or below fair value?** — CLM $7.51 | CRF $7.28; accumulate if at or below
 6. **Is October approaching?** — NAV lock month; review premium and position size
 
-### Deployment Checklist (pending on PA)
-1. `git pull origin main` on PythonAnywhere
-2. Restart `monitor.py` always-on task (picks up distribution reset signals + carry spread fix)
-3. Restart `tqqq.py` always-on task (picks up VIXY gate + seasonal calendar)
-4. Add `PORTFOLIO_VALUE_APPROX=<your_value>` to `.env` on PA (required for Kelly sizing + personal scorecard)
-5. Add `personal_scorecard` to PA cron: `0 4 * * 0 python scheduler.py --mode personal_scorecard` (Sundays 04:00 UTC = 18:00 HST)
-6. Run `python db_tools.py --seed-premiums` once if not already done — seeds CLM/CRF z-score mu/sigma
-7. Add `market_analysis.py` as 6th always-on task if not already done
+### Deployment Checklist (pending on PA — Aug 2026)
+```bash
+cd ~/flowdoe_dev && git pull origin main
+```
+Then restart in this order:
+1. `market_scheduler.py` — picks up removed `market_intraday` + `macro_pm` entries
+2. `market_analysis.py` — picks up 13:10 UTC timing shift + new morning brief sections
+3. `monitor.py` — picks up dark pool multi-session clustering
+4. `tqqq.py` — picks up VIX resolution bonus + P/C weight reduction
+
+One-time (if not already done):
+```bash
+python db_tools.py --seed-premiums   # CLM/CRF z-score mu/sigma
+```
+Env var (if not set):
+```
+PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scorecard
+```
 
 ### Data Infrastructure
-- [ ] **IVR tracker maturation** — accumulating daily since Jul 11 2026; usable baseline ~Aug 11, full 52-week rank after 252 trading days
+- [x] **IVR tracker usable baseline** — reached Aug 11 2026 (~30 days of daily IV stored). Full 52-week rank after 252 trading days (~Apr 2027). `vix_126d_history` also accumulating for Kelly regime detection.
 - [ ] **GEX re-enable** — wire `calculate_gex_profile()` back in once Tradier OI is confirmed stable; gamma flip = early CEF premium compression warning
 
 ### Scripts Still to Build
@@ -1240,12 +1291,8 @@ is relatively new, the baseline may not reflect the full historical premium rang
 Consider seeding the DB with historical NAV/price data from CEFConnect or SEC filings
 to give the z-score a proper multi-year anchor.
 
-**Gap 5 — No volatility regime filter on wheel entries**
-High VIX = high IV = high premium = good for selling. But if VIX is elevated because
-of a genuine macro breakdown, assignment risk spikes. The wheel scanner should
-cross-reference the VIX regime from `classify_vix_regime()` and either:
-  - Reduce delta to 0.15 in ELEVATED/CRITICAL VIX (less probability of assignment)
-  - Flag it explicitly in the signal output so the human can decide
+**Gap 5 — Partially closed (Aug 2026): VRP ≥5pp filter now gates wheel entries**
+The IV-HV spread ≥5pp filter catches the most egregious false positives (names with inflated IVR from historical spikes). The remaining gap: no delta reduction in genuine macro breakdown VIX regimes. The wheel scanner should cross-reference `classify_vix_regime()` and reduce delta to 0.15 in ELEVATED/CRITICAL VIX environments to lower assignment risk when the macro is genuinely stressed (not just high IV).
 
 **Gap 6 — ✅ CLOSED** Tier 3 crypto exit Pushover live: ct_score ≥ 80 AND BTC dom < 40% AND Extreme Greed streak ≥ 3d → weekly-deduped Pushover alert (✅ Jul 19)
 
@@ -1291,7 +1338,7 @@ is accelerating or stalling. Currently tracked manually in Simplifi — automate
 |---------------|---------------|
 | Automated N-2 EDGAR watcher for CLM/CRF | No other retail bot does this |
 | NAV-based DRIP optimization + RO dodge | Unique strategy, zero competitors |
-| Bidirectional LEAP cycle scorer (composite 8-signal) | Most servers just say "buy the dip" |
+| Bidirectional LEAP cycle scorer (12+ signals, empirically calibrated) | Most servers just say "buy the dip" |
 | Binance smart money L/S divergence cross-signal | Institutional signal, retail price |
 | Live HY spread + yield curve in futures board | Most servers ignore macro entirely |
 | Twelve Data commercial license | Legal edge vs scrapers |
