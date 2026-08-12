@@ -40,22 +40,43 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 def run_daily_maintenance(db_path: str = "rockefeller_state.db"):
     """
     Daily cron: prune stale alert locks (> 24h), cap audit_logs at 500 rows,
-    VACUUM the DB. Runs in ~1s; zero TD API calls.
+    prune dated global_state keys older than 45 days, VACUUM the DB.
+    Runs in ~1s; zero TD API calls.
     """
+    import re
     from database import EcosystemDatabase
     db_full = os.path.join(BASE_DIR, db_path)
     logger.info("Starting daily DB maintenance...")
     try:
         with sqlite3.connect(db_full, timeout=10.0) as conn:
             cur = conn.cursor()
+
+            # Prune stale alert locks (> 24h)
             purge_threshold = (datetime.now() - timedelta(hours=24)).isoformat()
             cur.execute("DELETE FROM alert_state_manager WHERE last_alert_time < ?", (purge_threshold,))
             purged_alerts = cur.rowcount
+
+            # Cap audit_logs at 500 rows
             cur.execute(
                 "DELETE FROM audit_logs WHERE id NOT IN "
                 "(SELECT id FROM audit_logs ORDER BY id DESC LIMIT 500)"
             )
             purged_logs = cur.rowcount
+
+            # Prune dated global_state keys (e.g. market_analysis_morning_call_2026-06-20)
+            # Keys with YYYY-MM-DD suffix older than 45 days are dedup sentinels that never auto-expire.
+            cutoff_date = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+            cur.execute("SELECT key FROM global_state")
+            all_keys = [r[0] for r in cur.fetchall()]
+            date_pattern = re.compile(r"_(\d{4}-\d{2}-\d{2})$")
+            stale_dated = [k for k in all_keys
+                           if (m := date_pattern.search(k)) and m.group(1) < cutoff_date]
+            if stale_dated:
+                cur.executemany("DELETE FROM global_state WHERE key = ?", [(k,) for k in stale_dated])
+                logger.info(f"Pruned {len(stale_dated)} stale dated global_state keys.")
+            else:
+                logger.info("No stale dated keys to prune.")
+
             conn.commit()
             logger.info(f"Purged {purged_alerts} stale alert locks, {purged_logs} old log entries.")
 
@@ -69,6 +90,85 @@ def run_daily_maintenance(db_path: str = "rockefeller_state.db"):
         return True
     except Exception as e:
         logger.critical(f"Daily maintenance failed: {e}")
+        return False
+
+
+def purge_stale_data(db_path: str = "rockefeller_state.db"):
+    """
+    One-time cleanup: drops dead tables (youtube_videos, youtube_key_points, users),
+    removes orphaned global_state keys (TSP, staking, deprecated forex state),
+    and grades overdue PENDING signal_ledger entries.
+
+    Run once:  python db_tools.py --purge-stale
+    """
+    db_full = os.path.join(BASE_DIR, db_path)
+    logger.info("Running one-time stale data purge...")
+
+    dead_tables = ["youtube_videos", "youtube_key_points", "users"]
+    orphaned_key_prefixes = ["tsp_", "staking_yields", "EUR/USD_", "GBP/USD_",
+                             "USD/JPY_", "wargame_", "test_poison_key"]
+    orphaned_exact = ["btc_spy_correlation_sync"]
+
+    try:
+        with sqlite3.connect(db_full, timeout=10.0) as conn:
+            cur = conn.cursor()
+
+            # Drop dead tables
+            dropped = []
+            for tbl in dead_tables:
+                try:
+                    cur.execute(f"DROP TABLE IF EXISTS {tbl}")
+                    dropped.append(tbl)
+                except Exception as e:
+                    logger.warning(f"Could not drop {tbl}: {e}")
+            if dropped:
+                logger.info(f"Dropped tables: {', '.join(dropped)}")
+
+            # Remove orphaned global_state keys
+            cur.execute("SELECT key FROM global_state")
+            all_keys = [r[0] for r in cur.fetchall()]
+            to_delete = []
+            for k in all_keys:
+                if k in orphaned_exact:
+                    to_delete.append(k)
+                elif any(k.startswith(p) for p in orphaned_key_prefixes):
+                    to_delete.append(k)
+            if to_delete:
+                cur.executemany("DELETE FROM global_state WHERE key = ?", [(k,) for k in to_delete])
+                logger.info(f"Removed {len(to_delete)} orphaned global_state keys:")
+                for k in to_delete:
+                    logger.info(f"  - {k}")
+
+            # Grade overdue PENDING signal_ledger entries
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            cur.execute(
+                "SELECT id, ticker, predicted_direction, entry_price, target_date "
+                "FROM signal_ledger WHERE outcome = 'PENDING' AND target_date < ?",
+                (today_str,)
+            )
+            overdue = cur.fetchall()
+            for row in overdue:
+                sig_id, ticker, direction, entry_price, target_date = row
+                logger.info(f"Signal {sig_id} ({ticker} {direction} from {target_date}) is overdue — marking EXPIRED")
+                cur.execute(
+                    "UPDATE signal_ledger SET outcome = 'EXPIRED', graded_date = ? WHERE id = ?",
+                    (today_str, sig_id)
+                )
+            if overdue:
+                logger.info(f"Graded {len(overdue)} overdue PENDING signals as EXPIRED.")
+
+            conn.commit()
+
+        # VACUUM after dropping tables
+        with sqlite3.connect(db_full, timeout=10.0) as conn:
+            conn.isolation_level = None
+            conn.execute("VACUUM")
+            logger.info("VACUUM complete.")
+
+        logger.info("Stale data purge complete.")
+        return True
+    except Exception as e:
+        logger.critical(f"Purge failed: {e}")
         return False
 
 
@@ -306,6 +406,8 @@ if __name__ == "__main__":
                         help="One-time CLM/CRF z-score initialization")
     parser.add_argument("--seed-tax-character", metavar="TICKER",
                         help="Store 1099-DIV tax character for CLM or CRF (requires --roc/--qdi/--ord/--year)")
+    parser.add_argument("--purge-stale",       action="store_true",
+                        help="One-time cleanup: drop dead tables, remove orphaned keys, grade overdue signals")
     parser.add_argument("--roc",  type=float, default=0.0, help="Return of capital %%")
     parser.add_argument("--qdi",  type=float, default=0.0, help="Qualified dividend income %%")
     parser.add_argument("--ord",  type=float, default=0.0, help="Ordinary dividend %%")
@@ -322,6 +424,8 @@ if __name__ == "__main__":
         success = seed_tax_character(
             args.seed_tax_character, args.roc, args.qdi, args.ord, args.year
         )
+    elif args.purge_stale:
+        success = purge_stale_data()
     else:
         success = run_daily_maintenance()
 
