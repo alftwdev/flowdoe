@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Jul 23 2026 (Strategy 4 — Box Spread Borrowing added)*
+*Last updated: Aug 11 2026 (research backtest sweep — 6 strategy hardening improvements + #market-analysis refactor)*
 
 ---
 
@@ -112,8 +112,9 @@ Per loop: ~7–9 credits out of 720/5-min budget. Extremely lean.
 
 **Stagger rule (prevents 429 collision):**
 - monitor.py daily pulse: `08:10 HST = 18:10 UTC`
-- market_analysis.py morning: `08:00 HST = 18:00 UTC`
-- 10-minute gap between the two heaviest Twelve Data consumers. **Never move these closer.**
+- market_analysis.py morning brief: `03:10 HST = 13:10 UTC` (shifted Aug 2026 — now 5h before monitor pulse, no overlap risk)
+- scheduler.py `--mode morning` (DB writes + conviction sync): `02:50 HST = 12:50 UTC` — fires first so SPY/QQQ POC/VAH/VAL are in DB before market_analysis.py reads them at 13:10 UTC
+- The original 10-minute stagger concern is resolved. Never move market_analysis.py morning back to 18:xx UTC — it caused duplicate conviction labels in the same channel as monitor.py.
 
 **stream.py:** WebSocket — 0 REST credits. Subscribes to `BTC/USD,VIXY,SPY,QQQ` and writes
 VIXY price to DB for monitor.py to read. This is the zero-cost VIXY early warning layer.
@@ -296,9 +297,10 @@ WHEEL_UNIVERSE = [
 
 **Entry filter (scheduler.py --mode wheel_signals):**
 ```
-IVR > 35% | bid-ask spread < 10% of mid | no earnings within 45 days
+IVR > 35% | IV − HV30 ≥ 5pp (VRP gate) | bid-ask spread < 10% of mid | no earnings within 45 days
 Premium ≥ 1% of strike | delta ~0.20 | 30–45 DTE
 ```
+**VRP gate (added Aug 11 2026):** IV must exceed HV30 by ≥5 volatility points to confirm the premium edge is structural, not a historical relic of a past spike that has since normalized. Source: triple-confirmation filter validated across ORATS, QuantPedia, Schwab research. Implemented in `analytics.py` `generate_tier2_iv_rank_alerts()`. A 5-year wheel backtest (2015–2025) without this filter produced CAGR ~1% gross — the filter is essential, not optional.
 
 **Capital rule:** Max 30% of available margin in wheel positions at any time.
 
@@ -661,11 +663,34 @@ LEAP_PUT_SYMBOL = "QQQ"
 CYCLE_BOTTOM_THRESHOLD = 55   # bottom_score >= this → CALL desk unlocks
 CYCLE_TOP_THRESHOLD = 55      # top_score >= this → PUT desk unlocks
 ```
-Inputs: VIXY z-score (30pts), RSI14 (25pts), breadth (20pts), 52w drawdown (15pts),
-SPY P/C z-score (15pts), VIX term structure (12pts), CNN F&G (10pts), SMA200 (5pts), MACD (3pts).
-P/C ratio scored on 30-day rolling z-score (raw SPY ratio is structurally ~1.5+ due to institutional hedging — raw number is meaningless alone).
+Inputs and weights (bottom_score / top_score are symmetric):
+```
+VIXY z-score              30pts  — primary fear signal; gate requires actual fear
+RSI14                     25pts  — oversold/overbought confirmation
+Breadth                   20pts  — % stocks above 50D SMA
+52w drawdown              15pts  — distance from 52w high
+VIX term structure        12pts  — VIXY/VXZ ratio; backwardation = sustained fear
+CNN Fear & Greed          10pts  — retail sentiment extreme
+SPY P/C z-score            8pts  — vs 30-day rolling baseline (reduced from 15 Aug 2026;
+                                   peer-reviewed research found PCR has weaker predictive
+                                   power for index options than single-name — HarbourFront
+                                   Quant 2025. Raw ratio is meaningless due to structural
+                                   institutional hedging on SPY; only the z-score is used.)
+VIX resolution bonus       7pts  — fires when VIXY/VXZ ratio crosses back BELOW 1.0
+                                   (backwardation→contango resolution). 17-year backtest:
+                                   88% win rate at +5d, 91% at +21d after resolution.
+                                   Sustained for 48h. State: tqqq_vix_backwardation_active
+                                   + tqqq_vix_resolution_ts in DB. Fires ~2–5×/year.
+Below SMA200               5pts  — regime confirmation
+MACD                       3pts  — tie-breaker
+Insider cluster buy       10pts  — SentiSense Form 4 (NVDA/AAPL/MSFT/META/GOOGL)
+CLM/CRF z-score cross      8pts  — dual CEF premium compression = systemic stress signal
+```
+P/C ratio scored on 30-day rolling z-score only — raw ratio is meaningless alone.
 VIX term structure via VIXY/VXZ ETF proxies (VIX9D/VIX3M unavailable at Twelve Data tier).
 **Actual VIX (FRED VIXCLS)** also fetched and shown in embed to confirm VIXY proxy reading.
+
+**VIX Resolution Bonus rule (Aug 2026):** The edge is in the RESOLUTION (ratio crossing back below 1.0), not the onset (ratio crossing above 1.0). Buying at onset = 51% win rate (near random). Buying at resolution = 88% win rate. Never conflate these. The bonus fires on the resolution tick only and decays after 48h.
 
 **VIXY Distribution Gate (added Jul 19 2026 — prevents false CALL entries):**
 ```

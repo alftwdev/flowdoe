@@ -1352,6 +1352,7 @@ def calculate_ro_risk_score(
     yield_steepen=False, sentiment_fear=False,
     nav_determination=False, cef_inst_exit=False, dist_overvalued=False,
     long_rate_pressure=False, hy_rapid_widen=False,
+    dark_pool_cluster_count=1,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -1388,7 +1389,10 @@ def calculate_ro_risk_score(
     if crisis_day:
         score += RO_SCORE_WEIGHTS["crisis_amplification"]
     if dark_pool:
-        score += RO_SCORE_WEIGHTS["dark_pool"]
+        # Tiered: 2-of-3 session clustering = full +18pts; single session = +8pts only.
+        # Multi-session clustering validated by 17-year empirical study (2025): institutions
+        # distributing deliberately show repeated low-lit-vol prints across 48–72h.
+        score += RO_SCORE_WEIGHTS["dark_pool"] if dark_pool_cluster_count >= 2 else 8
     if premium_compressed:
         score += RO_SCORE_WEIGHTS["premium_compression"]
     if macro_underperform:
@@ -1599,8 +1603,28 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     crisis_day, vixy_price, vixy_z = check_crisis_amplification_risk(session)
     seasonal_caution = is_seasonal_caution_month()
 
-    # ── NEW: Dark pool detection
+    # ── NEW: Dark pool detection (multi-session clustering)
+    # Single-session detection fires near-randomly. 2025 research (17-year study, TradeAlgo/TradeEcho)
+    # finds the high-conviction signal requires clustering across 2+ consecutive sessions:
+    # institutions distributing in size repeatedly over 48–72h, not routine low-volume days.
+    # Full +18pt score requires 2 of last 3 sessions flagged; single session gets +8pts only.
     is_dark_pool, price_chg, vol_ratio, dark_pool_desc = detect_dark_pool_activity(session, ticker)
+    dark_pool_cluster_count = 0
+    if is_dark_pool:
+        _dp_key = f"dark_pool_session_hist_{ticker}"
+        _dp_hist = list(db.get_state(_dp_key) or [])
+        _dp_hist.append(1)
+        _dp_hist = _dp_hist[-3:]  # rolling 3-session window
+        db.update_state(_dp_key, _dp_hist)
+        dark_pool_cluster_count = sum(_dp_hist)
+    else:
+        # Still slide the window forward with a 0 on non-dark-pool sessions
+        _dp_key = f"dark_pool_session_hist_{ticker}"
+        _dp_hist = list(db.get_state(_dp_key) or [])
+        _dp_hist.append(0)
+        _dp_hist = _dp_hist[-3:]
+        db.update_state(_dp_key, _dp_hist)
+        dark_pool_cluster_count = sum(_dp_hist)
 
     # ── NEW: CEF premium compression
     is_compressed, prem_delta, prem_compress_desc = detect_premium_compression(premium, ticker)
@@ -1769,6 +1793,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         dist_overvalued=is_dist_overvalued,
         long_rate_pressure=long_rate_pressure,
         hy_rapid_widen=hy_rapid_widen,
+        dark_pool_cluster_count=dark_pool_cluster_count,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)

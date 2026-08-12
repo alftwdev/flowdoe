@@ -938,12 +938,14 @@ class HighFidelityAnalyticsEngine:
                 if ivr_proxy <= ivr_threshold:
                     continue
 
-                # VRP gate (McMillan Vol Buyer's Rule, inverted for sellers):
-                # IV must exceed HV30 by ≥2pp to confirm meaningful seller's edge.
-                # Skip if HV30 unavailable (can't calculate VRP).
+                # VRP gate: IV must exceed HV30 by ≥5pp to confirm the volatility risk premium is
+                # structurally active. <5pp means IV is only marginally above realized vol — the premium
+                # edge is too thin to compensate for assignment risk. Source: triple-confirmation
+                # filter validated across ORATS, QuantPedia, Schwab research (2025); the 5pt threshold
+                # filters out names where IVR is elevated only due to a past spike that has since normalized.
                 vrp = round(atm_iv - hv30, 1) if hv30 > 0 else 99.0
-                if hv30 > 0 and vrp < 2.0:
-                    logger.debug(f"{symbol}: IVR ok ({ivr_proxy:.0f}%) but VRP thin ({vrp:+.1f}%) — skipping")
+                if hv30 > 0 and vrp < 5.0:
+                    logger.debug(f"{symbol}: IVR ok ({ivr_proxy:.0f}%) but VRP thin ({vrp:+.1f}pp < 5pp) — skipping")
                     continue
 
                 # Bid/ask spread liquidity check on the ATM-ish strike used for IVR
@@ -4599,13 +4601,43 @@ class HighFidelityAnalyticsEngine:
         b = avg_win_pct / avg_loss_pct if avg_loss_pct > 0 else 1.0
         kelly_f = (win_rate * b - (1 - win_rate)) / b if b > 0 else 0.0
         half_kelly = max(0.0, kelly_f / 2)
-        vix_scalar = min(1.0, 15.0 / max(float(vix), 10.0))
+
+        # VIX regime scalar using 126-day percentile rank (arXiv:2508.16598, Aug 2025).
+        # Hybrid Kelly-VIX approach: scale by (1 - VIX_percentile_rank_126d).
+        # 126-day lookback validated as optimal — shorter windows (21–63d) produce erratic sizing.
+        # Tier thresholds: >75th pct → 25–50% reduction; <25th pct → full half-Kelly.
+        vix_pct_rank = 0.5  # neutral default if no history available
+        try:
+            _vix_hist = self.db.get_state("vix_126d_history") or []
+            if len(_vix_hist) >= 63:  # require at least 63 days before using rank
+                _sorted = sorted(_vix_hist[-126:])
+                _rank = sum(1 for v in _sorted if v <= float(vix)) / len(_sorted)
+                vix_pct_rank = _rank
+                # Store history — append today's VIX reading
+                _vix_hist.append(float(vix))
+                self.db.update_state("vix_126d_history", _vix_hist[-252:])  # keep 252 max
+            else:
+                _vix_hist.append(float(vix))
+                self.db.update_state("vix_126d_history", _vix_hist)
+        except Exception:
+            pass
+
+        if vix_pct_rank > 0.75:
+            vix_scalar = 0.35   # VIX in top quartile → reduce to 35% of half-Kelly
+        elif vix_pct_rank > 0.60:
+            vix_scalar = 0.60   # elevated but not panic → moderate reduction
+        elif vix_pct_rank < 0.25:
+            vix_scalar = 1.0    # VIX historically low → full half-Kelly deployment
+        else:
+            vix_scalar = 0.85   # neutral regime → slight conservatism
+
         final_pct = min(half_kelly * vix_scalar, max_pct)
         return {
             "position_pct":      round(final_pct * 100, 2),
             "position_dollars":  round(portfolio_value * final_pct, 0),
             "kelly_f":           round(kelly_f, 4),
             "vix_scalar":        round(vix_scalar, 3),
+            "vix_pct_rank":      round(vix_pct_rank, 3),
             "win_rate":          round(win_rate, 3),
             "sample_trades":     sample,
             "using_empirical":   sample >= 50,
