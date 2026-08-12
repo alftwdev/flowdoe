@@ -432,15 +432,18 @@ class EcosystemDatabase:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT premium_collected, contracts, open_fees FROM wheel_positions WHERE id = ? AND status = 'OPEN'",
+                    "SELECT symbol, position_type, strike, premium_collected, contracts, open_fees FROM wheel_positions WHERE id = ? AND status = 'OPEN'",
                     (position_id,)
                 )
                 row = cursor.fetchone()
                 if row is None:
                     return False
-                prem_collected = float(row[0])
-                contracts      = int(row[1])
-                open_fees_val  = float(row[2] or 0.0)
+                symbol_val     = row[0]
+                pos_type_val   = row[1]
+                strike_val     = float(row[2])
+                prem_collected = float(row[3])
+                contracts      = int(row[4])
+                open_fees_val  = float(row[5] or 0.0)
 
                 if status == "CLOSED" and close_price_per_share is not None:
                     buyback_cost = float(close_price_per_share) * contracts * 100
@@ -457,10 +460,47 @@ class EcosystemDatabase:
                 """, (status, close_note, close_price_per_share, close_fees or 0.0, position_id))
                 conn.commit()
             self._add_to_premium_ledger(max(retained, 0.0))
+            # Auto-queue closed ticker for re-entry watchlist (FIFO, 15 slots)
+            self.push_recently_closed(symbol_val, pos_type_val, strike_val, status, max(retained, 0.0))
             return True
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to close wheel position: {e}")
             return False
+
+    def push_recently_closed(self, symbol: str, position_type: str, strike: float,
+                              status: str, retained: float, max_queue: int = 15):
+        """
+        Append a closed ticker to the re-entry watchlist (FIFO, capped at max_queue).
+        Stored as JSON list under the 'wheel_recently_closed' state key.
+        Called automatically by close_wheel_position — never manually.
+        """
+        import json as _json
+        from datetime import date as _date
+        entry = {
+            "symbol":   symbol,
+            "type":     position_type,
+            "strike":   strike,
+            "status":   status,
+            "retained": round(retained, 2),
+            "closed":   _date.today().isoformat(),
+        }
+        try:
+            raw  = self.get_state("wheel_recently_closed") or []
+            q    = raw if isinstance(raw, list) else []
+            # Remove any existing entry for this symbol so fresh close always sorts to top
+            q    = [e for e in q if e.get("symbol") != symbol]
+            q.insert(0, entry)
+            self.update_state("wheel_recently_closed", q[:max_queue])
+        except Exception as e:
+            logger.warning(f"push_recently_closed failed for {symbol}: {e}")
+
+    def get_recently_closed(self, limit: int = 10) -> list:
+        """Return the most recently closed wheel tickers (up to limit). Empty list if none."""
+        try:
+            raw = self.get_state("wheel_recently_closed") or []
+            return (raw if isinstance(raw, list) else [])[:limit]
+        except Exception:
+            return []
 
     def get_open_wheel_positions(self):
         try:

@@ -1049,6 +1049,15 @@ class HighFidelityAnalyticsEngine:
         "CONY": ("YieldMax", "Weekly"),   # Coinbase
         "GOOY": ("YieldMax", "Weekly"),   # Alphabet (Google)
         "AMDY": ("YieldMax", "Weekly"),   # AMD
+        "PLTY": ("YieldMax", "Weekly"),   # Palantir (PLTR)
+        "AMZY": ("YieldMax", "Weekly"),   # Amazon (AMZN)
+        "METY": ("YieldMax", "Weekly"),   # Meta (META)
+        "JPMY": ("YieldMax", "Weekly"),   # JPMorgan (JPM)
+        "MRNY": ("YieldMax", "Weekly"),   # Moderna (MRNA)
+        "OARK": ("YieldMax", "Weekly"),   # Innovation / ARKK
+        "NFLY": ("YieldMax", "Weekly"),   # Netflix (NFLX)
+        "ULTY": ("YieldMax", "Weekly"),   # Ultra Option Income (diversified high-yield)
+        "AIYY": ("YieldMax", "Weekly"),   # AI basket
         "YMAG": ("YieldMax", "Monthly"),  # Mag 7 fund of option income ETFs
         "YMAX": ("YieldMax", "Weekly"),   # Diversified fund of all YieldMax ETFs (not QQQ)
 
@@ -1062,6 +1071,30 @@ class HighFidelityAnalyticsEngine:
         "QQQI": ("NEOS", "Monthly"),      # Nasdaq 100
         "SPYI": ("NEOS", "Monthly"),      # S&P 500
         "BTCI": ("NEOS", "Monthly"),      # Bitcoin
+
+        # JPMorgan — equity premium income, monthly
+        "JEPI": ("JPMorgan", "Monthly"),  # S&P 500 equity premium income
+        "JEPQ": ("JPMorgan", "Monthly"),  # Nasdaq equity premium income
+
+        # Global X — covered call, monthly
+        "XYLD": ("Global X", "Monthly"),  # S&P 500 CC
+        "QYLD": ("Global X", "Monthly"),  # Nasdaq 100 CC
+        "RYLD": ("Global X", "Monthly"),  # Russell 2000 CC
+
+        # REX Shares
+        "FEPI": ("REX", "Monthly"),       # Financial equity premium income
+
+        # Amplify / Simplify / Schwab — income / dividend
+        "DIVO": ("Amplify", "Monthly"),   # Dividend & income CC
+        "SVOL": ("Simplify", "Monthly"),  # Short volatility premium
+        "SCHD": ("Schwab", "Quarterly"),  # Dividend equity (not CC — listed for context)
+
+        # ProShares — crypto income
+        "BITO": ("ProShares", "Monthly"), # Bitcoin futures income
+
+        # TappAlpha / Kurv — Tier 2 holds (metadata only — not in screener yield filter)
+        "TDAQ": ("TappAlpha", "Monthly"), # 0DTE NASDAQ CC (Tier 2 hold)
+        "KQQQ": ("Kurv", "Monthly"),      # Tech Titans CC (Tier 2 hold)
 
         # Goldman Sachs / Innovator — defined-outcome + buffer income
         "GPIQ": ("Goldman Sachs", "Monthly"),  # S&P 500 Premium Income ETF
@@ -3279,7 +3312,50 @@ class HighFidelityAnalyticsEngine:
                 else:
                     verdict = "Watching — no momentum confirmation yet"
 
-                # BTO conviction gate: HIGH buzz + confirmed momentum + RSI sweet spot + not meme
+                        # ── IVR from accumulated DB history (real rank when ≥30 days stored)
+                ivr_data = self.db.get_iv_rank(sym)
+                ivr      = ivr_data.get("ivr", 0.0)
+                ivr_tag  = ivr_data.get("tag", "BUILDING")
+                ivr_days = ivr_data.get("days_history", 0)
+
+                # ── Earnings proximity — skip if earnings within 7 days (FORCE_CLOSE),
+                #    flag if within 21 days (REVIEW). Uses Tradier calendar (cached in DB).
+                earnings_flag = None
+                earnings_date = None
+                try:
+                    import tradier_client as tc_mod
+                    _tc = tc_mod.TradierClient()
+                    ep  = _tc.get_earnings_proximity([sym], days_ahead=30)
+                    _ep = ep.get(sym, {})
+                    if _ep.get("flag") == "FORCE_CLOSE":
+                        earnings_flag = "FORCE_CLOSE"
+                        earnings_date = _ep.get("date")
+                    elif _ep.get("flag") == "REVIEW":
+                        earnings_flag = "REVIEW"
+                        earnings_date = _ep.get("date")
+                except Exception:
+                    pass
+
+                # Skip plays where earnings are within 7 days — IV crush risk too high
+                if earnings_flag == "FORCE_CLOSE":
+                    logger.info(f"[Trending Plays] {sym}: skipped — earnings within 7 days ({earnings_date})")
+                    continue
+
+                # ── SentiSense insider flow — HIGH conviction plays only (1 API call, cached daily)
+                insider_signal = None
+                if c["meter"] == "HIGH":
+                    try:
+                        import sentisense_client as ss
+                        insights = ss.get_insights(self.db, sym)
+                        if insights:
+                            _cluster = insights.get("insider_cluster") or insights.get("cluster")
+                            if _cluster and str(_cluster).lower() not in ("none", "neutral", ""):
+                                insider_signal = str(_cluster)
+                    except Exception:
+                        pass
+
+                # BTO conviction gate: HIGH buzz + confirmed momentum + RSI sweet spot +
+                # not meme + IVR not extremely low (< 20 = IV likely to expand not contract)
                 bto_setup = None
                 if (
                     c["meter"] == "HIGH"
@@ -3287,6 +3363,7 @@ class HighFidelityAnalyticsEngine:
                     and vol_ratio >= 1.3
                     and 45.0 <= rsi <= 68.0
                     and not c["is_meme"]
+                    and (not ivr_data.get("reliable") or ivr >= 20)
                 ):
                     direction   = "PUT" if (chg_5d < 0 or "Bearish" in c["lean"]) else "CALL"
                     strike_mult = 1.05 if direction == "CALL" else 0.95
@@ -3297,7 +3374,6 @@ class HighFidelityAnalyticsEngine:
                     except Exception:
                         hv30 = 30.0
                     iv_proxy = max(0.15, min(0.80, hv30 / 100.0))
-                    # Rough Black-Scholes approximation for ~5% OTM option at 35 DTE
                     est_prem = round(spot * iv_proxy * (dte / 365.0) ** 0.5 * 0.38, 2)
                     bto_setup = {
                         "direction": direction,
@@ -3310,18 +3386,24 @@ class HighFidelityAnalyticsEngine:
                     }
 
                 results.append({
-                    "symbol":       sym,
-                    "spot":         spot,
-                    "chg_5d":      chg_5d,
-                    "vol_ratio":    vol_ratio,
-                    "rsi":          rsi,
-                    "meter":        c["meter"],
-                    "lean":         c["lean"],
-                    "verdict":      verdict,
-                    "bto_setup":    bto_setup,
-                    "ss_score":     c.get("ss_score"),
-                    "ss_mentions":  c.get("ss_mentions"),
-                    "ss_dominance": c.get("ss_dominance"),
+                    "symbol":         sym,
+                    "spot":           spot,
+                    "chg_5d":         chg_5d,
+                    "vol_ratio":      vol_ratio,
+                    "rsi":            rsi,
+                    "ivr":            ivr,
+                    "ivr_tag":        ivr_tag,
+                    "ivr_days":       ivr_days,
+                    "earnings_flag":  earnings_flag,
+                    "earnings_date":  earnings_date,
+                    "insider_signal": insider_signal,
+                    "meter":          c["meter"],
+                    "lean":           c["lean"],
+                    "verdict":        verdict,
+                    "bto_setup":      bto_setup,
+                    "ss_score":       c.get("ss_score"),
+                    "ss_mentions":    c.get("ss_mentions"),
+                    "ss_dominance":   c.get("ss_dominance"),
                 })
             except Exception as e:
                 logger.error(f"[Social Scanner] Twelve Data check failed for {sym}: {e}")
@@ -3445,16 +3527,22 @@ class HighFidelityAnalyticsEngine:
     _CC_INCOME_TICKERS = {
         # YieldMax
         "MSTY", "NVDY", "TSLY", "CONY", "GOOY", "AMDY", "YMAG", "YMAX",
-        "PLTY", "AMZY", "METY", "JPMY", "MRNY", "BITO", "OARK",
+        "PLTY", "AMZY", "METY", "JPMY", "MRNY", "OARK", "NFLY", "ULTY", "AIYY",
         # Roundhill
         "XDTE", "QDTE", "RDTE", "MAGY",
         # NEOS
-        "QQQI", "SPYI", "BTCI", "JEPQ", "JEPI",
-        # Broad CC / income
-        "SCHD", "DIVO", "XYLD", "QYLD", "RYLD", "SVOL", "FEPI",
+        "QQQI", "SPYI", "BTCI",
+        # JPMorgan
+        "JEPI", "JEPQ",
+        # Global X
+        "XYLD", "QYLD", "RYLD",
+        # REX / Amplify / Simplify / Schwab
+        "FEPI", "DIVO", "SVOL", "SCHD",
+        # ProShares crypto
+        "BITO",
         # TappAlpha / Kurv
         "TDAQ", "KQQQ",
-        # Goldman Sachs / Innovator — defined-outcome + buffer income (growing influencer coverage)
+        # Goldman Sachs / Innovator
         "GPIQ", "XSPI", "XQQI",
     }
 
@@ -3523,39 +3611,80 @@ class HighFidelityAnalyticsEngine:
                 logger.warning(f"[CC Income Social] StockTwits stream {sym} failed: {e}")
         return results
 
+    # CC ETF → underlying stock. SentiSense tracks underlyings (stocks), not ETFs directly.
+    # When the underlying is bullish on SentiSense, the CC ETF gets a buzz boost.
+    _CC_UNDERLYING_MAP = {
+        "MSTY": "MSTR",  "NVDY": "NVDA",  "TSLY": "TSLA",  "CONY": "COIN",
+        "GOOY": "GOOGL", "AMDY": "AMD",   "PLTY": "PLTR",  "AMZY": "AMZN",
+        "METY": "META",  "JPMY": "JPM",   "MRNY": "MRNA",  "OARK": "ARKK",
+        "NFLY": "NFLX",  "ULTY": "SPY",   "AIYY": "QQQ",   "YMAG": "QQQ",
+        "YMAX": "QQQ",   "MAGY": "META",  "XDTE": "SPY",   "QDTE": "QQQ",
+        "RDTE": "IWM",   "QQQI": "QQQ",   "SPYI": "SPY",   "BTCI": "BTC",
+        "JEPI": "SPY",   "JEPQ": "QQQ",   "XYLD": "SPY",   "QYLD": "QQQ",
+        "RYLD": "IWM",   "FEPI": "SPY",   "DIVO": "SPY",   "SVOL": "VXX",
+        "SCHD": "SPY",   "BITO": "BTC",   "GPIQ": "SPY",   "XSPI": "SPY",
+        "XQQI": "QQQ",   "TDAQ": "QQQ",   "KQQQ": "QQQ",
+    }
+
     def scan_ccincome_social_buzz(self, top_n: int = 6) -> list:
         """
-        Ranks CC income ETFs by StockTwits community activity and sentiment.
-        Buzz score = total messages × bull/bear conviction weight.
-        Returns ranked list of dicts, highest activity first.
+        Ranks CC income ETFs by StockTwits community activity + SentiSense underlying sentiment.
 
-        Note: Reddit public JSON is 403-blocked site-wide (Reddit API lockdown 2024).
-        StockTwits individual symbol streams remain reliably accessible and give
-        richer data — per-message bullish/bearish tags from the investing community.
+        Scoring layers:
+          1. StockTwits recency-weighted volume × conviction (primary — ETF-level)
+          2. SentiSense underlying boost: if underlying stock is bullish (ss_score ≥ 20),
+             add up to +5.0 to buzz_score. Cached daily — zero extra API calls.
         """
         # Scan the full CC income universe (30 msgs per ticker, ~1s each)
         all_tickers = list(self._CC_INCOME_TICKERS)
         st_data = self._fetch_stocktwits_ccincome_stream(all_tickers)
 
+        # Pull SentiSense underlying sentiment (cached daily — no extra API cost).
+        # Map unique underlyings only (SPY/QQQ repeated across many ETFs → fetch once).
+        ul_scores: dict = {}
+        try:
+            import sentisense_client as ss
+            seen_underlyings: set = set()
+            for sym in all_tickers:
+                ul = self._CC_UNDERLYING_MAP.get(sym)
+                if ul and ul not in seen_underlyings and ul not in ("BTC", "VXX", "ARKK"):
+                    seen_underlyings.add(ul)
+                    sent = ss.get_sentiment(self.db, ul)
+                    if sent:
+                        ul_scores[ul] = sent
+        except Exception:
+            pass
+
         results = []
         for sym, data in st_data.items():
             msg_count = data["msg_count"]
-            if msg_count < 3:  # skip tickers with almost no activity
+            if msg_count < 3:
                 continue
 
-            bulls = data["bullish"]
-            bears = data["bearish"]
+            bulls    = data["bullish"]
+            bears    = data["bearish"]
             bull_pct = data["bull_pct"]
 
-            # Buzz score: recency-weighted volume × sentiment conviction
-            # recency_score differentiates tickers even when all hit the 30-msg StockTwits cap
+            # Layer 1 — StockTwits recency × conviction
             recency_score = data.get("recency_score", msg_count * 0.5)
-            conviction = (bull_pct / 100) if bulls > bears else (-(100 - bull_pct) / 100)
-            buzz_score = round(recency_score * (1 + abs(conviction)), 1)
+            conviction    = (bull_pct / 100) if bulls > bears else (-(100 - bull_pct) / 100)
+            buzz_score    = recency_score * (1 + abs(conviction))
+
+            # Layer 2 — SentiSense underlying boost (max +5.0 per ticker)
+            ul      = self._CC_UNDERLYING_MAP.get(sym)
+            ul_sent = ul_scores.get(ul) if ul else None
+            ul_boost = 0.0
+            if ul_sent:
+                ul_ss_score = ul_sent.get("score", 0) or 0
+                if ul_ss_score >= 20:
+                    ul_boost = min(5.0, ul_ss_score * 0.1)
+                    buzz_score += ul_boost
+
+            buzz_score = round(buzz_score, 1)
 
             lean = (
-                "BULLISH"    if bull_pct >= 70 else
-                "BEARISH"    if bull_pct <= 30 else
+                "BULLISH" if bull_pct >= 70 else
+                "BEARISH" if bull_pct <= 30 else
                 "MIXED"
             )
             label = (
@@ -3575,9 +3704,15 @@ class HighFidelityAnalyticsEngine:
                 "lean":       lean,
                 "buzz_score": buzz_score,
                 "label":      label,
+                "ul_ticker":  ul,
+                "ul_sent":    ul_sent,
+                "ul_boost":   round(ul_boost, 1),
             })
 
-        results.sort(key=lambda x: x["buzz_score"], reverse=True)
+        # Primary: buzz_score (ST recency × conviction + SS underlying boost).
+        # Secondary: bull_pct — higher conviction wins when scores tie.
+        # Tertiary: msg_count as raw volume confirmation.
+        results.sort(key=lambda x: (x["buzz_score"], x["bull_pct"], x["msg_count"]), reverse=True)
         return results[:top_n]
 
     def generate_futures_social_snapshot(self) -> dict:

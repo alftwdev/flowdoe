@@ -520,14 +520,18 @@ def main():
                             underlying_map = {
                                 "MSTY": "MSTR", "NVDY": "NVDA", "TSLY": "TSLA",
                                 "CONY": "COIN", "GOOY": "GOOGL", "AMDY": "AMD",
-                                "YMAX": "QQQ",  "XDTE": "SPY",  "QDTE": "QQQ",
-                                "RDTE": "IWM",  "QQQI": "QQQ",  "SPYI": "SPY",
-                                "BTCI": "BTC",  "MAGY": "META",  "YMAG": "QQQ",
                                 "PLTY": "PLTR", "AMZY": "AMZN", "METY": "META",
-                                "JPMY": "JPM",  "FEPI": "SPY",  "SVOL": "VXX",
-                                "DIVO": "SPY",  "SCHD": "SPY",  "JEPI": "SPY",
-                                "JEPQ": "QQQ",  "XYLD": "SPY",  "QYLD": "QQQ",
-                                "RYLD": "IWM",
+                                "JPMY": "JPM",  "MRNY": "MRNA", "OARK": "ARKK",
+                                "NFLY": "NFLX", "ULTY": "SPY",  "AIYY": "QQQ",
+                                "YMAX": "QQQ",  "YMAG": "QQQ",  "MAGY": "META",
+                                "XDTE": "SPY",  "QDTE": "QQQ",  "RDTE": "IWM",
+                                "QQQI": "QQQ",  "SPYI": "SPY",  "BTCI": "BTC",
+                                "JEPI": "SPY",  "JEPQ": "QQQ",
+                                "XYLD": "SPY",  "QYLD": "QQQ",  "RYLD": "IWM",
+                                "FEPI": "SPY",  "DIVO": "SPY",  "SVOL": "VXX",
+                                "SCHD": "SPY",  "BITO": "BTC",
+                                "GPIQ": "SPY",  "XSPI": "SPY",  "XQQI": "QQQ",
+                                "TDAQ": "QQQ",  "KQQQ": "QQQ",
                             }
                             ss_map = {}
                             try:
@@ -550,9 +554,21 @@ def main():
                                 bull_pct   = bz.get("bull_pct", 0)
                                 lean_emoji = "🟢" if lean == "BULLISH" else ("🔴" if lean == "BEARISH" else "🟡")
 
-                                sent = ss_map.get(e["symbol"])
+                                # SentiSense underlying — now comes from buzz dict (pre-fetched in analytics.py)
+                                bz_ul_sent  = bz.get("ul_sent") or {}
+                                bz_ul_tick  = bz.get("ul_ticker", "")
+                                bz_ul_boost = bz.get("ul_boost", 0.0)
                                 ss_line = ""
-                                if sent:
+                                if bz_ul_sent and bz_ul_tick:
+                                    _boost_str = f" · +{bz_ul_boost:.1f} score boost" if bz_ul_boost > 0 else ""
+                                    ss_line = (
+                                        f"┣ Underlying ({bz_ul_tick}): "
+                                        f"`{bz_ul_sent.get('score', 0):+.0f}` {bz_ul_sent.get('lean', '')} "
+                                        f"({bz_ul_sent.get('mentions', 0)} mentions){_boost_str}\n"
+                                    )
+                                elif ss_map.get(e["symbol"]):
+                                    # fallback: legacy ss_map path (if buzz dict missing ul_sent)
+                                    sent = ss_map[e["symbol"]]
                                     ss_line = (
                                         f"┣ Underlying ({underlying_map.get(e['symbol'], '?')}): "
                                         f"`{sent['score']:+.0f}` {sent['lean']} ({sent['mentions']} mentions)\n"
@@ -560,7 +576,7 @@ def main():
 
                                 if buzz_score > 0:
                                     buzz_line = f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
-                                    source_line = "┗ Source: StockTwits community activity + yield filter >10%\n\n"
+                                    source_line = "┗ Source: StockTwits + SentiSense underlying\n\n"
                                 else:
                                     buzz_line = "┣ Buzz: — (yield-sorted fill — no social signal today)\n"
                                     source_line = "┗ Source: yield-sorted fallback\n\n"
@@ -1214,9 +1230,22 @@ def main():
                 tc_earn = TradierClient()
                 if tc_earn.api_key:
                     WHEEL_UNIVERSE = [
+                        # CORE MEGA-CAP
                         "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+                        # AI / SEMICONDUCTOR
+                        "MRVL", "ANET",
+                        # ENTERPRISE SAAS (good IV, recurring revenue — wheel-friendly)
+                        "CRM", "WDAY", "NOW",
+                        # CONSUMER / DIVIDEND
+                        "NKE", "CLX", "TROW",
+                        # GROWTH / HIGH-IV
+                        "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "UBER",
+                        # CRYPTO MINERS (extreme IV — premium machine, size small)
+                        "MARA", "CLSK",
+                        # ENERGY / CLEAN TECH
+                        "BE",
+                        # INCOME / SECTOR
                         "SCHD", "JEPI", "JEPQ", "O", "ARCC",
-                        "TSLA", "COIN", "SOFI", "PLTR",
                         "SPY", "QQQ", "IWM", "GLD", "XLE",
                     ]
                     earn_map = tc_earn.get_earnings_proximity(WHEEL_UNIVERSE, days_ahead=30)
@@ -1308,6 +1337,52 @@ def main():
                     logger.info("SentiSense conviction layer: no notable institutional/insider signals today.")
             except Exception as e:
                 logger.error(f"SentiSense conviction layer failed: {e}")
+
+            # ── MODULE 7: RECENTLY CLOSED RE-ENTRY WATCHLIST ──────────────────
+            # After closing a position profitably, the ticker often re-sets and
+            # offers another entry within days. This module surfaces the last 10
+            # closed tickers, their original strike/status, and whether a fresh
+            # IV setup exists. Zero API calls — purely DB-driven.
+            try:
+                rc_list = engine.db.get_recently_closed(limit=10)
+                if rc_list:
+                    today_d = datetime.now().date()
+                    rc_lines = []
+                    for entry in rc_list:
+                        sym       = entry.get("symbol", "")
+                        pos_type  = entry.get("type", "")
+                        strike    = entry.get("strike", 0)
+                        status    = entry.get("status", "")
+                        retained  = entry.get("retained", 0.0)
+                        closed_dt = entry.get("closed", "")
+                        try:
+                            days_ago = (today_d - datetime.strptime(closed_dt, "%Y-%m-%d").date()).days
+                        except Exception:
+                            days_ago = "?"
+                        status_icon = "✅" if status in ("CLOSED", "EXPIRED") else ("📦" if status == "ASSIGNED" else "🔄")
+                        rc_lines.append(
+                            f"┣ {status_icon} **{sym}** — {pos_type} `${strike:.0f}` | "
+                            f"closed `{days_ago}d ago` ({status}) | kept `${retained:.0f}`"
+                        )
+                    if rc_lines:
+                        rc_lines[-1] = rc_lines[-1].replace("┣", "┗", 1)
+                        rc_payload = (
+                            "Tickers closed recently — IV often resets within days, "
+                            "creating a fresh entry at a similar strike.\n\n"
+                            + "\n".join(rc_lines)
+                            + "\n\n┗ Check IV rank before re-entering. Original strike = reference only."
+                        )
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(
+                                WEBHOOK_INCOME,
+                                "🔁 RE-ENTRY RADAR | Recently Closed",
+                                rc_payload, 0x95a5a6
+                            )
+                            logger.info(f"Re-entry radar dispatched: {len(rc_lines)} tickers.")
+                else:
+                    logger.info("Re-entry radar: no recently closed positions in queue.")
+            except Exception as e:
+                logger.error(f"Re-entry radar module failed: {e}")
 
         elif args.mode == "wheel_position":
             if args.action == "open":
@@ -1531,27 +1606,52 @@ def main():
                     payload = f"**TRENDING OPTIONS PLAYS — {today_label}**\n\n"
                     for p in plays:
                         chg_arrow = "▲" if p["chg_5d"] >= 0 else "▼"
+
+                        # ── IVR line (real rank when ≥30 days stored, building label otherwise)
+                        ivr_days = p.get("ivr_days", 0)
+                        if ivr_days >= 30:
+                            ivr_icon = "🔥" if p["ivr"] >= 60 else ("✅" if p["ivr"] >= 35 else "❄️")
+                            ivr_line = f"┣ IVR: {ivr_icon} `{p['ivr']:.0f}` ({p['ivr_tag']}) — {ivr_days}d history\n"
+                        else:
+                            ivr_line = f"┣ IVR: `building` ({ivr_days}/30 days — HV30 proxy in use)\n"
+
+                        # ── Earnings proximity warning
+                        earn_line = ""
+                        if p.get("earnings_flag") == "REVIEW":
+                            earn_line = f"┣ ⚠️ Earnings: `{p['earnings_date']}` — within 21d, size down\n"
+
+                        # ── SentiSense enrichment
+                        ss_line = ""
+                        if p.get("ss_score") is not None:
+                            dom_str = f" · {p['ss_dominance']:.2f}% voice" if p.get("ss_dominance") else ""
+                            men_str = f" · {p['ss_mentions']:,} mentions" if p.get("ss_mentions") else ""
+                            ss_line = f"┣ SentiSense: `{p['ss_score']:.1f}` {p['lean']}{men_str}{dom_str}\n"
+
+                        # ── Insider cluster signal (HIGH plays only, shown when detected)
+                        insider_line = ""
+                        if p.get("insider_signal"):
+                            insider_line = f"┣ Insider: `{p['insider_signal']}` (SentiSense cluster)\n"
+
+                        # ── BTO setup block
                         bto = p.get("bto_setup")
                         bto_block = ""
                         if bto:
                             bto_block = (
-                                f"┣ BTO {bto['direction']} | Strike ~${bto['strike']:.2f} | {bto['dte']} DTE\n"
-                                f"┣ Est. ${bto['prem_lo']:.2f}–${bto['prem_hi']:.2f}/contract (verify live chain)\n"
-                                f"┣ Target +100% (~${bto['target']:.2f}) | Stop -50% (~${bto['stop']:.2f})\n"
+                                f"┣ BTO {bto['direction']} | Strike ~`${bto['strike']:.2f}` | `{bto['dte']}` DTE\n"
+                                f"┣ Est. `${bto['prem_lo']:.2f}`–`${bto['prem_hi']:.2f}`/contract (verify live chain)\n"
+                                f"┣ Target +100% (~`${bto['target']:.2f}`) | Stop -50% (~`${bto['stop']:.2f}`)\n"
                                 f"┣ R/R 2:1\n"
                             )
-                        # SentiSense enrichment line (shown only when available)
-                        ss_line = ""
-                        if p.get("ss_score") is not None:
-                            dom_str = f" · {p['ss_dominance']:.2f}% share of voice" if p.get("ss_dominance") else ""
-                            men_str = f" · {p['ss_mentions']:,} mentions" if p.get("ss_mentions") else ""
-                            ss_line = f"┣ SentiSense: `{p['ss_score']:.1f}/10` {p['lean']}{men_str}{dom_str}\n"
+
                         payload += (
                             f"**{p['symbol']}** `${p['spot']:.2f}`  "
-                            f"{chg_arrow} {abs(p['chg_5d']):.1f}% (5D)\n"
-                            f"┣ Buzz: {p['meter']} · {p['lean']}\n"
-                            f"┣ Vol: {p['vol_ratio']:.1f}x avg · RSI {p['rsi']:.0f}\n"
+                            f"{chg_arrow} `{abs(p['chg_5d']):.1f}%` (5D)\n"
+                            f"┣ Buzz: `{p['meter']}` · {p['lean']}\n"
+                            f"┣ Vol: `{p['vol_ratio']:.1f}x` avg · RSI `{p['rsi']:.0f}`\n"
+                            f"{ivr_line}"
                             f"{ss_line}"
+                            f"{insider_line}"
+                            f"{earn_line}"
                             f"{bto_block}"
                             f"┗ {p['verdict']}\n\n"
                         )

@@ -43,8 +43,6 @@ STATE_FILE = os.path.join(BASE_DIR, ".daily_pulse_state.json")
 # Flag words that identify credit card / liability accounts by name
 CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "gold", "margin")
 
-# Low-balance threshold — NFCU/M1 liquid checking only (not credit cards)
-LIQUID_LOW_THRESHOLD = 2000.0
 
 # NAV proxy tickers and defaults
 NAV_TICKERS  = {"CLM": "XCLMX", "CRF": "XCRFX"}
@@ -476,10 +474,14 @@ def _portfolio_deltas(current_total, state):
     return " | ".join(parts)
 
 
-def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None):
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None, simplefin_stale=False):  # noqa: ARG001 (regime/market_mood reserved for future use)
     today     = date.today().strftime("%b %d, %Y")
-    spy_price, bull, vixy_z, vixy_label = regime
     lines     = []
+
+    if simplefin_stale:
+        cached_date = state.get("simplefin_cache", {}).get("date", "unknown")
+        lines.append(f"⚠️ SimpleFIN offline — showing cached data from {cached_date}")
+        lines.append("")
 
     # ── Section 1: Cash Reserves (liquid checking/savings only)
     total_liquid = sum(a["balance"] for a in liquid)
@@ -532,35 +534,7 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
     else:
         lines.append("┗ EDGAR status unavailable")
 
-    # ── Section 6: Market Regime + SentiSense Mood
-    lines.append("")
-    lines.append("MARKET REGIME")
-    regime_str = "Bull — above 200 SMA" if bull else ("Bear — below 200 SMA" if bull is False else "Unknown")
-    lines.append(f"┣ SPY: ${spy_price:,.2f} — {regime_str}")
-    lines.append(f"┣ VIXY z: {vixy_z:+.1f}σ ({vixy_label})")
-
-    # SentiSense Market Mood — third regime input.
-    # Catches sentiment/price divergence: SPY above SMA200 (price says GO)
-    # but sentiment at Extreme Fear (crowd says danger ahead) → CAUTION.
-    mood_score, mood_label, mood_signal = (market_mood or (None, None, None))
-    if mood_score is not None:
-        lines.append(f"┣ Market Mood: {mood_score} · {mood_label} — {mood_signal}")
-
-    # Deploy gate: all three inputs must align for full GO
-    sentiment_fear = mood_score is not None and mood_score <= 25
-    if bull and vixy_z < 1.5 and not sentiment_fear:
-        deploy = "🟢 GO — price + vol + sentiment aligned"
-    elif not bull:
-        deploy = "🔴 HOLD — bear regime (SPY below 200 SMA)"
-    elif vixy_z >= 1.5:
-        deploy = "⚠️ CAUTION — fear spike (VIXY elevated)"
-    elif sentiment_fear:
-        deploy = "⚠️ CAUTION — price bullish but sentiment at extreme fear"
-    else:
-        deploy = "🟢 GO — conditions met"
-    lines.append(f"┗ Margin Deploy: {deploy}")
-
-    # ── Section 7: Buying Power Reality Check
+    # ── Section 6: Buying Power Reality Check
     bp = fetch_buying_power_snapshot(total_liquid, total_brokerage, total_owed)
     if bp.get("cpi_yoy") is not None:
         lines.append("")
@@ -573,27 +547,8 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
         lines.append(f"┗ {bp['deploy_urgency']}")
 
     # ── Section 8: Net Monthly Income (Profit First formula)
-    # Sales (distributions) − Expenses (margin interest) = Profit (net carry)
-    # Pushover only — never Discord. Uses portfolio value + DB carry data. No exact margin balance needed.
-    try:
-        from database import EcosystemDatabase as _DPDB
-        _dp_db = _DPDB()
-        _carry = _dp_db.get_state("carry_spread_data") or {}
-        _carry_spread = _carry.get("spread")
-        _margin_rate = _carry.get("margin_rate", 7.25)
-        BLENDED_YIELD = 19.0   # CLM/CRF + Tier 2 blended per CLAUDE.md
-        _monthly_dist_est = total_brokerage * (BLENDED_YIELD / 100) / 12
-        lines.append("")
-        lines.append("NET MONTHLY INCOME (Profit First)")
-        lines.append(f"┣ Est. distributions: ~${_monthly_dist_est:,.0f}/mo ({BLENDED_YIELD:.0f}% blended on ${total_brokerage:,.0f})")
-        lines.append(f"┣ Margin interest: {_margin_rate:.2f}% rate — check E*TRADE for exact balance")
-        if _carry_spread is not None:
-            _carry_icon = "✅" if _carry_spread >= 5.0 else ("⚠️" if _carry_spread >= 2.0 else "🚨")
-            lines.append(f"┗ Carry spread: {_carry_icon} {_carry_spread:+.1f}% above margin rate — distributions > interest cost")
-        else:
-            lines.append("┗ Carry spread: pending (monitor.py writes carry_spread_data daily)")
-    except Exception:
-        pass
+    # Carry spread and margin interest are tracked in monitor.py (cornerstone channel).
+    # Removed from daily_pulse to reduce Pushover notification fatigue.
 
     title   = f"💼 Daily Pulse — {today}"
     message = "\n".join(lines)
@@ -641,20 +596,24 @@ def run_daily_pulse(force=False, debug=False):
         return
 
     liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
-    regime      = fetch_market_regime()
+
+    # Cache fallback: if SimpleFIN fetch failed (empty), load last-known-good from state.
+    simplefin_stale = False
+    if not liquid and not credit and not brokerage:
+        cached = state.get("simplefin_cache")
+        if cached:
+            liquid    = cached.get("liquid", [])
+            credit    = cached.get("credit", [])
+            brokerage = cached.get("brokerage", [])
+            simplefin_stale = True
+            logger.warning(f"SimpleFIN fetch failed — using cached data from {cached.get('date', 'unknown')}")
+        else:
+            logger.warning("SimpleFIN fetch failed and no cache available — balances will show $0")
+
     ro_status   = fetch_ro_status()
-    market_mood = fetch_market_mood()  # SentiSense — cached in DB, 1 call/day
 
-    # ── Low balance check — fires independently, never gates the daily pulse
-    total_liquid = sum(a["balance"] for a in liquid)
-    if total_liquid < LIQUID_LOW_THRESHOLD:
-        push_to_pushover(
-            f"⚠️ Low Balance — {date.today().strftime('%b %d, %Y')}",
-            f"Liquid cash is ${total_liquid:,.2f} — below the ${LIQUID_LOW_THRESHOLD:,.0f} buffer.\n\nReplenish before next billing cycle.",
-            priority=1,
-        )
-
-    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, regime, state, ro_status, market_mood)
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, None, state, ro_status,
+                                             simplefin_stale=simplefin_stale)
     success = push_to_pushover(title, message, priority=0)
 
     if success:
@@ -670,13 +629,22 @@ def run_daily_pulse(force=False, debug=False):
         cutoff = (date.today() - __import__("datetime").timedelta(days=400)).isoformat()
         snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
 
-        state.update({
+        state_update = {
             "last_run_date":   today_str,
             "total_liquid":    total_liquid,
             "total_brokerage": total_brokerage,
             "net_worth":       net_worth,
             "snapshots":       snapshots,
-        })
+        }
+        # Only overwrite SimpleFIN cache when we got fresh data (not stale fallback)
+        if not simplefin_stale and (liquid or credit or brokerage):
+            state_update["simplefin_cache"] = {
+                "date":      today_str,
+                "liquid":    liquid,
+                "credit":    credit,
+                "brokerage": brokerage,
+            }
+        state.update(state_update)
         save_state(state)
 
 
