@@ -2376,16 +2376,34 @@ class HighFidelityAnalyticsEngine:
 
         vix_suffix = f" | VIX `{real_vix:.1f}`" if real_vix else ""
 
+        # Gamma line: suppress flip price when GEX is disabled (flip_strike = 0 = no real data)
+        _gex = snap["gex"]
+        _flip = _gex.get("flip_strike", 0.0)
+        _gex_state = _gex.get("market_state", "UNKNOWN")
+        if _flip and _flip > 0 and "UNKNOWN" not in _gex_state:
+            gamma_line = (
+                f"┣ Gamma Regime: {_gex_state} | Flip `${_flip:,.2f}` | P/C OI: `{_gex.get('pc_oi_ratio',1.0):.2f}` ({_gex.get('pc_tag','N/A')})\n"
+            )
+        else:
+            gamma_line = f"┣ P/C OI: `{_gex.get('pc_oi_ratio',1.0):.2f}` ({_gex.get('pc_tag','N/A')}) | GEX: N/A (Tradier OI required)\n"
+
+        # VRP line: suppress when IV fetch failed (IV = 0.0 means no data)
+        _vrp = snap.get("vrp", {})
+        if _vrp.get("iv", 0.0) > 0.0:
+            vrp_line = f"┣ VRP (SPY): IV `{_vrp['iv']:.1f}%` vs RV `{_vrp['hv30']:.1f}%` = `{_vrp['vrp']:+.1f}` — {_vrp['regime']}\n"
+        else:
+            vrp_line = ""   # IV unavailable — suppress rather than show misleading 0.0%
+
         payload = (
             f"🌅 **MARKET ANALYSIS | MORNING BRIEF — Pre-Open Conviction**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"┣ Overnight Futures ({snap['futures_session']}): SPY POC `${snap['futures_poc']:,.2f}` | VAH `${snap['futures_vah']:,.2f}` | VAL `${snap['futures_val']:,.2f}`\n"
             f"{moves_line}"
-            f"┣ Gamma Regime: {snap['gex']['market_state']} | Flip `${snap['gex']['flip_strike']:,.2f}` | P/C OI: `{snap['gex']['pc_oi_ratio']:.2f}` ({snap['gex']['pc_tag']})\n"
+            f"{gamma_line}"
             f"┣ Volatility: VIXY `{snap['vixy_price']:.2f}` (z {snap['vixy_z']:+.2f}σ){vix_suffix} | Nasdaq-100 Breadth: `{snap['breadth']:.0%}`\n"
             f"{macro_line}"
             f"┣ Credit Stress (HY Spread): `{snap['credit_spread']:.2f}%` | Net Liquidity: `${snap['net_liquidity']['net_liquidity']/1e9:,.0f}B` ({snap['net_liquidity']['trend']})\n"
-            f"┣ VRP (SPY): IV `{snap['vrp']['iv']:.1f}%` vs RV `{snap['vrp']['hv30']:.1f}%` = `{snap['vrp']['vrp']:+.1f}` — {snap['vrp']['regime']}\n"
+            f"{vrp_line}"
             f"{crypto_line}"
             f"{flags_line}"
             f"┗ **TODAY'S CONVICTION: {snap['conviction_bias']}** (score {snap['conviction_score']:+d}/6)\n\n"

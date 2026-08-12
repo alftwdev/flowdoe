@@ -108,12 +108,10 @@ def main():
 
     try:
         if args.mode == "macro":
-            liq_payload = engine.generate_macro_liquidity_payload()
-            if liq_payload and WEBHOOK_MARKET:
-                # Color from live HY spread: green=safe, yellow=watch, red=stress
-                _hy = engine.fetch_hy_spread() or 0.0
-                _liq_color = COLOR_RED if _hy > 4.5 else (COLOR_YELLOW if _hy > 3.5 else COLOR_GREEN)
-                send_essentials_embed(WEBHOOK_MARKET, "Credit & Liquidity Check", liq_payload, _liq_color)
+            # Credit & Liquidity and Treasury & Macro no longer dispatch as standalone embeds
+            # to #market-analysis — that data is now inline in market_analysis.py's consolidated
+            # morning brief (13:10 UTC). Only conditional signals dispatch here.
+            liq_payload = engine.generate_macro_liquidity_payload()  # still computed for carry-trade logic
 
             # Cross-sector carry-trade regime: USD/JPY + Gold gives a clean risk-on/off read.
             # Dispatches to #market-analysis only when unambiguous (not MIXED) — no forex channel.
@@ -199,35 +197,8 @@ def main():
                     logger.error(f"BTC/SPY correlation sync failed: {e}")
 
             # ── FRED: Yield Curve + Macro Snapshot ──────────────────────────
-            try:
-                yc = engine.fetch_yield_curve()
-                fred_snap = engine.fetch_fred_macro_snapshot()
-                real_vix = engine.fetch_real_vix()
-                if (yc or fred_snap) and WEBHOOK_MARKET:
-                    yc_line = (
-                        f"┣ Yield Curve (10Y-2Y): `{yc['spread']:+.3f}%` — {yc['label']}\n"
-                        f"┣ 10Y: `{yc['t10']:.3f}%` | 2Y: `{yc['t2']:.3f}%`\n"
-                        if yc else ""
-                    )
-                    vix_line = f"┣ VIX (FRED VIXCLS): `{real_vix:.2f}`\n" if real_vix else ""
-                    macro_lines = ""
-                    if fred_snap:
-                        cpi = fred_snap.get("cpi_yoy")
-                        macro_lines = (
-                            f"┣ Fed Funds Rate: `{fred_snap.get('fedfunds', 'N/A'):.2f}%`\n"
-                            f"┣ CPI YoY: `{cpi:.2f}%`\n" if cpi else ""
-                        ) + f"┗ Unemployment Rate: `{fred_snap.get('unrate', 'N/A'):.1f}%`\n"
-                    fred_payload = (
-                        f"┣ **FRED Macro Overlay — Real Data**\n"
-                        f"{yc_line}{vix_line}{macro_lines}"
-                    )
-                    # Color from yield curve: positive=green, flat zone=yellow, inverted=red
-                    _yc_spread = yc["spread"] if yc else 0.0
-                    _macro_color = COLOR_RED if _yc_spread < 0 else (COLOR_YELLOW if _yc_spread < 0.25 else COLOR_GREEN)
-                    send_essentials_embed(WEBHOOK_MARKET, "Treasury & Macro Conditions (FRED)", fred_payload, _macro_color)
-                    logger.info("Dispatched FRED yield curve + macro snapshot")
-            except Exception as e:
-                logger.error(f"FRED macro dispatch failed: {e}")
+            # Treasury & Macro standalone embed removed — yield curve, VIX, Fed Funds, CPI,
+            # and unemployment are now inline in market_analysis.py's consolidated morning brief.
 
             logger.info("Macro matrix compilation and dispatch completed.")
 
@@ -236,16 +207,12 @@ def main():
             # Folds SPY/QQQ expected-move primers directly into the one brief below — three
             # separate embeds covering the same overnight session collapsed into one report.
             try:
+                # Generate morning report to: (1) write POC/VAH/VAL + expected ranges to DB for
+                # market_analysis.py to read at 13:10 UTC, and (2) run cross-channel conviction sync.
+                # The 4 Pillars embed itself no longer dispatches to #market-analysis — that channel
+                # gets one consolidated brief from market_analysis.py at 13:10 UTC instead.
                 morning_brief, morning_snap = engine.generate_market_analysis_morning_report()
-                if morning_brief and WEBHOOK_MARKET:
-                    # 4 Pillars header (Andy Tanner framework): orients every report around the
-                    # fundamental → technical → cash flow → risk decision sequence.
-                    pillars_header = (
-                        "**4 Pillars Framework** — Fundamental → Technical → Cash Flow → Risk\n"
-                        "─────────────────────────────────────────────────\n"
-                    )
-                    _morning_color = _bias_color(morning_snap.get("conviction_score", 0))
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | MORNING BRIEF", pillars_header + morning_brief, _morning_color)
+                if morning_snap:
                     dispatch_conviction_sync(engine, morning_snap, "morning")
             except Exception as e:
                 import traceback

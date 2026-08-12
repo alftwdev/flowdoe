@@ -50,9 +50,12 @@ TWELVE_DATA_API_KEY     = os.getenv("TWELVE_DATA_API_KEY")
 
 # Fire times (UTC hour, minute) and their DB dedup keys
 FIRE_SCHEDULE = [
-    (12,  0, "ma_morning",   "morning"),   # 08:00 ET pre-market | 02:00 HST
-    (17,  0, "ma_intraday",  "intraday"),  # 13:00 ET mid-session | 07:00 HST
-    (21, 30, "ma_eod",       "eod"),       # 17:30 ET after close | 11:30 HST
+    (13, 10, "ma_morning",   "morning"),   # 03:10 HST — shifted +70min so scheduler.py morning
+                                           # (12:50 UTC) has time to write SPY/QQQ POC/VAH/VAL
+                                           # and expected-range DB keys before we read them.
+    (17,  0, "ma_intraday",  "intraday"),  # 07:00 HST mid-session
+    # ma_eod disabled — scheduler.py --mode eod (20:20 UTC) produces a richer EOD recap
+    # (morning call accuracy, signal grading). market_analysis.py EOD duplicated it.
 ]
 FIRE_WINDOW_MIN = 2   # ± minutes around target time
 
@@ -484,28 +487,62 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
 
     sigs = bias["signals"]
 
+    # ── OVERNIGHT MARKET STRUCTURE ────────────────────────────────────────────
+    # Populated by scheduler.py --mode morning (12:50 UTC, 20min before this brief fires).
+    # Reads SPY/QQQ POC/VAH/VAL + expected daily move ranges from DB — zero extra API calls.
+    market_structure_section = ""
+    try:
+        _spy_poc = db.get_state("SPY_poc")
+        _spy_vah = db.get_state("SPY_vah")
+        _spy_val = db.get_state("SPY_val")
+        _spy_up  = db.get_state("SPY_expected_upper")
+        _spy_lo  = db.get_state("SPY_expected_lower")
+        _qqq_up  = db.get_state("QQQ_expected_upper")
+        _qqq_lo  = db.get_state("QQQ_expected_lower")
+        _breadth = db.get_state("tqqq_breadth_cache")
+        _gex_state  = db.get_state("SPY_session") or ""   # "RTH" / "OVERNIGHT" / ""
+        if _spy_poc and _spy_up and _spy_lo:
+            _breadth_str = f" | Breadth: `{float(_breadth):.0%}`" if _breadth else ""
+            market_structure_section = (
+                "\n**OVERNIGHT MARKET STRUCTURE**\n"
+                f"┣ SPY: POC `${float(_spy_poc):,.2f}` | VAH `${float(_spy_vah):,.2f}` | VAL `${float(_spy_val):,.2f}`\n"
+                f"┣ SPY range: `${float(_spy_lo):,.2f}` – `${float(_spy_up):,.2f}`"
+                + (f" | QQQ range: `${float(_qqq_lo):,.2f}` – `${float(_qqq_up):,.2f}`" if _qqq_up else "")
+                + f"{_breadth_str}\n"
+                f"┗ Break above VAH = bullish continuation · Break below VAL = bearish extension\n"
+            )
+    except Exception as e:
+        logger.warning(f"Morning: market structure DB read failed: {e}")
+
     # ── MACRO ENVIRONMENT ─────────────────────────────────────────────────────
     try:
         yc   = engine.fetch_yield_curve()
         snap = engine.fetch_fred_macro_snapshot()
         hy   = engine.fetch_hy_spread()
         real_vix = bias["real_vix"]
-        # Natenberg (1994): daily expected move = annual_IV / sqrt(252)
-        # Shows the options market's 1-std expected daily range — direct VRP context.
-        _edm = real_vix / 15.874   # sqrt(252)
+        _edm = real_vix / 15.874   # sqrt(252) — daily expected move from Natenberg (1994)
         _vix_regime = ('Calm. Options cheap.' if real_vix < 15 else
                        'Low vol.' if real_vix < 20 else
                        'Elevated. Size down.' if real_vix < 30 else
                        'PANIC. Defensive posture.')
         vix_line = f"`{real_vix:.1f}` ±`{_edm:.2f}%`/day — {_vix_regime}"
-        yc_line  = f"`{yc['spread']:+.2f}%` {yc['label']}" if yc else "N/A"
+        # Yield curve: spread + raw 10Y/2Y rates (replacing Treasury & Macro standalone embed)
+        if yc:
+            yc_line = (
+                f"`{yc['spread']:+.2f}%` {yc['label']} "
+                f"(10Y `{yc['t10']:.2f}%` | 2Y `{yc['t2']:.2f}%`)"
+            )
+        else:
+            yc_line = "N/A"
         ff_line  = f"`{snap.get('fedfunds', '?')}%` Fed Funds"
         hy_line  = f"`{hy:.2f}%` {'✅ healthy' if hy < 4.5 else '⚠️ stress' if hy < 6 else '🔴 crisis'}" if hy else "N/A"
         cpi_line = f"`{snap.get('cpi_yoy', '?')}%` CPI YoY" if snap.get("cpi_yoy") else ""
+        urate    = snap.get("unrate")
     except Exception as e:
         logger.warning(f"Morning: macro section failed: {e}")
         yc_line = hy_line = ff_line = cpi_line = "N/A"
         vix_line = f"`{bias['real_vix']:.1f}`"
+        urate = None
 
     macro_section = (
         "**MACRO ENVIRONMENT**\n"
@@ -513,11 +550,11 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"┣ Yield Curve: {yc_line}\n"
         f"┣ {ff_line} | HY Spread: {hy_line}\n"
     )
-    if cpi_line:
+    if cpi_line and urate:
+        macro_section += f"┗ {cpi_line} | Unemployment: `{urate:.1f}%`\n"
+    elif cpi_line:
         macro_section += f"┗ {cpi_line}\n"
     else:
-        macro_section = macro_section.rstrip("┣ \n").replace("┣ VIXY", "┗ VIXY") + "\n"
-        # Properly close the last line
         macro_section = _swap_last_bullet(macro_section)
 
     # ── EQUITY PULSE ──────────────────────────────────────────────────────────
@@ -774,11 +811,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         else:
             mood_line = ""
 
-        # Congressional trades — top 4 most recent disclosures
-        trades = ss.get_congressional_trades(db, limit=4)
+        # Congressional trades — recent disclosures only (30-day filter prevents stale entries)
+        from datetime import date as _ct_date, timedelta as _ct_td
+        _cutoff = (_ct_date.today() - _ct_td(days=30)).isoformat()
+        trades = ss.get_congressional_trades(db, limit=8)   # fetch more, filter down
+        trades = [t for t in (trades or []) if (t.get("date") or "") >= _cutoff][:4]
         trade_lines = ""
         if trades:
-            trade_lines = "┣ Congressional trades (STOCK Act):\n"
+            trade_lines = "┣ Congressional trades (STOCK Act — last 30d):\n"
             for t in trades:
                 party_tag = f"({t['party']}-{t['state']})" if t.get("party") and t.get("state") else ""
                 trade_lines += (
@@ -796,7 +836,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     except Exception as e:
         logger.warning(f"Morning: SentiSense section failed: {e}")
 
-    description = macro_section + equity_section + signals_section + ss_section + directives_section
+    description = market_structure_section + macro_section + equity_section + signals_section + ss_section + directives_section
     title = f"MORNING BRIEF — {now_label}"
     return title, description, bias["color"]
 

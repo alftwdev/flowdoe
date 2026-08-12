@@ -88,13 +88,13 @@ SCHEDULE = [
     # options_flow (×3) removed — GEX always returns UNKNOWN at this plan tier;
     # all three runs fell through to the fallback "Options Market Flowstate" embed
     # with SPY Gamma Posture: UNKNOWN and GEX Flip Level: $0.00. Zero signal value.
-    (17, 30, "market_intraday",    "scheduler",    ["--mode", "market_intraday"], True),
+    # market_intraday removed — market_analysis.py always-on handles intraday pulse at 17:00 UTC.
     # spx_income removed — not part of active strategy.
     (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
     (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 20, "eod",                "scheduler",    ["--mode", "eod"],             True),  # was 20:16 — 6 min gap avoids concurrent TD burst
-    (20, 30, "macro_pm",           "scheduler",    ["--mode", "macro"],           True),
+    # macro_pm removed — Credit/Treasury data was already in morning brief and duplicated at EOD.
     # Ex-div reaction check — 20:35 UTC daily (after US close, after macro_pm).
     # Phase 1 (ex-div day): snapshots closing price to DB.
     # Phase 2 (T+1): compares drop to distribution → Pushover if OVERSHOOT or UNDERSHOOT.
