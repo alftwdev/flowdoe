@@ -32,6 +32,9 @@ from database import EcosystemDatabase
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("Monitor_Engine")
 
+# Suppress dotenv parser warnings for blank/comment lines in .env (line 40 spacer)
+logging.getLogger("dotenv.main").setLevel(logging.ERROR)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 db = EcosystemDatabase()
@@ -475,6 +478,13 @@ def _td_sleep_rate_limit(attempt: int, response: dict) -> bool:
         f"[Rate Limit] 429 on attempt {attempt + 1} — sleeping {secs_remaining}s "
         f"to clear the TD minute window ({response.get('message', '')[:80]})"
     )
+    # Set loop-level cooldown so the NEXT loop tick also skips TD calls.
+    # This prevents a second batch of requests firing immediately after the sleep
+    # if market_analysis.py is still consuming credits on the same minute window.
+    try:
+        db.update_state("td_cooldown_until", round(time.time() + secs_remaining + 5, 1))
+    except Exception:
+        pass
     time.sleep(secs_remaining)
     return True
 
@@ -523,26 +533,38 @@ def fetch_live_metrics(session, symbol, retries=3):
 
 
 def fetch_time_series(session, symbol, outputsize=21):
-    """Returns list of daily close dicts from Twelve Data, newest first."""
-    try:
-        res = session.get(
-            "https://api.twelvedata.com/time_series",
-            params={"symbol": symbol, "interval": "1day",
-                    "outputsize": outputsize, "apikey": TD_API_KEY},
-            timeout=20).json()
-        if res.get('code') == 429:
-            secs = 62 - datetime.now().second
-            logger.warning(f"[Rate Limit] time_series {symbol} — sleeping {secs}s")
-            time.sleep(secs)
+    """
+    Returns list of daily close dicts from Twelve Data, newest first.
+    Retries up to 3 times: 429s wait for the next minute boundary;
+    timeouts and transient errors use 5s/15s progressive backoff.
+    Returns [] on all failures (caller must handle empty gracefully).
+    """
+    _backoff = [0, 5, 15]
+    for _attempt in range(3):
+        try:
+            if _backoff[_attempt]:
+                time.sleep(_backoff[_attempt])
             res = session.get(
                 "https://api.twelvedata.com/time_series",
                 params={"symbol": symbol, "interval": "1day",
                         "outputsize": outputsize, "apikey": TD_API_KEY},
-                timeout=20).json()
-        return res.get("values", [])
-    except Exception as e:
-        logger.error(f"[Time Series Fetch Error] {symbol}: {e}")
-        return []
+                timeout=25).json()
+            if res.get('code') == 429:
+                secs = 62 - datetime.now().second
+                logger.warning(f"[Rate Limit] time_series {symbol} attempt {_attempt+1} — sleeping {secs}s")
+                time.sleep(secs)
+                continue  # retry after minute boundary
+            vals = res.get("values", [])
+            if vals:
+                return vals
+            # Empty values on non-429 = market closed or bad symbol — don't retry
+            logger.warning(f"[Time Series] {symbol}: empty values (market closed or bad symbol)")
+            return []
+        except Exception as e:
+            logger.warning(f"[Time Series] {symbol} attempt {_attempt+1} failed: {e}")
+            if _attempt == 2:
+                logger.error(f"[Time Series Fetch Error] {symbol}: gave up after 3 attempts — {e}")
+    return []
 
 def fetch_obv_mfi(session, symbol):
     """
@@ -2328,11 +2350,36 @@ def compute_cornerstone_reports():
         _cs_icon = "✅" if carry_spread >= 5.0 else ("⚠️" if carry_spread >= 2.0 else "🚨")
         _xlines.append(f"┗ Carry Spread: {_cs_icon} `{carry_spread:+.1f}%` (Tier 2 yield − margin rate)")
 
+        # ── Write to journal (passive, always) — never append to Discord report.
+        # Only surface in Discord when a threshold condition is abnormal.
         if _xlines:
-            # Ensure last line has the closing leg marker
-            if not _xlines[-1].startswith("┗"):
-                _xlines[-1] = _xlines[-1].replace("┣", "┗", 1)
-            full_report += "\n\n**📡 Cross-Signal Confluence**\n" + "\n".join(_xlines)
+            _journal_text = "Cross-Signal Confluence:\n" + "\n".join(_xlines)
+            try:
+                db.log_journal_entry(entry_type="confluence_snapshot", notes=_journal_text)
+            except Exception:
+                logger.debug("Journal write skipped — log_journal_entry not available")
+
+        # ── Discord alert: only when something is out of the ordinary
+        _alert_lines = []
+        if _bot is not None and int(_bot) >= 55:
+            _alert_lines.append(f"┣ 🟢 TQQQ CALL gate open — Bottom `{int(_bot)}/100`")
+        if _top is not None and int(_top) >= 55:
+            _alert_lines.append(f"┣ 🔴 TQQQ PUT gate open — Top `{int(_top)}/100`")
+        if _vts is not None:
+            try:
+                if float(_vts) >= 3.0:
+                    _alert_lines.append(f"┣ ⚠️ VIX backwardation `{float(_vts):.3f}` — vol stress signal")
+            except (TypeError, ValueError):
+                pass
+        if _hy > 4.5:
+            _alert_lines.append(f"┣ 🚨 HY Spread `{_hy:.2f}%` — above 4.5% threshold")
+        if carry_spread < 2.0:
+            _alert_lines.append(f"┣ 🚨 Carry Spread `{carry_spread:+.1f}%` — critically thin")
+        if _alert_lines:
+            if not _alert_lines[-1].startswith("┗"):
+                _alert_lines[-1] = _alert_lines[-1].replace("┣", "┗", 1)
+            full_report += "\n\n**📡 Confluence Alert**\n" + "\n".join(_alert_lines)
+
     except Exception as _xe:
         logger.warning(f"Cross-signal confluence block failed: {_xe}")
 
@@ -2551,35 +2598,62 @@ def send_daily_pulse(is_test=False):
     except Exception as _be:
         logger.warning(f"Box income snippet failed: {_be}")
 
-    # ── Carry spread Pushover alert (once per day when compressed) ────────────
-    # Fires separately from the main cornerstone so it arrives as a distinct notification.
-    if carry_spread < 5.0:
-        _carry_alert_key = f"carry_spread_alert_{__import__('datetime').date.today().isoformat()}"
-        if not db.get_state(_carry_alert_key):
-            db.update_state(_carry_alert_key, True)
-            _p_tok = os.getenv("PUSHOVER_API_TOKEN")
-            _p_usr = os.getenv("PUSHOVER_USER_KEY")
-            if _p_tok and _p_usr:
-                try:
-                    _carry_data = db.get_state("carry_spread_data") or {}
-                    _msg = (
-                        f"Carry spread compressed to {carry_spread:+.1f}%\n"
-                        f"Tier 2 yield {_carry_data.get('tier2_yield', TIER2_ACTIVE_BLENDED):.1f}% "
-                        f"vs margin {_carry_data.get('margin_rate', margin_rate):.2f}%\n"
-                        + ("CRITICAL: spread near zero — pause new margin draws" if carry_spread < 2.0
-                           else "WARNING: positive carry shrinking — monitor rate")
-                    )
-                    requests.post(
-                        "https://api.pushover.net/1/messages.json",
-                        data={"token": _p_tok, "user": _p_usr,
-                              "title": "⚠️ MARGIN CARRY ALERT",
-                              "message": _msg,
-                              "priority": 1 if carry_spread < 2.0 else 0},
-                        timeout=10,
-                    )
-                    logger.info(f"Carry spread Pushover alert fired: {carry_spread:+.1f}%")
-                except Exception as _e:
-                    logger.warning(f"Carry spread Pushover failed: {_e}")
+    # ── Carry spread Pushover alert — tier-transition + value-change dedup ────
+    # Fires on: (1) tier change (safe→warning, warning→critical, or recovery),
+    # or (2) value shifts ≥0.5% since last alert. NOT on every daily pulse —
+    # a stable +4.2% spread doesn't need a daily nag. Weekly fallback prevents
+    # total silence if spread drifts slowly without crossing a tier boundary.
+    _CARRY_TIERS = {
+        "SAFE":     carry_spread >= 5.0,
+        "WARNING":  2.0 <= carry_spread < 5.0,
+        "CRITICAL": carry_spread < 2.0,
+    }
+    _carry_tier_now  = next(k for k, v in _CARRY_TIERS.items() if v)
+    _carry_tier_prev = db.get_state("carry_spread_last_tier") or "SAFE"
+    _carry_last_val  = float(db.get_state("carry_spread_last_alerted_val") or 0.0)
+    _carry_last_week = db.get_state("carry_spread_last_alerted_week") or ""
+    _this_week       = datetime.now().strftime("%Y-W%W")
+
+    _tier_changed  = _carry_tier_now != _carry_tier_prev
+    _val_drifted   = abs(carry_spread - _carry_last_val) >= 0.5
+    _weekly_due    = _carry_last_week != _this_week   # fallback: at least once/week
+
+    _should_alert  = carry_spread < 5.0 and (_tier_changed or _val_drifted or _weekly_due)
+
+    if _should_alert:
+        db.update_state("carry_spread_last_tier",         _carry_tier_now)
+        db.update_state("carry_spread_last_alerted_val",  round(carry_spread, 2))
+        db.update_state("carry_spread_last_alerted_week", _this_week)
+        _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+        _p_usr = os.getenv("PUSHOVER_USER_KEY")
+        if _p_tok and _p_usr:
+            try:
+                _carry_data = db.get_state("carry_spread_data") or {}
+                _change_note = (
+                    f"Tier changed: {_carry_tier_prev} → {_carry_tier_now}" if _tier_changed
+                    else (f"Drift: was {_carry_last_val:+.1f}%, now {carry_spread:+.1f}%" if _val_drifted
+                          else "Weekly carry check")
+                )
+                _msg = (
+                    f"Carry spread: {carry_spread:+.1f}% ({_change_note})\n"
+                    f"Tier 2 yield {_carry_data.get('tier2_yield', TIER2_ACTIVE_BLENDED):.1f}% "
+                    f"vs margin {_carry_data.get('margin_rate', margin_rate):.2f}%\n"
+                    + ("CRITICAL: spread near zero — pause new margin draws" if carry_spread < 2.0
+                       else "WARNING: positive carry shrinking — monitor margin rate")
+                )
+                requests.post(
+                    "https://api.pushover.net/1/messages.json",
+                    data={"token": _p_tok, "user": _p_usr,
+                          "title": "⚠️ MARGIN CARRY ALERT",
+                          "message": _msg,
+                          "priority": 1 if carry_spread < 2.0 else 0},
+                    timeout=10,
+                )
+                logger.info(f"Carry spread Pushover alert fired: {carry_spread:+.1f}% ({_change_note})")
+            except Exception as _e:
+                logger.warning(f"Carry spread Pushover failed: {_e}")
+    else:
+        logger.info(f"Carry spread {carry_spread:+.1f}% ({_carry_tier_now}) — no alert (no tier/value change)")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTINUOUS ESCALATION LOOP (every 5 min, tier-transition debounced)
@@ -2626,16 +2700,36 @@ def run_monitor():
     # creating N concurrent connection storms that hammered TD and burned CPU.
     # REST polling every 5 min is the protection engine — WS adds no unique value here.
 
+    # Startup jitter: random 3–18s offset so monitor.py loop ticks don't land
+    # exactly on the :00 boundary alongside market_analysis.py (18:00 UTC).
+    # Reduces simultaneous TD credit consumption without affecting functionality.
+    import random as _rand
+    _startup_jitter = _rand.randint(3, 18)
+    logger.info(f"[Loop Jitter] Startup offset {_startup_jitter}s — desync from market_analysis.py")
+    time.sleep(_startup_jitter)
+
     while True:
-        now_utc_h = datetime.now(timezone.utc).hour
+        now_utc   = datetime.now(timezone.utc)
+        now_utc_h = now_utc.hour
         rth = 13 <= now_utc_h < 21   # Regular Trading Hours (13:00–21:00 UTC)
 
+        # ── Rate limit cooldown gate ──────────────────────────────────────────
+        # When a 429 fires anywhere in the loop, _td_cooldown_until is set to
+        # time.time() + 65 (one full minute). Skip all TD REST calls this tick.
+        _td_cooldown_until = float(db.get_state("td_cooldown_until") or 0.0)
+        _td_cooling = time.time() < _td_cooldown_until
+        if _td_cooling:
+            _secs_left = int(_td_cooldown_until - time.time())
+            logger.info(f"[TD Cooldown] Skipping TD calls — {_secs_left}s remaining on rate limit window")
+
         try:
-            if rth:
+            if rth and not _td_cooling:
                 # ── Full scan during market hours
                 # Price/NAV/RSI fetches, WS-triggered escalation, seasonal check
                 check_and_escalate_if_critical()
                 check_and_dispatch_seasonal_caution()
+            elif rth and _td_cooling:
+                logger.info("[TD Cooldown] RTH tick skipped — rate limit cooldown active")
             else:
                 # ── Off-hours: SEC/EDGAR only — N-2 and SC 13D/G filings drop 24/7
                 # Skip the expensive Twelve Data REST calls (no prices to act on)
