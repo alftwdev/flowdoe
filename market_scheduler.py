@@ -90,6 +90,7 @@ SCHEDULE = [
     # with SPY Gamma Posture: UNKNOWN and GEX Flip Level: $0.00. Zero signal value.
     # market_intraday removed — market_analysis.py always-on handles intraday pulse at 17:00 UTC.
     # spx_income removed — not part of active strategy.
+    (14, 30, "strangle_scan",      "scheduler",    ["--mode", "strangle_scan"],   True),  # 04:30 HST — after US cash open
     (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
     (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),

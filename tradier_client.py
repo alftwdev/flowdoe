@@ -410,7 +410,7 @@ class TradierClient:
         Tradier /markets/calendar — find earnings dates within days_ahead for each symbol.
         Returns dict keyed by symbol: {"days_to_earnings": int, "date": str, "flag": str}.
         flag: "FORCE_CLOSE" if ≤ 7 DTE to earnings, "REVIEW" if ≤ 21 DTE, "CLEAR" otherwise.
-        Uses Tradier's earnings calendar endpoint (included in $10/mo plan).
+        Fetches 2 calendar months when days_ahead > 28 so a 60-day strangle window works.
         """
         if not self.api_key:
             return {}
@@ -418,14 +418,22 @@ class TradierClient:
         end_date = today + timedelta(days=days_ahead)
         results  = {}
         try:
-            # Tradier calendar returns event data including earnings per date range
-            r = self._get("/markets/calendar", {
-                "month": today.month,
-                "year":  today.year,
-            })
-            days_data = r.get("calendar", {}).get("days", {}).get("day", [])
-            if isinstance(days_data, dict):
-                days_data = [days_data]
+            # Collect months to fetch — always current month; add next month when window spans it
+            months_to_fetch = [(today.month, today.year)]
+            if end_date.month != today.month or end_date.year != today.year:
+                nm = today.month % 12 + 1
+                ny = today.year + (1 if today.month == 12 else 0)
+                months_to_fetch.append((nm, ny))
+
+            days_data: list = []
+            for m, y in months_to_fetch:
+                r = self._get("/markets/calendar", {"month": m, "year": y})
+                if not r:
+                    continue
+                month_days = r.get("calendar", {}).get("days", {}).get("day", [])
+                if isinstance(month_days, dict):
+                    month_days = [month_days]
+                days_data.extend(month_days)
 
             # Build a lookup: symbol → nearest earnings date
             earnings_map: dict = {}

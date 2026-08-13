@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
     parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -2690,6 +2690,124 @@ def main():
 
             except Exception as e:
                 logger.error(f"box_position mode failed: {e}")
+
+        elif args.mode == "strangle_scan":
+            # ── EARNINGS LONG STRANGLE SCANNER ───────────────────────────────
+            # Scans STRANGLE_UNIVERSE for upcoming earnings events and evaluates
+            # whether a long strangle (buy OTM call + buy OTM put) has edge:
+            #   ENTER   — 7–35 DTE, historical avg move > implied move by ≥10%
+            #   MONITOR — 36–60 DTE (approaching; note entry window date)
+            #   PASS    — 7–35 DTE but implied move ≥ historical (too expensive)
+            #   TOO_LATE — < 7 DTE (IV crush risk — skip)
+            # Outputs to WEBHOOK_TRADE_SIGNALS (#options-wheel).
+            # Credits: ~2/ticker on cold run (hist moves cache miss); 0 on warm run.
+            logger.info("Executing Earnings Strangle Scanner...")
+            try:
+                candidates = engine.generate_strangle_scan()
+                if not candidates:
+                    logger.info("Strangle scan: no tickers with earnings in 60-day window.")
+                else:
+                    enter    = [c for c in candidates if c["status"] == "ENTER"]
+                    monitor  = [c for c in candidates if c["status"] == "MONITOR"]
+                    too_late = [c for c in candidates if c["status"] == "TOO_LATE"]
+                    pass_lst = [c for c in candidates if c["status"] == "PASS"]
+
+                    # Only broadcast when there is something actionable
+                    if not enter and not too_late and not pass_lst:
+                        logger.info("Strangle scan: only MONITOR-status tickers — no broadcast.")
+                    else:
+                        date_str = datetime.now().strftime("%b %-d %Y")
+                        payload = f"Earnings Strangle Radar — {date_str}\n\n"
+
+                        if enter:
+                            payload += "✅ ENTER WINDOW (7–35 DTE)\n\n"
+                            for c in enter:
+                                hist_str = (
+                                    f"±{c['avg_hist_move']}% avg ({c['hist_quarters']}q, "
+                                    f"{int(c['consistency_10pct'] or 0)}% ≥10% move)"
+                                    if c.get("avg_hist_move") else "Hist: building"
+                                )
+                                implied_str = f"±{c['implied_move_pct']}%" if c.get("implied_move_pct") else "—"
+                                edge_str = (
+                                    f"✅ Edge: {c['edge_ratio']}× hist>implied"
+                                    if c.get("edge_ratio") else "Edge: N/A"
+                                )
+                                iv_line = f"IV: `{c['atm_iv']}%`"
+                                if c.get("ivr") is not None:
+                                    iv_line += f" | IVR: `{int(c['ivr'])}%` ({c.get('ivr_tag','')})"
+                                if c.get("sentiment"):
+                                    iv_line += f" | Sent: {c['sentiment']}"
+                                strikes = ""
+                                if c.get("call_strike") and c.get("put_strike"):
+                                    strikes = (
+                                        f"┣ Setup: ~${c['call_strike']:.0f}C / ~${c['put_strike']:.0f}P "
+                                        f"(0.25Δ each) | Spot: ${c['current_price']:.2f}\n"
+                                    )
+                                payload += (
+                                    f"**{c['ticker']}** — Reports `{c['earnings_date']}` | {c['dte']} DTE\n"
+                                    f"┣ Hist: {hist_str}\n"
+                                    f"┣ Implied: {implied_str} | {edge_str}\n"
+                                    f"┣ {iv_line}\n"
+                                    f"{strikes}"
+                                    f"┗ Standard: hold thru earnings | IV alt: exit 1d before to capture expansion\n\n"
+                                )
+
+                        if monitor:
+                            payload += "⏳ MONITOR (36–60 DTE)\n\n"
+                            for c in monitor:
+                                hist_str = f"±{c['avg_hist_move']}%" if c.get("avg_hist_move") else "—"
+                                window = f" | Entry opens ~{c['entry_window_opens']}" if c.get("entry_window_opens") else ""
+                                payload += (
+                                    f"**{c['ticker']}** — Reports `{c['earnings_date']}` | {c['dte']} DTE\n"
+                                    f"┗ Hist avg: {hist_str}{window}\n\n"
+                                )
+
+                        if too_late:
+                            payload += "⚠️ TOO LATE — IV crush risk (< 7 DTE), skip\n"
+                            for c in too_late:
+                                payload += f"┗ **{c['ticker']}** — {c['earnings_date']} ({c['dte']} DTE)\n"
+                            payload += "\n"
+
+                        if pass_lst:
+                            payload += "⛔ NO EDGE — market pricing in the full move\n"
+                            for c in pass_lst:
+                                hist_str = f"±{c['avg_hist_move']}%" if c.get("avg_hist_move") else "—"
+                                implied_str = f"±{c['implied_move_pct']}%" if c.get("implied_move_pct") else "—"
+                                payload += (
+                                    f"┗ **{c['ticker']}** ({c['dte']} DTE) | Hist: {hist_str} | "
+                                    f"Implied: {implied_str} (ratio: {c.get('edge_ratio','N/A')}×)\n"
+                                )
+                            payload += "\n"
+
+                        payload += (
+                            "📋 GUIDE: Buy OTM call + put simultaneously | 0.25Δ each leg | 1-2 contracts max\n"
+                            "Stop: close if strangle loses 50% before earnings\n"
+                            "IV expansion alt: exit 1-2 days before earnings (avoids IV crush, captures IV run-up)"
+                        )
+
+                        # Dedup: only broadcast when the ENTER/TOO_LATE set changes
+                        state_key = "_".join(
+                            f"{c['ticker']}{c['status']}{c['dte']}"
+                            for c in candidates if c["status"] in ("ENTER", "TOO_LATE", "PASS")
+                        )
+                        if engine.db.track_and_limit_alerts(
+                            "strangle_scan", state_key, float(len(enter)),
+                            max_broadcasts=3, threshold_pct=0.0
+                        ):
+                            if WEBHOOK_TRADE_SIGNALS:
+                                send_essentials_embed(
+                                    WEBHOOK_TRADE_SIGNALS,
+                                    "STRANGLE RADAR | Earnings Volatility Scanner",
+                                    payload, 0x9b59b6  # purple — distinct from wheel (orange) and tqqq (blue)
+                                )
+                                logger.info(
+                                    f"Strangle radar dispatched: {len(enter)} ENTER, "
+                                    f"{len(monitor)} MONITOR, {len(too_late)} TOO_LATE, {len(pass_lst)} PASS"
+                                )
+                        else:
+                            logger.info("Strangle scan: state unchanged, no broadcast.")
+            except Exception as e:
+                logger.error(f"Strangle scan failed: {e}", exc_info=True)
 
     except Exception as e:
         logger.critical(f"Task Failed: {e}")

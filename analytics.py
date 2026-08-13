@@ -1036,6 +1036,227 @@ class HighFidelityAnalyticsEngine:
 
         return flagged
 
+    # ── Earnings Long Strangle Scanner ────────────────────────────────────────
+
+    STRANGLE_UNIVERSE = [
+        "TSLA", "NFLX",           # Jan/Apr/Jul/Oct reporters — consistent big movers
+        "NVDA", "PLTR",           # Feb/May/Aug/Nov — AI-cycle vol, high retail interest
+        "MU",   "ORCL", "FDX",   # Mar/Jun/Sep/Dec — memory cycles, AI infra, macro bellwether
+        "COIN", "AMD",  "META",   # High-IV additions with liquid options chains
+    ]
+
+    def _get_historical_earnings_moves(self, symbol: str) -> dict:
+        """
+        Fetch last 8 quarters of earnings dates from Twelve Data /earnings and compute
+        actual post-report price moves. Cached in DB for 30 days per ticker.
+        Returns: {avg_abs_pct, moves (list of signed floats), consistency_10pct, quarters, cached_date}
+        """
+        cache_key = f"strangle_hist_moves_{symbol}"
+        cached = self.db.get_state(cache_key)
+        if isinstance(cached, dict) and cached.get("cached_date"):
+            try:
+                age_days = (datetime.now().date() - datetime.fromisoformat(cached["cached_date"]).date()).days
+                if age_days < 30:
+                    return cached
+            except Exception:
+                pass
+
+        empty = {"avg_abs_pct": None, "moves": [], "consistency_10pct": None, "quarters": 0}
+        try:
+            # Twelve Data /earnings — 1 credit, available on Grow plan
+            r = requests.get(
+                f"{self.base_url}/earnings",
+                params={"symbol": symbol, "apikey": self.api_key, "limit": "8"},
+                timeout=15,
+            ).json()
+            earnings_list = r.get("earnings", [])
+            if not earnings_list:
+                return empty
+
+            # Fetch 400-day price series to look up closes around each report date (1 credit)
+            ts = self._execute_query("time_series", {"symbol": symbol, "interval": "1day", "outputsize": "400"})
+            if not ts or "values" not in ts:
+                return empty
+
+            price_by_date = {row["datetime"][:10]: float(row["close"]) for row in ts["values"]}
+
+            moves = []
+            for entry in earnings_list:
+                report_date = entry.get("date", "")
+                if not report_date:
+                    continue
+                try:
+                    rd = datetime.strptime(report_date, "%Y-%m-%d").date()
+                    close_before = next(
+                        (price_by_date[(rd - timedelta(days=d)).isoformat()]
+                         for d in range(1, 5)
+                         if (rd - timedelta(days=d)).isoformat() in price_by_date),
+                        None,
+                    )
+                    close_after = next(
+                        (price_by_date[(rd + timedelta(days=d)).isoformat()]
+                         for d in range(1, 5)
+                         if (rd + timedelta(days=d)).isoformat() in price_by_date),
+                        None,
+                    )
+                    if close_before and close_after:
+                        moves.append(round((close_after - close_before) / close_before * 100, 1))
+                except Exception:
+                    continue
+
+            if not moves:
+                return empty
+
+            result = {
+                "avg_abs_pct": round(sum(abs(m) for m in moves) / len(moves), 1),
+                "moves": moves,
+                "consistency_10pct": round(sum(1 for m in moves if abs(m) >= 10) / len(moves) * 100),
+                "quarters": len(moves),
+                "cached_date": datetime.now().date().isoformat(),
+            }
+            self.db.update_state(cache_key, result)
+            return result
+        except Exception as e:
+            logger.warning(f"[StrangleHist] {symbol}: {e}")
+            return empty
+
+    def generate_strangle_scan(self) -> list:
+        """
+        Earnings long strangle scanner for STRANGLE_UNIVERSE.
+        For each ticker: earnings date (Tradier), historical avg move (Twelve Data, 30d cache),
+        implied move (from stored IV + formula), IVR (stored iv_daily), SentiSense sentiment.
+        Classifies each as ENTER / MONITOR / TOO_LATE / PASS (no edge).
+
+        Credits per run (cold): ~2 per ticker (hist moves cache miss) + 0 Tradier credits.
+        Credits per run (warm, all cached): 0 extra beyond the normal price fetch.
+        """
+        import math
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+        except Exception:
+            tc = None
+
+        # Tradier calendar with 60-day window (fetches 2 months if needed)
+        earnings_map: dict = {}
+        if tc:
+            try:
+                earnings_map = tc.get_earnings_proximity(self.STRANGLE_UNIVERSE, days_ahead=60)
+            except Exception as e:
+                logger.warning(f"[StrangleScan] Tradier earnings fetch failed: {e}")
+
+        today = datetime.now().date()
+        results = []
+
+        for ticker in self.STRANGLE_UNIVERSE:
+            try:
+                e_data = earnings_map.get(ticker, {})
+                dte = e_data.get("days_to_earnings")
+                earnings_date = e_data.get("date")
+
+                if dte is None:
+                    continue  # no upcoming earnings in 60-day window — skip
+
+                # Current price
+                ts = self._execute_query("time_series", {"symbol": ticker, "interval": "1day", "outputsize": "2"})
+                if not ts or "values" not in ts:
+                    continue
+                current_price = float(ts["values"][0]["close"])
+
+                # IV: prefer stored daily value, fall back to HV30 × 1.15
+                atm_iv = None
+                ivr_data = self.db.get_iv_rank(ticker)
+                if ivr_data.get("reliable") and ivr_data.get("current_iv"):
+                    atm_iv = float(ivr_data["current_iv"])
+                if not atm_iv or atm_iv < 5.0:
+                    hv30 = self.calculate_historical_volatility(ticker, lookback=30) or 30.0
+                    atm_iv = round(hv30 * 1.15, 1)
+
+                ivr = ivr_data.get("ivr") if ivr_data.get("reliable") else None
+                ivr_tag = ivr_data.get("tag", "BUILDING")
+
+                # Implied move = IV × √(DTE/365) × 0.80  (standard ATM straddle approximation)
+                implied_move_pct = round(atm_iv * math.sqrt(max(dte, 1) / 365.0) * 0.80, 1) if atm_iv and dte > 0 else None
+
+                # Historical moves (cached 30 days)
+                hist = self._get_historical_earnings_moves(ticker)
+                avg_hist = hist.get("avg_abs_pct")
+                consistency = hist.get("consistency_10pct")
+                quarters = hist.get("quarters", 0)
+
+                # Edge: historical avg move > implied move by ≥10%
+                edge = False
+                edge_ratio = None
+                if avg_hist and implied_move_pct and implied_move_pct > 0:
+                    edge_ratio = round(avg_hist / implied_move_pct, 2)
+                    edge = edge_ratio >= 1.10
+
+                # Suggested strikes at ~0.25Δ ≈ 1.0 SD from current price
+                call_strike, put_strike = None, None
+                if current_price and atm_iv and dte > 0:
+                    one_sd = current_price * atm_iv / 100 * math.sqrt(dte / 365.0)
+                    call_strike = round(current_price + one_sd, 0)
+                    put_strike = round(max(1, current_price - one_sd), 0)
+
+                # Status classification
+                if dte < 7:
+                    status = "TOO_LATE"
+                elif 7 <= dte <= 35:
+                    status = "ENTER" if edge else "PASS"
+                else:
+                    status = "MONITOR"
+
+                # Entry window open date for MONITOR tickers
+                entry_window_opens = None
+                if dte > 35:
+                    entry_window_opens = (today + timedelta(days=dte - 35)).isoformat()
+
+                # Sentiment (SentiSense, cached daily)
+                sentiment_label = None
+                try:
+                    from sentisense_client import SentiSenseClient
+                    ss = SentiSenseClient()
+                    sent = ss.get_sentiment(self.db, ticker)
+                    if sent:
+                        score = sent.get("score", 0)
+                        if score >= 60:
+                            sentiment_label = f"BULLISH ({score})"
+                        elif score <= 30:
+                            sentiment_label = f"BEARISH ({score})"
+                        else:
+                            sentiment_label = f"NEUTRAL ({score})"
+                except Exception:
+                    pass
+
+                results.append({
+                    "ticker": ticker,
+                    "status": status,
+                    "dte": dte,
+                    "earnings_date": earnings_date,
+                    "current_price": round(current_price, 2),
+                    "atm_iv": round(atm_iv, 1),
+                    "ivr": ivr,
+                    "ivr_tag": ivr_tag,
+                    "implied_move_pct": implied_move_pct,
+                    "avg_hist_move": avg_hist,
+                    "hist_quarters": quarters,
+                    "consistency_10pct": consistency,
+                    "edge": edge,
+                    "edge_ratio": edge_ratio,
+                    "call_strike": call_strike,
+                    "put_strike": put_strike,
+                    "sentiment": sentiment_label,
+                    "entry_window_opens": entry_window_opens,
+                })
+            except Exception as e:
+                logger.warning(f"[StrangleScan] {ticker}: {e}")
+                continue
+
+        # Sort: ENTER first (by DTE), then MONITOR, TOO_LATE, PASS
+        order = {"ENTER": 0, "MONITOR": 1, "TOO_LATE": 2, "PASS": 3}
+        results.sort(key=lambda x: (order.get(x["status"], 9), x["dte"]))
+        return results
+
     NEW_INCOME_ETF_UNIVERSE = {
         # symbol: (family, pay_freq)
         # Verified July 2026 against issuer websites + SEC filings.
