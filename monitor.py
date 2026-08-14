@@ -1620,7 +1620,7 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     return (
         f"**{ticker}** — {status}\n"
         f"┣ Price: `${price:.2f}`\n"
-        f"┣ NAV: `${nav:.2f}` ({nav_label})\n"
+        f"┣ NAV: `${nav:.2f}`\n"
         f"┣ Prem: `{premium:.2f}%` {prem_tag}\n"
         f"{edgar_sec_line}"
         f"┣ Whale Flow: {whale_tag}\n"
@@ -2361,15 +2361,8 @@ def compute_cornerstone_reports():
             # never surfaced to Discord until now).
             _acc_status = db.get_state(f"{ticker}_acc_status") or ""
             _acc_detail = db.get_state(f"{ticker}_acc_detail") or ""
-            if _acc_status:
-                _acc_icon = "✅" if "OPEN" in _acc_status else ("⚠️" if "CAUTION" in _acc_status else "🔴")
-                if _acc_detail and "OPEN" not in _acc_status:
-                    # Two-line block: Acc. Gate is the penultimate, detail line is the last leg
-                    text = text.rstrip("\n") + f"\n┣ Acc. Gate: {_acc_icon} {_acc_status}\n"
-                    text = text.rstrip("\n") + f"\n┗   {_acc_detail[:120]}\n"
-                else:
-                    # Single-line block: Acc. Gate IS the last leg
-                    text = text.rstrip("\n") + f"\n┗ Acc. Gate: {_acc_icon} {_acc_status}\n"
+            # Acc. Gate removed from embed — status stored in DB for cross-script reads,
+            # not surfaced in the Discord notification (reduces noise on every pulse).
             reports.append(text)
             if TIER_RANK.get(tier, 0) > TIER_RANK.get(worst_tier, 0):
                 worst_tier = tier
