@@ -1563,51 +1563,52 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
 
     sec  = _parse_sec_shield(sec_shield)
 
-    # Protection line 1 — EDGAR/SEC: merge N-2 + 13D/G into one line (highest priority signals)
+    # EDGAR/SEC line — no emoji, semicolon separator
     if sec["ro_active"] and sec["holder_change"]:
-        edgar_sec_line = f"┣ ⚡ EDGAR/SEC: ⚠️ N-2 RO ACTIVE + Large holder change (13D/G)\n"
+        edgar_sec_line = "┣ EDGAR/SEC: ⚠️ N-2 RO ACTIVE; Large holder change (13D/G)\n"
     elif sec["ro_active"]:
-        edgar_sec_line = f"┣ ⚡ EDGAR/SEC: ⚠️ N-2/RO registration detected — ACTION REQUIRED\n"
+        edgar_sec_line = "┣ EDGAR/SEC: ⚠️ N-2/RO registration — ACTION REQUIRED\n"
     elif sec["holder_change"]:
-        edgar_sec_line = f"┣ ⚡ EDGAR/SEC: ⚠️ Large holder change (13D/G) — monitor closely\n"
+        edgar_sec_line = "┣ EDGAR/SEC: ⚠️ Large holder change (13D/G) — monitor\n"
     else:
-        edgar_sec_line = f"┣ ⚡ EDGAR/SEC: No N-2 · No 13D/G (safe)\n"
+        edgar_sec_line = "┣ EDGAR/SEC: No N-2; No 13D/G (safe)\n"
 
-    # Protection line 2 — Whale + Dark Pool on one line
     whale_tag = f"⚠️ {whale_status}" if "DISTRIBUTION" in whale_status.upper() else "NORMAL"
-    # dark_pool_desc comes in as a short string from detect_dark_pool_activity()
-    dp_safe = not dark_pool_desc or "CLEAR" in dark_pool_desc.upper() or "NORMAL" in dark_pool_desc.upper()
-    dp_tag  = "CLEAR" if dp_safe else f"⚠️ {dark_pool_desc}"
-    whale_dp_line = f"┣ Whale Flow: {whale_tag}  Dark Pool: {dp_tag}\n"
+    dp_safe   = not dark_pool_desc or "CLEAR" in dark_pool_desc.upper() or "NORMAL" in dark_pool_desc.upper()
+    dp_tag    = "CLEAR" if dp_safe else f"⚠️ {dark_pool_desc}"
 
-    # Conditional protection lines — only when triggered
+    # NAV source label (compact)
+    nav_label = "CEFConnect" if "cefconnect" in nav_src.lower() else "proxy"
+
+    # Conditional lines — only appear when triggered, inserted before Div. Yield
     vixy_line      = f"┣ VIXY: `{vixy_z:+.1f}σ` spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
     seasonal_line  = "┣ Seasonal Caution: Active (March/Sept weakness)\n" if seasonal_caution else ""
     nav_det_line   = "┣ ⚠️ NAV Lock Month (Oct) — heightened sensitivity\n" if nav_determination else ""
     inst_exit_line = f"┣ 🔴 Inst. Exit: {cef_inst_exit_desc}\n" if cef_inst_exit_desc and "INST. EXIT" in cef_inst_exit_desc else ""
-    # Dist. Floor only surfaces as a warning when price is structurally overvalued (>10% above FV)
     dist_line      = (
-        f"┣ ⚠️ Dist. Yield: `{implied_yield:.1f}%` — price OVERVALUED vs 19% target (reduce exposure)\n"
+        f"┣ ⚠️ Dist. Yield: `{implied_yield:.1f}%` — OVERVALUED vs 19% target (reduce exposure)\n"
         if is_dist_overvalued else ""
     )
 
-    # NAV source label (compact)
-    nav_label = "CEFConnect" if "cefconnect" in nav_src.lower() else "proxy"
-
     return (
         f"**{ticker}** — {status}\n"
-        f"┣ Price: `${price:.2f}`  NAV: `${nav:.2f}` ({nav_label})  Prem: `{premium:.2f}%` {prem_tag}\n"
+        f"┣ Price: `${price:.2f}`\n"
+        f"┣ NAV: `${nav:.2f}` ({nav_label})\n"
+        f"┣ Prem: `{premium:.2f}%` {prem_tag}\n"
         f"{edgar_sec_line}"
-        f"{whale_dp_line}"
-        f"┣ Z-Score: `{z_premium:+.1f}σ` {z_tag}  RSI: `{rsi:.1f}` {rsi_tag}\n"
+        f"┣ Whale Flow: {whale_tag}\n"
+        f"┣ Dark Pool: {dp_tag}\n"
+        f"┣ Z-Score: `{z_premium:+.1f}σ` {z_tag}\n"
+        f"┣ RSI: `{rsi:.1f}` {rsi_tag}\n"
         f"{vixy_line}"
         f"{ro_season_line}"
         f"{seasonal_line}"
         f"{nav_det_line}"
         f"{inst_exit_line}"
         f"{dist_line}"
-        f"┗ Div. Yield: `{y_dist:.1f}%` | RO Risk: `{ro_score}/100` ({ro_tier})\n"
+        f"┣ Div. Yield: `{y_dist:.1f}%`\n"
+        f"┗ Verdict = RO Risk: `{ro_score}/100` ({ro_tier})\n"
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
