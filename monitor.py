@@ -81,7 +81,7 @@ PRIORITY_ASSETS = {
 
 # Ex-dividend heuristic: CLM/CRF ex-div falls mid-month (historically days 15–19).
 # A price dip in this window is a scheduled cash-payout event, not dilution/RO risk.
-EX_DIV_WINDOW_DAYS = range(15, 20)
+EX_DIV_WINDOW_DAYS = range(12, 17)   # CLM/CRF historically go ex-div on days 12–16 (was 15–19, missed the 14th)
 
 # RO Filing Season: historically N-2 filings cluster mid-Feb through mid-Apr.
 # Real filing history verified against SEC CIKs across 2016-2025.
@@ -861,11 +861,16 @@ def detect_whale_flow_direction(session, symbol):
 # suggesting institutional exit routed through dark pools or off-exchange venues.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def detect_dark_pool_activity(session, symbol):
+def detect_dark_pool_activity(session, symbol, monthly_dist: float = 0.0):
     """
     Dark pool signature: meaningful price decline + public volume well below 20D average.
     When institutions sell in size through dark pools, the lit exchange shows thin volume
     while price still falls — the opposite of a normal retail selloff.
+
+    Ex-div suppression: if today is in the ex-div window (days 12–16) AND the absolute
+    price drop is within 2× the monthly distribution, the drop is a scheduled ex-div dip —
+    not dark pool activity. Signal is suppressed and labeled clearly.
+
     Returns (is_dark_pool, price_chg_pct, vol_ratio, description).
     """
     try:
@@ -876,16 +881,37 @@ def detect_dark_pool_activity(session, symbol):
         today_vol    = float(values[0]["volume"])
         baseline_vol = sum(float(v["volume"]) for v in values[1:21]) / max(len(values[1:21]), 1)
         vol_ratio    = today_vol / baseline_vol if baseline_vol > 0 else 1.0
-        price_chg    = (float(values[0]["close"]) - float(values[1]["close"])) / float(values[1]["close"]) * 100
+        prev_close   = float(values[1]["close"])
+        today_close  = float(values[0]["close"])
+        price_chg    = (today_close - prev_close) / prev_close * 100
+        abs_drop     = prev_close - today_close   # positive when price fell
+
+        # Ex-div gate: suppress dark pool flag when drop matches the scheduled distribution
+        in_exdiv_window = is_near_ex_dividend_window()
+        exdiv_drop_max  = monthly_dist * 2.0     # allow up to 2× dist for market noise on ex-div day
+        is_exdiv_drop   = (
+            in_exdiv_window
+            and monthly_dist > 0
+            and abs_drop <= exdiv_drop_max
+            and price_chg <= 0   # must be a drop, not a gain
+        )
 
         is_dark_pool = (
-            price_chg  <= DARK_POOL_PRICE_DROP_PCT and
-            vol_ratio  <= DARK_POOL_VOLUME_RATIO_MAX
+            not is_exdiv_drop
+            and price_chg  <= DARK_POOL_PRICE_DROP_PCT
+            and vol_ratio  <= DARK_POOL_VOLUME_RATIO_MAX
         )
-        desc = (
-            f"{'🕵️ ' if is_dark_pool else ''}{price_chg:+.1f}% / {vol_ratio:.2f}x vol — "
-            f"{'OFF-EXCHANGE EXIT SIGNAL' if is_dark_pool else 'normal'}"
-        )
+
+        if is_exdiv_drop:
+            desc = (
+                f"EX-DIV DIP (scheduled) {price_chg:+.1f}% / {vol_ratio:.2f}x vol — "
+                f"drop ${abs_drop:.4f} ≈ ${monthly_dist:.4f} dist. Not dark pool."
+            )
+        else:
+            desc = (
+                f"{'🕵️ ' if is_dark_pool else ''}{price_chg:+.1f}% / {vol_ratio:.2f}x vol — "
+                f"{'OFF-EXCHANGE EXIT SIGNAL' if is_dark_pool else 'CLEAR'}"
+            )
         return is_dark_pool, price_chg, vol_ratio, desc
     except Exception as e:
         logger.error(f"[Dark Pool Detector Error] {symbol}: {e}")
@@ -1696,7 +1722,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # finds the high-conviction signal requires clustering across 2+ consecutive sessions:
     # institutions distributing in size repeatedly over 48–72h, not routine low-volume days.
     # Full +18pt score requires 2 of last 3 sessions flagged; single session gets +8pts only.
-    is_dark_pool, price_chg, vol_ratio, dark_pool_desc = detect_dark_pool_activity(session, ticker)
+    _monthly_dist = (1.4268 if ticker == "CLM" else 1.3824) / 12   # $0.1189 CLM / $0.1152 CRF
+    is_dark_pool, price_chg, vol_ratio, dark_pool_desc = detect_dark_pool_activity(session, ticker, monthly_dist=_monthly_dist)
     dark_pool_cluster_count = 0
     if is_dark_pool:
         _dp_key = f"dark_pool_session_hist_{ticker}"
@@ -2788,8 +2815,14 @@ def check_and_escalate_if_critical():
     if current_rank > prev_rank and current_rank > 0:
         if can_broadcast("cornerstone", is_major=True):
             logger.warning(f"🚨 Escalation: {worst_tier} (was rank {prev_rank}) — firing immediate alert.")
-            title = "🚨🚨 CORNERSTONE — IMMEDIATE ACTION REQUIRED 🚨🚨"
-            dispatch_cornerstone_alert(title, full_report, 0xe74c3c)
+            # Soften title when ex-div window is active — avoids false-alarm panic
+            if is_near_ex_dividend_window() and worst_tier == "ELEVATED":
+                title = "📅 CORNERSTONE — ELEVATED (ex-div window active)"
+                color = 0xf39c12   # amber — caution, not emergency
+            else:
+                title = "🚨🚨 CORNERSTONE — IMMEDIATE ACTION REQUIRED 🚨🚨"
+                color = 0xe74c3c
+            dispatch_cornerstone_alert(title, full_report, color)
             increment_alert_count("cornerstone")
 
     db.update_state("cornerstone_alert_tier_rank", current_rank)
