@@ -1514,7 +1514,7 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     _vs_fv_str = f"{_vs_fv:+.1f}% vs FV ${_fv_display:.2f}" if price > 0 else ""
 
     return (
-        f"{ticker} — {status}\n"
+        f"**{ticker}** — {status}\n"
         f"┣ Price: `${price:.2f}`  {_vs_fv_str}\n"
         f"┣ SEC Filing: {sec['sec_line']}\n"
         f"┣ Premium to NAV: `{premium:.2f}%` {prem_tag}\n"
