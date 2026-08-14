@@ -139,6 +139,16 @@ def fetch_simplefin_accounts(debug=False):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_cef_snapshot():
+    """
+    Price + NAV + RSI + premium for CLM/CRF.
+
+    NAV source priority:
+      1. DB key clm_last_nav / crf_last_nav — written by monitor.py via CEFConnect (0 TD credits)
+      2. XCLMX / XCRFX proxy via Twelve Data (2 TD credits, fallback only)
+    This matches the NAV source shown in the #cornerstone embed.
+    """
+    from database import EcosystemDatabase
+    db = EcosystemDatabase()
     results = {}
     session = requests.Session()
     for ticker, nav_ticker in NAV_TICKERS.items():
@@ -146,18 +156,34 @@ def fetch_cef_snapshot():
             price = float(session.get(
                 f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TD_API_KEY}",
                 timeout=12).json().get("price", 0.0))
-            nav = float(session.get(
-                f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
-                timeout=12).json().get("price", NAV_DEFAULTS[ticker]))
+            # Read NAV from DB (monitor.py writes this from CEFConnect daily)
+            db_nav = db.get_state(f"{ticker.lower()}_last_nav")
+            if db_nav and float(db_nav) > 0:
+                nav = float(db_nav)
+                nav_src = "CEFConnect"
+            else:
+                nav = float(session.get(
+                    f"https://api.twelvedata.com/price?symbol={nav_ticker}&apikey={TD_API_KEY}",
+                    timeout=12).json().get("price", NAV_DEFAULTS[ticker]))
+                nav_src = "proxy"
             rsi_res = session.get(
                 f"https://api.twelvedata.com/rsi?symbol={ticker}&interval=1day"
                 f"&time_period=14&apikey={TD_API_KEY}", timeout=12).json()
             rsi = float(rsi_res.get("values", [{"rsi": 50.0}])[0]["rsi"])
             premium = ((price - nav) / nav * 100) if nav > 0 else 0.0
-            results[ticker] = {"price": price, "nav": nav, "rsi": rsi, "premium": premium}
+            # Also pull RO risk score monitor.py already computed (0 extra API calls)
+            ro_score = db.get_state(f"{ticker.lower()}_last_ro_score")
+            results[ticker] = {
+                "price": price, "nav": nav, "nav_src": nav_src,
+                "rsi": rsi, "premium": premium,
+                "ro_score": int(ro_score) if ro_score is not None else None,
+            }
         except Exception as e:
             logger.error(f"CEF fetch failed {ticker}: {e}")
-            results[ticker] = {"price": 0.0, "nav": NAV_DEFAULTS[ticker], "rsi": 50.0, "premium": 0.0}
+            results[ticker] = {
+                "price": 0.0, "nav": NAV_DEFAULTS[ticker], "nav_src": "default",
+                "rsi": 50.0, "premium": 0.0, "ro_score": None,
+            }
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -517,25 +543,41 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
 
     # ── Section 4: Net Worth Snapshot
     net_worth = total_liquid + total_owed + total_brokerage
+
+    # ── Section 6: Buying Power Reality Check (computed before NET WORTH so CPI is available)
+    bp = fetch_buying_power_snapshot(total_liquid, total_brokerage, total_owed)
+    cpi_yoy = bp.get("cpi_yoy") or 3.5
+
     lines.append("")
     lines.append("NET WORTH SNAPSHOT")
     lines.append(f"┣ Liquid:    ${total_liquid:,.2f}")
     lines.append(f"┣ Owed:      ${total_owed:,.2f}")
     lines.append(f"┣ Portfolio: ${total_brokerage:,.2f}")
-    lines.append(f"┗ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
+    lines.append(f"┣ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
+    # Real (inflation-adjusted) net worth — answers "what is my money actually worth?"
+    real_nw = round(net_worth / (1 + cpi_yoy / 100), 2)
+    lines.append(f"┗ Real NW (CPI-adj): ${real_nw:,.2f} — ${net_worth - real_nw:,.0f} lost to {cpi_yoy:.1f}% inflation/yr")
 
-    # ── Section 5: CLM / CRF Cornerstone — RO status only
+    # ── Section 5: CLM / CRF Cornerstone — EDGAR status + live metrics from DB
     lines.append("")
     lines.append("CORNERSTONE (CLM / CRF)")
-    if ro_status:
-        for ticker, status in ro_status.items():
-            prefix = "┣" if ticker != list(ro_status.keys())[-1] else "┗"
-            lines.append(f"{prefix} {ticker}: {status}")
-    else:
-        lines.append("┗ EDGAR status unavailable")
+    tickers_list = list(ro_status.keys()) if ro_status else ["CLM", "CRF"]
+    for i, ticker in enumerate(tickers_list):
+        is_last = (i == len(tickers_list) - 1)
+        edgar_str = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
+        snap = cef.get(ticker, {}) if cef else {}
+        price   = snap.get("price", 0.0)
+        nav     = snap.get("nav", 0.0)
+        prem    = snap.get("premium", 0.0)
+        nav_src = snap.get("nav_src", "")
+        ro_sc   = snap.get("ro_score")
+        # Build compact line: EDGAR status + price/NAV/prem if available
+        price_part = f" | ${price:.2f} / NAV ${nav:.2f} / Prem {prem:.1f}%" if price > 0 else ""
+        ro_part    = f" | RO {ro_sc}/100" if ro_sc is not None else ""
+        nav_tag    = f" ({nav_src})" if nav_src and nav_src != "default" else ""
+        prefix = "┣" if not is_last else "┗"
+        lines.append(f"{prefix} {ticker}: {edgar_str}{price_part}{nav_tag}{ro_part}")
 
-    # ── Section 6: Buying Power Reality Check
-    bp = fetch_buying_power_snapshot(total_liquid, total_brokerage, total_owed)
     if bp.get("cpi_yoy") is not None:
         lines.append("")
         lines.append("BUYING POWER (Real $)")
@@ -611,8 +653,9 @@ def run_daily_pulse(force=False, debug=False):
             logger.warning("SimpleFIN fetch failed and no cache available — balances will show $0")
 
     ro_status   = fetch_ro_status()
+    cef_data    = fetch_cef_snapshot()
 
-    title, message, _ = format_pulse_message(liquid, credit, brokerage, None, None, state, ro_status,
+    title, message, _ = format_pulse_message(liquid, credit, brokerage, cef_data, None, state, ro_status,
                                              simplefin_stale=simplefin_stale)
     success = push_to_pushover(title, message, priority=0)
 
