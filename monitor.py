@@ -231,6 +231,72 @@ def fetch_hy_spread_live() -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CEFConnect — OFFICIAL NAV (replaces XCLMX/XCRFX proxy for premium display)
+# CEFConnect publishes the fund manager's official end-of-day NAV via their
+# public API. This is the same value shown on the Cornerstone website and is
+# the authoritative figure for premium/discount calculations.
+# 0 Twelve Data credits (external HTTP call). Cached daily — NAV doesn't change
+# intraday. Falls back to the last cached value then to XCLMX/XCRFX proxy on failure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CEFCONNECT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.cefconnect.com/",
+}
+
+def fetch_nav_cefconnect(session, ticker: str) -> tuple:
+    """
+    Fetches the most recently confirmed NAV from CEFConnect's pricing history API.
+    CEFConnect uses XCLMX/XCRFX as its underlying NAV source — the distinction
+    from Twelve Data's live XCLMX fetch is that CEFConnect publishes the official
+    end-of-day confirmed figure rather than an intraday snapshot that can drift.
+
+    Endpoint: /api/v3/pricinghistory/{ticker}/5D
+    Returns the most recent row from PriceHistory:
+      NAVData — official confirmed NAV (what Cornerstone website shows)
+      DiscountData — premium/discount at that NAV date
+      Data — market price at that date (NOT used for premium — we use live price)
+
+    Cached once per calendar day (0 Twelve Data credits, no rate impact).
+    Returns (nav: float, confirmed_premium_at_nav_date: float | None, source: str).
+    """
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cache_key = f"cefconnect_nav_{ticker}_{today_str}"
+    cached    = db.get_state(cache_key)
+    if isinstance(cached, dict) and cached.get("nav", 0) > 0:
+        return float(cached["nav"]), cached.get("confirmed_premium"), "CEFConnect (cached)"
+
+    url = f"https://www.cefconnect.com/api/v3/pricinghistory/{ticker}/5D"
+    try:
+        r = session.get(url, headers=CEFCONNECT_HEADERS, timeout=12)
+        if r.status_code != 200:
+            raise ValueError(f"HTTP {r.status_code}")
+        rows = r.json().get("Data", {}).get("PriceHistory", [])
+        if not rows:
+            raise ValueError("empty PriceHistory")
+
+        # Most recent confirmed row (last entry in the list)
+        latest = rows[-1]
+        nav    = float(latest.get("NAVData") or 0)
+        prem   = latest.get("DiscountData")
+        prem   = float(prem) if prem is not None else None
+        nav_date = latest.get("DataDateDisplay", "")
+
+        if nav > 0:
+            payload = {"nav": nav, "confirmed_premium": prem, "nav_date": nav_date, "date": today_str}
+            db.update_state(cache_key, payload)
+            logger.info(f"[NAV] CEFConnect {ticker}: NAV=${nav:.4f} (as of {nav_date})" +
+                        (f" | confirmed premium={prem:.2f}%" if prem is not None else ""))
+            return nav, prem, "CEFConnect"
+
+    except Exception as e:
+        logger.warning(f"[NAV] CEFConnect unavailable for {ticker}: {e} — falling back to proxy")
+
+    return 0.0, None, "proxy"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BOX SPREAD POSITION READER (DB-only, zero API calls)
 # Box positions are written by scheduler.py --mode box_position --action open.
 # monitor.py reads them to surface DTE countdowns, balloon warnings, and RO
@@ -1472,7 +1538,8 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          y_dist=0.0,
                          nav_determination=False, cef_inst_exit_desc="",
                          dist_fair_value=0.0, implied_yield=0.0,
-                         is_dist_overvalued=False) -> str:
+                         is_dist_overvalued=False,
+                         nav_src="CEFConnect") -> str:
     """
     Cornerstone Pulse — mobile-first labeled format.
 
@@ -1487,7 +1554,10 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     Removed from output (back-pocket / DB only):
       N-CSR, DEF 14A individual lines, Margin Deploy advisory.
     """
-    prem_tag = "(neutral)" if 10 <= premium <= 20 else ("(EXTENDED)" if premium > 25 else ("(HIGH)" if premium > 15 else "(DISCOUNT)"))
+    prem_tag = ("(neutral)" if 10 <= premium <= 20
+                else ("(EXTENDED)" if premium > 25
+                else ("(HIGH)" if premium > 15
+                else "(DISCOUNT)")))
     rsi_tag  = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else ("(OVERSOLD)" if rsi < 30 else "(neutral)"))
     z_tag    = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
@@ -1562,17 +1632,26 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if not _stale_price and price > 0:
         db.update_state(f"{ticker.lower()}_last_price", round(price, 4))
 
-    # NAV persistence: if live fetch returned the hardcoded default, try DB cached value first.
-    # XCLMX/XCRFX intermittently return 0 or fail on Twelve Data — without this, premium
-    # and z_premium compute against the wrong baseline and z_premium gets stored as null.
-    _default_nav = PRIORITY_ASSETS[ticker]["default_nav"]
-    if nav == _default_nav:
-        _cached_nav = db.get_state(f"{ticker.lower()}_last_nav")
-        if _cached_nav:
-            try:
-                nav = float(_cached_nav)
-            except (TypeError, ValueError):
-                pass
+    # ── Official NAV via CEFConnect (replaces XCLMX/XCRFX proxy for premium accuracy)
+    # CEFConnect publishes the fund manager's official end-of-day NAV — same source
+    # as the Cornerstone website. Cached daily (0 Twelve Data credits, no rate impact).
+    # XCLMX/XCRFX remains in fetch_live_metrics() as a last-resort fallback only.
+    _nav_official, _prem_official, _nav_src = fetch_nav_cefconnect(session, ticker)
+    if _nav_official > 0:
+        nav = _nav_official  # override proxy with official NAV
+    else:
+        # CEFConnect unreachable — try last DB-cached official NAV before settling for proxy
+        _default_nav = PRIORITY_ASSETS[ticker]["default_nav"]
+        if nav == _default_nav:
+            _cached_nav = db.get_state(f"{ticker.lower()}_last_nav")
+            if _cached_nav:
+                try:
+                    nav = float(_cached_nav)
+                    _nav_src = "cached"
+                except (TypeError, ValueError):
+                    pass
+        _nav_src = "proxy" if nav == PRIORITY_ASSETS[ticker]["default_nav"] else "cached"
+
     if nav > 0:
         db.update_state(f"{ticker.lower()}_last_nav", round(nav, 4))
 
@@ -1882,6 +1961,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         dist_fair_value=dist_fair_value,
         implied_yield=implied_yield,
         is_dist_overvalued=is_dist_overvalued,
+        nav_src=_nav_src,
     )
 
     # ── OBV + MFI: back-pocket volume pressure signals.
