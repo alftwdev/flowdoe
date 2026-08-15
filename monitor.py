@@ -1871,6 +1871,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         if _path_a_done or _path_b_done:
             db.update_state(n2_key, "")
             db.update_state(f"ro_dodge_active_{ticker}", "")
+            db.update_state(f"cornerstone_n2_initial_alerted_{ticker}", "")  # reset for next cycle
             logger.info(f"[N-2 Cycle] {ticker} — re-entry confirmed, cycle closed.")
         # else: preserve n2_key until re-entry fires
 
@@ -3023,43 +3024,103 @@ def run_monitor():
                     _sec_session = requests.Session()
                     for _ticker in ("CLM", "CRF"):
                         result = check_sec_edgar(_sec_session, _ticker)
-                        if result and any(sig in result for sig in ("N-2", "13D", "13G")):
-                            logger.warning(f"[Off-hours SEC] {_ticker}: {result}")
-                            dispatch_cornerstone_alert(
-                                f"⚠️ Off-hours EDGAR filing detected — {_ticker}",
-                                f"┣ Ticker: {_ticker}\n┗ Signal: {result}",
-                                color=0xe74c3c,
-                                attach_chart=False,
-                            )
-                            # Set DB anchor immediately so re-entry logic is ready for RTH
-                            if "N-2" in result:
-                                _n2_anchor = f"cornerstone_n2_detected_{_ticker}"
-                                if not db.get_state(_n2_anchor, ""):
-                                    _today_str = datetime.now().strftime("%Y-%m-%d")
-                                    db.update_state(_n2_anchor, _today_str)
-                                    db.update_state(f"ro_dodge_active_{_ticker}", _today_str)
-                                    db.update_state(f"cornerstone_ro_dip_fired_{_ticker}", "")
-                                    db.update_state(f"cornerstone_floor_reentry_fired_{_ticker}", "")
-                                    logger.info(f"[Off-hours N-2] {_ticker} — cycle anchor set, dodge active.")
-                                    try:
-                                        db.log_journal_entry(
-                                            strategy="CLM_CRF",
-                                            event_type="RO_N2_DETECTED",
-                                            ticker=_ticker,
-                                            action="DODGE",
-                                            conviction=5,
-                                            thesis=(
-                                                f"{_ticker} N-2 RO Registration detected off-hours "
-                                                f"({_today_str}). Sell to ≥3 shares at next market open "
-                                                f"to preserve DRIP NAV eligibility permanently."
-                                            ),
-                                            confluences={"detection_time": datetime.now().isoformat(),
-                                                         "filing_signal": result},
-                                            conflicts={},
-                                            entry_price=0.0,
-                                        )
-                                    except Exception:
-                                        pass
+                        if not result:
+                            continue
+
+                        has_n2  = "N-2" in result
+                        has_13x = "13D" in result or "13G" in result
+
+                        if has_n2:
+                            # ── N-2: fire ONCE per RO cycle, then go silent.
+                            # The daily pulse at 0800 HST carries continued RO status
+                            # via the re-entry tracker block. Off-hours spam adds no value.
+                            _cycle_alert_key = f"cornerstone_n2_initial_alerted_{_ticker}"
+                            _already_alerted = db.get_state(_cycle_alert_key, "")
+
+                            _today_str = datetime.now().strftime("%Y-%m-%d")
+
+                            # Set DB anchor regardless (idempotent — safe to call every tick)
+                            _n2_anchor = f"cornerstone_n2_detected_{_ticker}"
+                            if not db.get_state(_n2_anchor, ""):
+                                db.update_state(_n2_anchor, _today_str)
+                                db.update_state(f"ro_dodge_active_{_ticker}", _today_str)
+                                db.update_state(f"cornerstone_ro_dip_fired_{_ticker}", "")
+                                db.update_state(f"cornerstone_floor_reentry_fired_{_ticker}", "")
+                                logger.info(f"[Off-hours N-2] {_ticker} — cycle anchor set, dodge active.")
+                                try:
+                                    db.log_journal_entry(
+                                        strategy="CLM_CRF",
+                                        event_type="RO_N2_DETECTED",
+                                        ticker=_ticker,
+                                        action="DODGE",
+                                        conviction=5,
+                                        thesis=(
+                                            f"{_ticker} N-2 RO Registration detected off-hours "
+                                            f"({_today_str}). Sell to ≥3 shares at next market open "
+                                            f"to preserve DRIP NAV eligibility permanently. "
+                                            f"Full filing signal: {result}"
+                                        ),
+                                        confluences={"detection_time": datetime.now().isoformat(),
+                                                     "filing_signal": result},
+                                        conflicts={},
+                                        entry_price=0.0,
+                                    )
+                                except Exception:
+                                    pass
+
+                            if not _already_alerted:
+                                # First alert for this RO cycle — clean format, N-2 only
+                                _ann_div   = 1.4268 if _ticker == "CLM" else 1.3824
+                                _nav_fb    = 6.45   if _ticker == "CLM" else 6.18
+                                _fv        = round(_ann_div / 0.19, 2)
+                                # Re-entry range: NAV (post-dilution bottom) to FV (income buyer floor)
+                                _re_lo     = _nav_fb
+                                _re_hi     = _fv
+
+                                # Extract filing date from result if present
+                                import re as _re
+                                _date_match = _re.search(r"\((\d{4}-\d{2}-\d{2})\)", result)
+                                _filing_date = _date_match.group(1) if _date_match else _today_str
+
+                                _n2_msg = (
+                                    f"🚨 **Off-hours EDGAR SEC filing detected**\n"
+                                    f"┣ Ticker: **{_ticker}**\n"
+                                    f"┣ Signal: N-2 RO Registration ({_filing_date})\n"
+                                    f"┣ Re-entry range: `${_re_lo:.2f} – ${_re_hi:.2f}` "
+                                    f"(NAV floor → {_ann_div/0.19*100:.0f}% yield target)\n"
+                                    f"┗ Status: Dodge active — sell to ≥3 shares at market open"
+                                )
+                                dispatch_cornerstone_alert(
+                                    f"🚨 N-2 RO Registration — {_ticker}",
+                                    _n2_msg,
+                                    color=0xe74c3c,
+                                    attach_chart=False,
+                                )
+                                db.update_state(_cycle_alert_key, _today_str)
+                                logger.warning(f"[Off-hours N-2] {_ticker} initial alert fired — silent until re-entry.")
+                            else:
+                                # Already alerted this cycle — log silently, no Discord
+                                logger.info(f"[Off-hours N-2] {_ticker} still active (alerted {_already_alerted}) — skipping repeat.")
+
+                        elif has_13x:
+                            # 13D/13G: allow once per day via existing 3-notification cap
+                            if can_broadcast("cornerstone", is_major=True):
+                                _today_str = datetime.now().strftime("%Y-%m-%d")
+                                _13x_type = "13D" if "13D" in result else "13G"
+                                _13x_msg = (
+                                    f"⚠️ Large holder change detected\n"
+                                    f"┣ Ticker: **{_ticker}**\n"
+                                    f"┣ Filing: SC {_13x_type} — institutional position change\n"
+                                    f"┗ Action: Monitor — SC 13D/G signals significant holder movement"
+                                )
+                                dispatch_cornerstone_alert(
+                                    f"⚠️ {_ticker} — Large Holder Change (SC {_13x_type})",
+                                    _13x_msg,
+                                    color=0xf39c12,
+                                    attach_chart=False,
+                                )
+                                increment_alert_count("cornerstone")
+                                logger.warning(f"[Off-hours 13x] {_ticker}: {_13x_type} alert dispatched.")
                 except Exception as e:
                     logger.warning(f"[Off-hours SEC] check_sec_edgar error: {e}")
 
