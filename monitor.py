@@ -2688,6 +2688,8 @@ def send_daily_pulse(is_test=False):
     color = 0xe74c3c if worst_tier == "CRITICAL" else (0xf1c40f if worst_tier == "ELEVATED" else 0x2ecc71)
     dispatch_cornerstone_alert(title, full_report, color)
     db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
+    if worst_tier in ("ELEVATED", "CRITICAL"):
+        db.update_state(f"cornerstone_alert_fired_{datetime.now().strftime('%Y-%m-%d')}", True)
 
     # ── Income channel box efficiency snippet (once per day, box-active only) ──
     # Dispatches borrowing-efficiency metrics to #dividend-ccetfs as income context.
@@ -2817,6 +2819,9 @@ def check_and_escalate_if_critical():
                 color = 0xe74c3c
             dispatch_cornerstone_alert(title, full_report, color)
             increment_alert_count("cornerstone")
+            # Flag for #announcements accuracy index — cornerstone fired today
+            _today_flag = datetime.now().strftime("%Y-%m-%d")
+            db.update_state(f"cornerstone_alert_fired_{_today_flag}", True)
 
     db.update_state("cornerstone_alert_tier_rank", current_rank)
     return full_report, worst_tier

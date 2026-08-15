@@ -2803,6 +2803,31 @@ class HighFidelityAnalyticsEngine:
             "sample_size": len(history),
         }
 
+    def record_direction_hit(self, hit: bool) -> dict:
+        """
+        Records a binary direction call result (True = correct direction, False = wrong).
+        Separate from price proximity tracking — this is the honest direction hit rate.
+        Returns rolling stats for the last 7 and 30 sessions.
+        """
+        history = self.db.get_state("spy_direction_history", [])
+        history.append({"date": datetime.now().strftime("%Y-%m-%d"), "hit": hit})
+        history = history[-90:]
+        self.db.update_state("spy_direction_history", history)
+
+        h7  = history[-7:]
+        h30 = history[-30:]
+        hits_7  = sum(1 for h in h7  if h["hit"])
+        hits_30 = sum(1 for h in h30 if h["hit"])
+        return {
+            "hits_7d":  hits_7,
+            "total_7d": len(h7),
+            "pct_7d":   round(hits_7  / len(h7)  * 100) if h7  else 0,
+            "hits_30d": hits_30,
+            "total_30d": len(h30),
+            "pct_30d":  round(hits_30 / len(h30) * 100) if h30 else 0,
+            "sample_size": len(history),
+        }
+
     # =====================================================================
     # CROSS-SECTOR ACCURACY LEDGER
     #
@@ -3142,7 +3167,7 @@ class HighFidelityAnalyticsEngine:
         Shows one graded metric per channel so readers see the full breadth of what runs,
         not just SPY price proximity. All numbers come from the live ledger (never fabricated).
         """
-        trend = self.record_and_get_accuracy_trend(accuracy_score)
+        self.record_and_get_accuracy_trend(accuracy_score)  # price proximity history (internal)
         today_str = __import__("datetime").date.today().isoformat()
 
         # ── #market-analysis: SPY direction call (bull/bear/neutral vs actual move) ──
@@ -3152,53 +3177,58 @@ class HighFidelityAnalyticsEngine:
         ma_hit = spy_dir_predicted == spy_actual_dir or (spy_dir_predicted == "NEUTRAL" and spy_actual_dir == "NEUTRAL/CHOP")
         ma_icon = "✅" if ma_hit else "❌"
 
+        # Record the actual direction hit — this is what we display as accuracy
+        dir_trend = self.record_direction_hit(ma_hit)
+        dir_hit_str = f"`{dir_trend['hits_7d']}/{dir_trend['total_7d']}` ({dir_trend['pct_7d']}%) 7D"
+        if dir_trend["total_30d"] > 7:
+            dir_hit_str += f" | `{dir_trend['hits_30d']}/{dir_trend['total_30d']}` ({dir_trend['pct_30d']}%) 30D"
+
         # ── #futures-trading: /NQ direction bias logged at morning brief ──
-        nq_bias = self.db.get_state(f"futures_nq_bias_{today_str}", "")
+        nq_bias   = self.db.get_state(f"futures_nq_bias_{today_str}", "")
         nq_actual = self.db.get_state(f"futures_nq_actual_dir_{today_str}", "")
         if nq_bias and nq_actual:
             nq_hit = (nq_bias == nq_actual) or ("NEUTRAL" in nq_bias and "NEUTRAL" in nq_actual)
-            futures_line = f"┣ #futures-trading  Futures Outlook: `{nq_bias}` → Actual `{nq_actual}` {('✅' if nq_hit else '❌')}\n"
+            futures_line = f"┣ #futures-trading  /NQ bias: `{nq_bias}` → `{nq_actual}` {('✅' if nq_hit else '❌')}\n"
+        elif nq_bias:
+            futures_line = f"┣ #futures-trading  /NQ bias: `{nq_bias}` — grading at session close\n"
         else:
-            futures_line = f"┣ #futures-trading  Futures Outlook: `NEUTRAL` — no intraday bias logged yet\n"
+            futures_line = ""  # nothing logged yet, skip the line entirely
 
         # ── #cornerstone: RO risk status today ──
-        ro_tier = self.db.get_state("cornerstone_alert_tier_rank", 0)
         ro_fired = self.db.get_state(f"cornerstone_alert_fired_{today_str}", False)
+        ro_tier  = self.db.get_state("clm_last_ro_score", 0)
         if ro_fired:
-            ro_line = f"┣ #cornerstone      RO Alert: Fired ⚠️ — CLM/CRF protection triggered\n"
-        elif ro_tier == 0:
-            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: LOW — all clear ✅\n"
+            ro_line = f"┣ #cornerstone      RO Alert fired ⚠️ — CLM/CRF protection triggered\n"
+        elif ro_tier and int(ro_tier) >= 25:
+            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED (`{ro_tier}/100`) — monitoring ⚠️\n"
         else:
-            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED — monitoring ⚠️\n"
+            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: LOW ✅ — all clear\n"
 
         # ── #options-wheel: Tier 2 IVR alert (Module 1) OR social+IV snapshot (Module 3) ──
-        today_str_w = __import__("datetime").date.today().isoformat()
-        wheel_spot  = self.db.get_state("wheel_spotlight_latest")
-        wheel_snap  = self.db.get_state("wheel_candidates_snapshot")
-        snap_fresh  = isinstance(wheel_snap, dict) and wheel_snap.get("date") == today_str_w
+        wheel_spot = self.db.get_state("wheel_spotlight_latest")
+        wheel_snap = self.db.get_state("wheel_candidates_snapshot")
+        snap_fresh = isinstance(wheel_snap, dict) and wheel_snap.get("date") == today_str
         if wheel_spot:
-            # Module 1 fired (real Tradier data — highest quality)
             w_sym = wheel_spot.get("symbol", "—")
             w_ivr = wheel_spot.get("ivr_proxy", 0)
             options_line = f"┣ #options-wheel    Wheel Alert: `{w_sym}` IVR `{w_ivr:.0f}%` — elevated premium env\n"
         elif snap_fresh and wheel_snap.get("high_count", 0) > 0:
-            # Module 3 social+IV convergence has HIGH entries today
             tops = wheel_snap.get("top_candidates", [])[:3]
             top_str = " | ".join(f"`{t['sym']}` {t['ivr']}%" for t in tops) if tops else ""
             n = wheel_snap["high_count"]
-            options_line = f"┣ #options-wheel    Wheel Candidates: `{n}` HIGH setup{'s' if n != 1 else ''} — {top_str}\n"
+            options_line = f"┣ #options-wheel    Wheel: `{n}` HIGH setup{'s' if n != 1 else ''} — {top_str}\n"
         else:
-            options_line = f"┣ #options-wheel    Wheel Screener: No elevated IVR today — low vol environment\n"
+            options_line = ""  # no setups today — omit rather than show noise
 
         # ── #dividend-ccetfs: income ETF spotlight ──
         etf_spot = self.db.get_state("cc_etf_spotlight_latest")
         if etf_spot:
-            income_line = f"┣ income-machine    Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
+            income_line = f"┣ #dividend-ccetfs  Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
         else:
-            income_line = f"┣ income-machine    Income Screener: running daily — CC ETFs + dividend wheel\n"
+            income_line = ""  # screener output not fresh today — omit
 
         # ── #crypto: Fear & Greed + mover ──
-        fng_val = snap.get("fng", {}).get("value", "—")
+        fng_val   = snap.get("fng", {}).get("value", "—")
         fng_label = snap.get("fng", {}).get("label", "")
         crypto_mover = ""
         if snap.get("crypto_mover"):
@@ -3206,19 +3236,28 @@ class HighFidelityAnalyticsEngine:
             crypto_mover = f" | Mover: {sym} `{pct:+.2f}%`"
         crypto_line = f"┗ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
 
+        channel_lines = "".join(filter(None, [futures_line, ro_line, options_line, income_line]))
+        # Replace last ┣ with ┗ before crypto line
+        if channel_lines:
+            last_box = channel_lines.rfind("┣")
+            if last_box != -1:
+                channel_lines = channel_lines[:last_box] + "┗" + channel_lines[last_box + 1:]
+        else:
+            crypto_line = crypto_line.replace("┗", "┣", 1)  # crypto becomes only line; will get ┗ below
+
+        # Ensure crypto is always the last line with ┗
+        if channel_lines:
+            crypto_line = crypto_line.replace("┗", "┗")  # already correct
+
         payload = (
             f"📣 **DAILY ACCURACY INDEX**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"**#market-analysis**  SPY Predicted `${predicted:,.2f}` → Actual `${actual:,.2f}` "
-            f"| Direction: {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
-            f"┣ Price Proximity: `{accuracy_score}%` | Direction Accuracy: `{trend['avg_7d']}%` 7D | `{trend['avg_30d']}%` 30D "
-            f"over `{trend['sample_size']}` sessions\n"
+            f"**#market-analysis**  SPY: `${predicted:,.2f}` → `${actual:,.2f}` "
+            f"| {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
+            f"┣ Direction Hit Rate: {dir_hit_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**Channel Accuracy Breakdown**\n"
-            f"{futures_line}"
-            f"{ro_line}"
-            f"{options_line}"
-            f"{income_line}"
+            f"{channel_lines}"
             f"{crypto_line}"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )

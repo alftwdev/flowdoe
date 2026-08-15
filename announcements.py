@@ -229,14 +229,12 @@ def build_scorecard_embed(db, week_label: str = None):
     _heat_parts = []
     for _strat, _label in [("CLM_CRF", "CLM/CRF signals"), ("TQQQ", "TQQQ LEAP signals"), ("WHEEL", "Wheel setups")]:
         _h = db.get_system_heat(_strat, last_n=5)
-        if _h["win_rate"] is None:
-            _heat_parts.append(f"┣ {_label}: building data")
-        else:
+        if _h["win_rate"] is not None:
             _streak = " 🔥 on streak" if _h["on_streak"] else ""
             _heat_parts.append(f"┣ {_label}: {_h['wins']}/{_h['total']} ({_h['win_rate']:.0%}) {_h['heat']}{_streak}")
     if _heat_parts:
         _heat_parts[-1] = _heat_parts[-1].replace("┣", "┗", 1)
-    _heat_block = "\n🔥 **SYSTEM HEAT (last 5 resolved signals)**\n" + "\n".join(_heat_parts) + "\n"
+    _heat_block = ("\n🔥 **SYSTEM HEAT (last 5 resolved signals)**\n" + "\n".join(_heat_parts) + "\n") if _heat_parts else ""
 
     # Locked content tease — the hook that drives conversion
     locked_tease = (
