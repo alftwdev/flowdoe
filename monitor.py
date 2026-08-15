@@ -988,9 +988,36 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
             return False
 
         # All conditions met — dispatch rebuy alert and mark as fired
-        db.update_state(fired_key, datetime.now().strftime("%Y-%m-%d"))
+        _today_reentry = datetime.now().strftime("%Y-%m-%d")
+        db.update_state(fired_key, _today_reentry)
         db.update_state(f"ro_dodge_active_{ticker}", "")  # clear the dodge flag — re-entry confirmed
-        db.update_state(f"ro_reentry_signal_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+        db.update_state(f"ro_reentry_signal_{ticker}", _today_reentry)
+
+        # Journal the re-entry signal
+        try:
+            _dodge_exec = db.get_state(f"ro_dodge_executed_{ticker}") or {}
+            _sell_px = _dodge_exec.get("sell_price", 0.0) if isinstance(_dodge_exec, dict) else 0.0
+            _pnl_note = f"Sold at ${_sell_px:.2f}, rebuy at ${current_price:.2f}" if _sell_px > 0 else "Sell price not logged"
+            db.log_journal_entry(
+                strategy="CLM_CRF",
+                event_type="RO_REENTRY_SIGNAL",
+                ticker=ticker,
+                action="REBUY",
+                conviction=5,
+                thesis=(
+                    f"{ticker} post-RO re-entry: Path A (premium collapse + price off high). "
+                    f"Premium {current_premium:.1f}% (<10%), price ${current_price:.2f} "
+                    f"({pct_below_high:.1f}% below 60D high of ${high_60d:.2f}). "
+                    f"{_pnl_note}. Resume DRIP at NAV."
+                ),
+                confluences={"current_price": current_price, "current_premium": current_premium,
+                             "pct_below_60d_high": round(pct_below_high, 2),
+                             "high_60d": high_60d, "path": "A_premium_collapse"},
+                conflicts={},
+                entry_price=current_price,
+            )
+        except Exception:
+            pass
 
         # Box spread context — include in the re-entry embed so the operator knows
         # to redeploy the margin that was freed during the dodge.
@@ -1064,9 +1091,36 @@ def check_yield_floor_reentry(ticker: str, current_price: float, current_premium
             return False
 
         # All conditions met
-        db.update_state(fired_key, datetime.now().strftime("%Y-%m-%d"))
+        _today_floor = datetime.now().strftime("%Y-%m-%d")
+        db.update_state(fired_key, _today_floor)
         db.update_state(f"ro_dodge_active_{ticker}", "")  # clear dodge flag
-        db.update_state(f"ro_reentry_signal_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+        db.update_state(f"ro_reentry_signal_{ticker}", _today_floor)
+
+        # Journal the re-entry signal
+        try:
+            _dodge_exec = db.get_state(f"ro_dodge_executed_{ticker}") or {}
+            _sell_px = _dodge_exec.get("sell_price", 0.0) if isinstance(_dodge_exec, dict) else 0.0
+            _pnl_note = f"Sold at ${_sell_px:.2f}, rebuy at ${current_price:.2f}" if _sell_px > 0 else "Sell price not logged"
+            db.log_journal_entry(
+                strategy="CLM_CRF",
+                event_type="RO_REENTRY_SIGNAL",
+                ticker=ticker,
+                action="REBUY",
+                conviction=5,
+                thesis=(
+                    f"{ticker} post-RO re-entry: Path B (yield floor). "
+                    f"Price ${current_price:.2f} <= FV ${fair_value:.2f} "
+                    f"({age_days}d since N-2, ≥45 required). "
+                    f"Implied yield {round(annual_div / current_price * 100, 1) if current_price > 0 else 0:.1f}%. "
+                    f"{_pnl_note}. Resume DRIP at NAV."
+                ),
+                confluences={"current_price": current_price, "fair_value": fair_value,
+                             "days_since_n2": age_days, "path": "B_yield_floor"},
+                conflicts={},
+                entry_price=current_price,
+            )
+        except Exception:
+            pass
 
         _box_positions = read_active_box_positions()
         _box_lines = ""
@@ -1798,16 +1852,27 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # ── NEW: 13F / large holder exit signal from SEC scrape
     holder_exit = "13D" in sec_shield or "13G" in sec_shield
 
-    # ── NEW: Track N-2 detection across cycles (used by RO completion dip detector)
+    # ── Track N-2 detection across cycles (anchor for re-entry logic)
     n2_key = f"cornerstone_n2_detected_{ticker}"
     if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         if not db.get_state(n2_key, ""):
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
-            # Reset the dip-fired flag when a new RO cycle starts
+            db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+            # Reset per-cycle fired flags so re-entry detectors are live
             db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
+            db.update_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
+            logger.info(f"[N-2 Cycle] {ticker} — N-2 anchor set {datetime.now().strftime('%Y-%m-%d')}, dodge active.")
     else:
-        # N-2 no longer in recent filings — clear the cycle tracker
-        db.update_state(n2_key, "")
+        # N-2 scrolled out of recent filings list.
+        # Only clear the cycle anchor once re-entry has been confirmed via one of the two
+        # re-entry paths. Until then, preserve the key so the re-entry logic keeps working.
+        _path_a_done = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
+        _path_b_done = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
+        if _path_a_done or _path_b_done:
+            db.update_state(n2_key, "")
+            db.update_state(f"ro_dodge_active_{ticker}", "")
+            logger.info(f"[N-2 Cycle] {ticker} — re-entry confirmed, cycle closed.")
+        # else: preserve n2_key until re-entry fires
 
     # ── Re-entry detectors (both run every tick, fire once per RO cycle via DB dedup)
     detect_ro_completion_dip(session, ticker, price, premium)
@@ -2055,18 +2120,31 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
                     _p_tok = os.getenv("PUSHOVER_API_TOKEN")
                     _p_usr = os.getenv("PUSHOVER_USER_KEY")
                     if _p_tok and _p_usr:
+                        _breakdown_lines = "\n".join(f"  {b}" for b in _reentry["breakdown"])
+                        _dodge_exec = db.get_state(f"ro_dodge_executed_{ticker}") or {}
+                        _sell_px = _dodge_exec.get("sell_price", 0.0) if isinstance(_dodge_exec, dict) else 0.0
+                        _pnl_str = (
+                            f"Sold ${_sell_px:.2f} → rebuy ~${price:.2f} "
+                            f"({'PROFIT' if _sell_px > price else 'LOSS'} ${abs(_sell_px - price):.2f}/sh)"
+                            if _sell_px > 0 else "Sell price not logged"
+                        )
                         requests.post(
                             "https://api.pushover.net/1/messages.json",
                             data={
                                 "token": _p_tok, "user": _p_usr,
-                                "title": f"{ticker} — Re-entry Gate Met (60/100)",
+                                "title": f"🟢 {ticker} — RE-ENTRY GATE MET ({_reentry['score']}/100)",
                                 "message": (
-                                    f"Post-RO re-entry score: {_reentry['score']}/100\n"
-                                    f"Zone: ${_reentry['zone_low']:.2f}–${_reentry['zone_high']:.2f}\n"
-                                    f"FV: ${_reentry['fair_value']:.2f} | Yield: {_reentry['implied_yield']:.1f}%\n"
-                                    "All confluence conditions met — rebuy zone confirmed."
+                                    f"Re-entry zone: ${_reentry['zone_low']:.2f}–${_reentry['zone_high']:.2f}\n"
+                                    f"Fair value: ${_reentry['fair_value']:.2f} | "
+                                    f"Yield: {_reentry['implied_yield']:.1f}%\n"
+                                    f"NAV ref: ${_reentry['nav_used']:.2f}\n"
+                                    f"\nSignal confluence:\n{_breakdown_lines}\n"
+                                    f"\nRound-trip: {_pnl_str}\n"
+                                    f"\nAction: Rebuy position. Resume DRIP at NAV.\n"
+                                    f"Keep ≥3 shares always."
                                 ),
                                 "priority": 1,
+                                "sound": "cashregister",
                             },
                             timeout=10,
                         )
@@ -2830,13 +2908,76 @@ def check_and_escalate_if_critical():
 # MAIN MONITOR LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cli_log_dodge():
+    """
+    python monitor.py log-dodge
+    Records that the user has executed the RO dodge (sold to ≥3 shares).
+    Fetches current price for each ticker, writes journal entry, confirms DB state.
+    Run this on Monday after selling — it gives the system a timestamped sell price
+    so future re-entry signals can calculate the round-trip P&L.
+    """
+    session = requests.Session()
+    for _t in ("CLM", "CRF"):
+        try:
+            _pr = session.get(
+                f"https://api.twelvedata.com/price?symbol={_t}&apikey={TD_API_KEY}",
+                timeout=15
+            ).json()
+            _sell_px = float(_pr.get("price", 0) or 0)
+        except Exception:
+            _sell_px = 0.0
+
+        _today = datetime.now().strftime("%Y-%m-%d")
+        db.update_state(f"ro_dodge_executed_{_t}", {"date": _today, "sell_price": _sell_px})
+        # Ensure anchor keys are set (in case off-hours path set them correctly)
+        if not db.get_state(f"cornerstone_n2_detected_{_t}", ""):
+            db.update_state(f"cornerstone_n2_detected_{_t}", "2026-08-14")
+        if not db.get_state(f"ro_dodge_active_{_t}", ""):
+            db.update_state(f"ro_dodge_active_{_t}", _today)
+
+        try:
+            db.log_journal_entry(
+                strategy="CLM_CRF",
+                event_type="RO_DODGE_EXECUTED",
+                ticker=_t,
+                action="DODGE_EXECUTED",
+                conviction=5,
+                thesis=(
+                    f"{_t} RO dodge executed {_today} — sold to ≥3 shares at "
+                    f"${_sell_px:.2f}. N-2 filed 2026-08-14. Proceeds → margin paydown. "
+                    f"Re-entry scorers now active; monitoring for premium collapse + yield floor."
+                ),
+                confluences={"sell_price": _sell_px, "execution_date": _today,
+                             "n2_filed": "2026-08-14", "keep_shares": 3},
+                conflicts={},
+                entry_price=_sell_px,
+            )
+        except Exception as _je:
+            logger.warning(f"Journal write failed for {_t}: {_je}")
+
+        print(f"[{_t}] Dodge logged — sell price ${_sell_px:.2f}, re-entry tracking active.")
+
+    # Print current re-entry score state
+    print("\nCurrent re-entry state:")
+    for _t in ("CLM", "CRF"):
+        _n2  = db.get_state(f"cornerstone_n2_detected_{_t}", "(not set)")
+        _dod = db.get_state(f"ro_dodge_active_{_t}", "(not set)")
+        _sc  = db.get_state(f"{_t}_reentry_score", "(pending — run next RTH scan)")
+        print(f"  {_t}: N-2={_n2} | dodge_active={_dod} | re-entry_score={_sc}")
+
+
 def run_monitor():
     tz_h = pytz.timezone('Pacific/Honolulu')
 
-    # CLI test/force mode — fires once and exits
-    if len(sys.argv) > 1 and sys.argv[1].lower() in ["test", "force"]:
-        send_daily_pulse(is_test=True)
-        return
+    # CLI modes — fire once and exit
+    if len(sys.argv) > 1:
+        _cmd = sys.argv[1].lower()
+        if _cmd in ["test", "force"]:
+            send_daily_pulse(is_test=True)
+            return
+        if _cmd == "log-dodge":
+            _cli_log_dodge()
+            return
 
     logger.info("⏳ [Engine Loop] Cornerstone monitor active. DB state tracking enabled.")
     # WS removed: the callback had a 300s debounce — identical to the REST polling
@@ -2890,6 +3031,35 @@ def run_monitor():
                                 color=0xe74c3c,
                                 attach_chart=False,
                             )
+                            # Set DB anchor immediately so re-entry logic is ready for RTH
+                            if "N-2" in result:
+                                _n2_anchor = f"cornerstone_n2_detected_{_ticker}"
+                                if not db.get_state(_n2_anchor, ""):
+                                    _today_str = datetime.now().strftime("%Y-%m-%d")
+                                    db.update_state(_n2_anchor, _today_str)
+                                    db.update_state(f"ro_dodge_active_{_ticker}", _today_str)
+                                    db.update_state(f"cornerstone_ro_dip_fired_{_ticker}", "")
+                                    db.update_state(f"cornerstone_floor_reentry_fired_{_ticker}", "")
+                                    logger.info(f"[Off-hours N-2] {_ticker} — cycle anchor set, dodge active.")
+                                    try:
+                                        db.log_journal_entry(
+                                            strategy="CLM_CRF",
+                                            event_type="RO_N2_DETECTED",
+                                            ticker=_ticker,
+                                            action="DODGE",
+                                            conviction=5,
+                                            thesis=(
+                                                f"{_ticker} N-2 RO Registration detected off-hours "
+                                                f"({_today_str}). Sell to ≥3 shares at next market open "
+                                                f"to preserve DRIP NAV eligibility permanently."
+                                            ),
+                                            confluences={"detection_time": datetime.now().isoformat(),
+                                                         "filing_signal": result},
+                                            conflicts={},
+                                            entry_price=0.0,
+                                        )
+                                    except Exception:
+                                        pass
                 except Exception as e:
                     logger.warning(f"[Off-hours SEC] check_sec_edgar error: {e}")
 
