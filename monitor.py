@@ -1264,40 +1264,81 @@ def calculate_reentry_score(
     else:
         breakdown.append("SPY below SMA200 — bear regime (0)")
 
-    # Gate check
-    gate_met = score >= 60
+    # Gate check — score AND hard 45-day prerequisite
+    # The 45-day wait ensures the RO subscription period is complete before re-entry.
+    # A high score on Day 1 does NOT mean the offering is done — it means the metrics
+    # look good before dilution is resolved. Hard gate prevents premature re-buy.
+    try:
+        _n2_str_gate = db.get_state(f"cornerstone_n2_detected_{ticker}", "")
+        _age_days_gate = (
+            (datetime.utcnow().date() - datetime.strptime(_n2_str_gate, "%Y-%m-%d").date()).days
+            if _n2_str_gate else 0
+        )
+    except Exception:
+        _age_days_gate = 0
+
+    gate_met = score >= 60 and _age_days_gate >= 45
+    days_to_gate = max(0, 45 - _age_days_gate)
+
     implied_yield = round(annual_div / price * 100, 1) if price > 0 else 0.0
 
     return {
-        "score":        score,
-        "gate_met":     gate_met,
-        "breakdown":    breakdown,
-        "fair_value":   fair_value,
-        "zone_low":     zone_low,
-        "zone_high":    zone_high,
+        "score":         score,
+        "gate_met":      gate_met,
+        "breakdown":     breakdown,
+        "fair_value":    fair_value,
+        "zone_low":      zone_low,
+        "zone_high":     zone_high,
         "implied_yield": implied_yield,
-        "nav_used":     _nav,
+        "nav_used":      _nav,
+        "age_days":      _age_days_gate,
+        "days_to_gate":  days_to_gate,
     }
 
 
-def format_reentry_block(ticker: str, r: dict) -> str:
+def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
     """
-    Formats the post-RO re-entry tracker block for the cornerstone embed.
-    No emojis. Backtick-styled data values. Always shows even below gate.
+    Formats the post-RO re-entry tracker block.
+    short=True  → 3-line summary for daily pulse (no confluence breakdown)
+    short=False → full breakdown for Pushover and direct re-entry alert
     """
-    score    = r["score"]
-    gate_met = r["gate_met"]
-    fv       = r["fair_value"]
-    zl       = r["zone_low"]
-    zh       = r["zone_high"]
-    iy       = r["implied_yield"]
+    score       = r["score"]
+    gate_met    = r["gate_met"]
+    fv          = r["fair_value"]
+    zl          = r["zone_low"]
+    zh          = r["zone_high"]
+    iy          = r["implied_yield"]
+    age_days    = r.get("age_days", 0)
+    days_to_gate = r.get("days_to_gate", max(0, 45 - age_days))
 
-    status_line = (
-        f"RE-ENTRY SIGNAL ACTIVE — {score}/100"
-        if gate_met else
-        f"Tracking re-entry — `{score}/100` (gate: 60)"
-    )
+    if gate_met:
+        status_line = f"RE-ENTRY SIGNAL ACTIVE — {score}/100"
+    elif days_to_gate > 0:
+        # 45-day hard gate not yet met — don't call it "signal active" ever
+        status_line = f"Watching — `{score}/100` | Gate unlocks in {days_to_gate}d"
+    else:
+        # 45 days passed but score below 60
+        remaining = 60 - score
+        status_line = f"Tracking — `{score}/100` | {remaining}pts to signal (60 needed)"
 
+    if short:
+        # ── 3-line pulse version — status, zone, countdown only ──────────────
+        lines = [
+            f"POST-RO RE-ENTRY TRACKER — {ticker}",
+            f"┣ {status_line}",
+            f"┣ Zone: `${zl:.2f} – ${zh:.2f}` | FV `${fv:.2f}` | Yield `{iy:.1f}%`",
+        ]
+        if gate_met:
+            lines.append("┗ All gates met — Pushover fired. Confirm fill and resume DRIP.")
+        elif days_to_gate > 0:
+            lines.append(f"┗ RO subscription period: {age_days}/45d elapsed — continue monitoring")
+        else:
+            unmet = [b for b in r["breakdown"] if "(0)" in b]
+            top_unmet = unmet[0].split("(")[0].strip() if unmet else "score below threshold"
+            lines.append(f"┗ Closest gap: {top_unmet}")
+        return "\n".join(lines)
+
+    # ── Full breakdown version for Pushover / direct alert ───────────────────
     lines = [
         f"POST-RO RE-ENTRY TRACKER — {ticker}",
         f"┣ {status_line}",
@@ -1310,9 +1351,13 @@ def format_reentry_block(ticker: str, r: dict) -> str:
 
     if gate_met:
         lines.append("┗ All gates met — rebuy zone confirmed. Resume DRIP at NAV after fill.")
+    elif days_to_gate > 0:
+        lines.append(
+            f"┗ 45-day gate: {age_days}d elapsed, {days_to_gate}d remaining — "
+            f"RO subscription window must close before re-entry"
+        )
     else:
         remaining = 60 - score
-        # Find top unmet condition
         unmet = [b for b in r["breakdown"] if "(0)" in b]
         if unmet:
             lines.append(f"┗ {remaining}pts needed — closest: {unmet[0].split('(')[0].strip()}")
@@ -1380,6 +1425,25 @@ def check_accumulation_readiness(session, ticker: str, vixy_z: float,
     Falls back to fetching SPY internally if cache is empty.
     """
     try:
+        # ── HARD BLOCK: RO dodge active — position sold, do NOT accumulate.
+        # Accumulation gate is meaningless while we're waiting for the post-RO re-entry
+        # signal. Buying now would undo the dodge. Gate stays BLOCKED until ro_dodge_active
+        # is cleared by a re-entry signal firing.
+        if db.get_state(f"ro_dodge_active_{ticker}", ""):
+            _n2_date = db.get_state(f"cornerstone_n2_detected_{ticker}", "?")
+            _dodge_ex = db.get_state(f"ro_dodge_executed_{ticker}") or {}
+            _sell_px  = _dodge_ex.get("sell_price", 0.0) if isinstance(_dodge_ex, dict) else 0.0
+            _sell_str = f" at ${_sell_px:.2f}" if _sell_px > 0 else ""
+            return {
+                "ready":       False,
+                "status":      "BLOCKED — RO active",
+                "detail":      (
+                    f"N-2 filed {_n2_date}, position sold{_sell_str}. "
+                    f"Awaiting re-entry signal (premium collapse or yield floor). Do NOT add margin."
+                ),
+                "down_streak": 0,
+            }
+
         # ── PREMIUM GATE — evaluated before all other conditions.
         # Buying CLM/CRF at >15% premium to NAV compounds downside even when every
         # other macro signal looks clean. Feb 2, 2026: CLM at 15.6% premium —
@@ -1654,8 +1718,22 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         edgar_sec_line = "┣ EDGAR/SEC: No N-2; No 13D/G (safe)\n"
 
     whale_tag = f"⚠️ {whale_status}" if "DISTRIBUTION" in whale_status.upper() else "NORMAL"
-    dp_safe   = not dark_pool_desc or "CLEAR" in dark_pool_desc.upper() or "NORMAL" in dark_pool_desc.upper()
-    dp_tag    = "CLEAR" if dp_safe else f"⚠️ {dark_pool_desc}"
+    # EX-DIV DIP is a scheduled, expected price drop — not a dark pool signal.
+    # Any description containing "EX-DIV", "NOT DARK POOL", "CLEAR", or "NORMAL"
+    # is safe and should render without the ⚠️ warning marker.
+    _dp_upper = (dark_pool_desc or "").upper()
+    dp_safe   = (
+        not dark_pool_desc
+        or "CLEAR"        in _dp_upper
+        or "NORMAL"       in _dp_upper
+        or "EX-DIV"       in _dp_upper
+        or "NOT DARK POOL" in _dp_upper
+    )
+    if dp_safe and dark_pool_desc and "CLEAR" not in _dp_upper and "NORMAL" not in _dp_upper:
+        # EX-DIV or similar — show the description cleanly, no ⚠️
+        dp_tag = dark_pool_desc.split("—")[0].strip()  # e.g. "EX-DIV DIP (scheduled)"
+    else:
+        dp_tag = "CLEAR" if dp_safe else f"⚠️ {dark_pool_desc}"
 
     # NAV source label (compact)
     nav_label = "CEFConnect" if "cefconnect" in nav_src.lower() else "proxy"
@@ -2110,8 +2188,9 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
                 "low": _reentry["zone_low"], "high": _reentry["zone_high"],
                 "fair_value": _reentry["fair_value"],
             })
-            # Append tracker block to the report
-            _reentry_block = format_reentry_block(ticker, _reentry)
+            # Append short 3-line tracker block to the daily pulse
+            # Full breakdown is reserved for the Pushover alert below
+            _reentry_block = format_reentry_block(ticker, _reentry, short=True)
             report_text = report_text.rstrip("\n") + f"\n\n{_reentry_block}\n"
             # Fire Pushover once when gate is first met in this RO cycle
             if _reentry["gate_met"]:
