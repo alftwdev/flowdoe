@@ -680,6 +680,42 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         pass
     edgar_line = "┣ 📋 EDGAR: " + " | ".join(edgar_alerts) + "\n" if edgar_alerts else ""
 
+    # Re-entry tracker — surfaces live score when an RO dodge is active.
+    # Zero API calls: reads keys written by monitor.py every loop tick.
+    # Shows progress toward the 60/100 gate and days remaining in 45-day hard wait.
+    reentry_lines = []
+    try:
+        for _ct in ("CLM", "CRF"):
+            if not db.get_state(f"ro_dodge_active_{_ct}"):
+                continue
+            _rs = db.get_state(f"{_ct}_reentry_score")
+            _rz = db.get_state(f"{_ct}_reentry_zone")
+            _n2 = db.get_state(f"cornerstone_n2_detected_{_ct}") or ""
+            if _rs is None:
+                reentry_lines.append(f"{_ct} RO active — re-entry score pending next monitor.py tick")
+                continue
+            _score = int(_rs)
+            _fv    = _rz["fair_value"] if isinstance(_rz, dict) else 0.0
+            _zl    = _rz["low"]        if isinstance(_rz, dict) else 0.0
+            _zh    = _rz["high"]       if isinstance(_rz, dict) else 0.0
+            try:
+                from datetime import date as _dt_date
+                _age  = (_dt_date.today() - _dt_date.fromisoformat(_n2)).days if _n2 else 0
+                _wait = max(0, 45 - _age)
+            except Exception:
+                _age, _wait = 0, 45
+            _gate_str = (
+                "gate MET ✅" if (_score >= 60 and _wait == 0)
+                else (f"gate unlocks in {_wait}d" if _wait > 0 else f"{60 - _score}pts to gate")
+            )
+            reentry_lines.append(
+                f"{_ct} RO active: `{_score}/100` | "
+                f"zone `${_zl:.2f}–${_zh:.2f}` | FV `${_fv:.2f}` | {_gate_str}"
+            )
+    except Exception:
+        pass
+    reentry_line = "┣ 🔄 Re-entry: " + " | ".join(reentry_lines) + "\n" if reentry_lines else ""
+
     # Bollen (2010) mood forward signal — "Twitter Mood Predicts the Stock Market."
     # Low calmness/high anxiety (SS mood ≤ 25) Granger-causes DJIA declines 2–6 days later.
     # High euphoria (≥ 75) predicts mean reversion. Source: SentiSense market_mood, cached daily.
@@ -737,6 +773,35 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             continue
     exdiv_line = "┣ Ex-Div: " + " | ".join(_exdiv_parts) + "\n" if _exdiv_parts else ""
 
+    # Signal ledger confidence — 30-day win rates from signal_ledger table.
+    # Zero API calls: reads graded predictions already stored by announcements.py grader.
+    # Flags ⚠️ when a desk is below 50% — calibrates conviction without changing strategy.
+    # Only surfaces when a desk has ≥3 graded signals (avoids noise from tiny samples).
+    ledger_conf_line = ""
+    try:
+        ledger_rates = engine.get_signal_ledger_winrates(days_back=30)
+        _conf_parts = []
+        _desk_map = {
+            "market_direction": "Direction",
+            "tqqq_call":        "LEAP CALL",
+            "tqqq_put":         "LEAP PUT",
+            "clm_floor":        "CEF floor",
+            "wheel_csp":        "Wheel",
+        }
+        for _key, _label in _desk_map.items():
+            _r = ledger_rates.get(_key)
+            if not _r or _r.get("total", 0) < 3:
+                continue  # skip — too few data points to be meaningful
+            _w  = _r["wins"]
+            _t  = _r["total"]
+            _pct = round(_w / _t * 100) if _t else 0
+            _flag = "⚠️" if _pct < 50 else "✅"
+            _conf_parts.append(f"{_label} {_w}/{_t} {_flag}")
+        if _conf_parts:
+            ledger_conf_line = "┣ 📈 Signal accuracy (30d): " + " | ".join(_conf_parts) + "\n"
+    except Exception:
+        pass
+
     # Q1 tax character note (Jan–Mar only) — shows after-tax yield if 1099-DIV data is seeded.
     # Source: db_tools.py --seed-tax-character (run once after 1099-DIV arrives each January).
     _tax_note = ""
@@ -766,12 +831,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         "\n**CROSS-CHANNEL SIGNALS**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"{edgar_line}"
+        f"{reentry_line}"
         f"{acc_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
         f"{mood_fwd_line}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
+        f"{ledger_conf_line}"
         f"{mlpi_entry_line}"
         f"┗ Synthesized: #cornerstone · #crypto · #futures · #options-wheel\n"
     )
