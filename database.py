@@ -94,31 +94,6 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
 
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS youtube_videos (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        video_id TEXT NOT NULL UNIQUE,
-                        playlist_id TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        transcript_fetched INTEGER DEFAULT 0,
-                        processed_date TEXT,
-                        added_date TEXT DEFAULT CURRENT_DATE
-                    )
-                """)
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS youtube_key_points (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        video_id TEXT NOT NULL,
-                        point_number INTEGER NOT NULL,
-                        content TEXT NOT NULL,
-                        approved INTEGER DEFAULT 0,
-                        integration_notes TEXT,
-                        created_date TEXT DEFAULT CURRENT_DATE,
-                        FOREIGN KEY(video_id) REFERENCES youtube_videos(video_id)
-                    )
-                """)
-                conn.commit()
-
                 # CEF daily premium log — accumulates from monitor.py runs.
                 # Replaces CEFConnect dependency (API retired). After 30+ trading days
                 # this table provides a real empirical baseline for z-score calibration.

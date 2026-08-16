@@ -95,7 +95,7 @@ def run_daily_maintenance(db_path: str = "rockefeller_state.db"):
 
 def purge_stale_data(db_path: str = "rockefeller_state.db"):
     """
-    One-time cleanup: drops dead tables (youtube_videos, youtube_key_points, users),
+    One-time cleanup: drops dead tables (users),
     removes orphaned global_state keys (TSP, staking, deprecated forex state),
     and grades overdue PENDING signal_ledger entries.
 
@@ -104,7 +104,7 @@ def purge_stale_data(db_path: str = "rockefeller_state.db"):
     db_full = os.path.join(BASE_DIR, db_path)
     logger.info("Running one-time stale data purge...")
 
-    dead_tables = ["youtube_videos", "youtube_key_points", "users"]
+    dead_tables = ["users"]
     orphaned_key_prefixes = ["tsp_", "staking_yields", "EUR/USD_", "GBP/USD_",
                              "USD/JPY_", "wargame_", "test_poison_key"]
     orphaned_exact = ["btc_spy_correlation_sync"]
