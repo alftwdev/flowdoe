@@ -1727,10 +1727,18 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     Removed from output (back-pocket / DB only):
       N-CSR, DEF 14A individual lines, Margin Deploy advisory.
     """
-    prem_tag = ("(neutral)" if 10 <= premium <= 20
-                else ("(EXTENDED)" if premium > 25
-                else ("(HIGH)" if premium > 15
-                else "(DISCOUNT)")))
+    # CEF terminology: "discount" = price < NAV (negative premium). A positive premium
+    # below 10% is compressed vs historical average but still a premium, not a discount.
+    if premium < 0:
+        prem_tag = "(DISCOUNT)"         # true CEF discount: price below NAV
+    elif premium < 10:
+        prem_tag = "(COMPRESSED)"       # premium but well below historical 15-25% avg
+    elif premium <= 20:
+        prem_tag = "(neutral)"
+    elif premium <= 25:
+        prem_tag = "(HIGH)"
+    else:
+        prem_tag = "(EXTENDED)"         # > 25% — trim zone, RO risk zone
     rsi_tag  = "(neutral)" if 40 <= rsi <= 60 else ("(OVERBOUGHT)" if rsi > 70 else ("(OVERSOLD)" if rsi < 30 else "(neutral)"))
     z_tag    = "(safe)" if z_premium < 1.0 else ("(caution)" if z_premium < 2.0 else "(DANGER)")
 
@@ -2012,13 +2020,19 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # ── Track N-2 detection across cycles (anchor for re-entry logic)
     n2_key = f"cornerstone_n2_detected_{ticker}"
     if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
+        _path_a_done = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
+        _path_b_done = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
         if not db.get_state(n2_key, ""):
+            # First detection this cycle — set anchor and reset fired flags
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
-            db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
-            # Reset per-cycle fired flags so re-entry detectors are live
             db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
             db.update_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
             logger.info(f"[N-2 Cycle] {ticker} — N-2 anchor set {datetime.now().strftime('%Y-%m-%d')}, dodge active.")
+            _path_a_done = _path_b_done = ""  # just reset above
+        # Always assert ro_dodge_active when N-2 is live and re-entry not confirmed.
+        # Defensive: if a prior bug cleared the flag between ticks, this restores it.
+        if not _path_a_done and not _path_b_done:
+            db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
     else:
         # N-2 scrolled out of recent filings list.
         # Only clear the cycle anchor once re-entry has been confirmed via one of the two
