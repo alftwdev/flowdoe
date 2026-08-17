@@ -71,8 +71,8 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 # ASSET CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 PRIORITY_ASSETS = {
-    "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.45},
-    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.18}   # updated Jul 23 2026; actual NAV ~$6.18
+    "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.73},   # updated Aug 16 2026 — NAV per N-2 EDGAR filing Aug 14
+    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.18}    # updated Jul 23 2026; actual NAV ~$6.18
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,6 +169,8 @@ RO_SCORE_WEIGHTS = {
     "nav_determination":  12,   # October = NAV lock month; heightened sensitivity window
     "cef_inst_exit":      20,   # High vol + flat SPY = institutional distribution cycle exit
     "dist_overvalued":    10,   # Price > fair-value floor by >10% at new annual distribution rate
+    # Pre-N-2 early warning signals (elevation duration — community-validated)
+    "premium_streak":     10,   # 10+ consecutive days above 20% premium — board has motive
     # Suppressors
     "ex_div_relief":      -10,
 }
@@ -992,6 +994,8 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
         db.update_state(fired_key, _today_reentry)
         db.update_state(f"ro_dodge_active_{ticker}", "")  # clear the dodge flag — re-entry confirmed
         db.update_state(f"ro_reentry_signal_{ticker}", _today_reentry)
+        # Record RO completion date for interval tracking (pre-N-2 streak context)
+        db.update_state(f"cornerstone_last_ro_completed_{ticker}", _today_reentry)
 
         # Journal the re-entry signal
         try:
@@ -1095,6 +1099,8 @@ def check_yield_floor_reentry(ticker: str, current_price: float, current_premium
         db.update_state(fired_key, _today_floor)
         db.update_state(f"ro_dodge_active_{ticker}", "")  # clear dodge flag
         db.update_state(f"ro_reentry_signal_{ticker}", _today_floor)
+        # Record RO completion date for interval tracking (pre-N-2 streak context)
+        db.update_state(f"cornerstone_last_ro_completed_{ticker}", _today_floor)
 
         # Journal the re-entry signal
         try:
@@ -1177,7 +1183,7 @@ def calculate_reentry_score(
     Only meaningful when ro_dodge_active_{ticker} is set in DB.
     """
     annual_div = 1.4268 if ticker == "CLM" else 1.3824
-    nav_fallback = 6.45 if ticker == "CLM" else 6.18
+    nav_fallback = 6.73 if ticker == "CLM" else 6.18  # CLM updated Aug 16 2026 per N-2 EDGAR filing
     _nav = nav if nav > 0 else nav_fallback
 
     fair_value = round(annual_div / 0.19, 2)   # FV at 19% yield target
@@ -1339,11 +1345,16 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
         return "\n".join(lines)
 
     # ── Full breakdown version for Pushover / direct alert ───────────────────
-    # RO subscription price = ~104% of NAV (community-validated: Casey B Aug 2026).
-    # Open-market buyers who wait until price ≤ RO sub price capture better value
-    # than RO participants (no lock-up, margin-eligible, no subscription paperwork).
-    _nav_for_sub = r.get("nav_used", 6.45 if ticker == "CLM" else 6.18)
-    _ro_sub_px   = round(_nav_for_sub * 1.04, 2)
+    # RO subscription price formula (empirically confirmed from SEC filings):
+    #   CLM 2025: max(112% × NAV, 80% × market price) — typically 112% NAV wins
+    #   CRF 2025/2026: 104% × NAV at expiration
+    # Open-market buyers who wait until price ≤ sub price beat RO participants:
+    # no lock-up period, margin-eligible, no subscription paperwork.
+    _nav_for_sub = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
+    if ticker == "CLM":
+        _ro_sub_px = round(_nav_for_sub * 1.12, 2)  # CLM: 112% of NAV
+    else:
+        _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # CRF: 104% of NAV
 
     lines = [
         f"POST-RO RE-ENTRY TRACKER — {ticker}",
@@ -1570,6 +1581,7 @@ def calculate_ro_risk_score(
     nav_determination=False, cef_inst_exit=False, dist_overvalued=False,
     long_rate_pressure=False, hy_rapid_widen=False,
     dark_pool_cluster_count=1,
+    premium_streak_days=0, ro_interval_elevated=False,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -1632,6 +1644,14 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["cef_inst_exit"]
     if dist_overvalued:
         score += RO_SCORE_WEIGHTS["dist_overvalued"]
+    # Premium elevation streak: board has clear motive when premium stays elevated for weeks
+    if premium_streak_days >= 10:
+        score += RO_SCORE_WEIGHTS["premium_streak"]
+    elif premium_streak_days >= 5:
+        score += RO_SCORE_WEIGHTS["premium_streak"] // 2  # half weight at 5 days
+    # Interval elevated: 10+ months since last RO completion + premium elevated = "overdue" cycle
+    if ro_interval_elevated:
+        score += 8  # separate from premium_streak — different dimension of risk
     if ex_div_near and score > 0:
         score += RO_SCORE_WEIGHTS["ex_div_relief"]   # negative weight — schedules dip, not dilution
 
@@ -1690,7 +1710,9 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
                          nav_determination=False, cef_inst_exit_desc="",
                          dist_fair_value=0.0, implied_yield=0.0,
                          is_dist_overvalued=False,
-                         nav_src="CEFConnect") -> str:
+                         nav_src="CEFConnect",
+                         premium_streak_days=0, premium_velocity_3d=0.0,
+                         months_since_last_ro=None, ro_interval_elevated=False) -> str:
     """
     Cornerstone Pulse — mobile-first labeled format.
 
@@ -1761,6 +1783,36 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
             )
         # 30%+ is handled by the separate 30pct_watch Discord embed (already fires in get_ticker_report)
 
+    # Pre-N-2 streak and velocity lines (appear only when premium is elevated and no active RO)
+    # These are early-warning context lines, not hard alerts — they live in the pulse quietly
+    # until something actionable is building.
+    prem_streak_line = ""
+    prem_velocity_line = ""
+    ro_interval_line = ""
+    if not sec["ro_active"] and not _ro_dodge_now:
+        if premium_streak_days >= 5:
+            _streak_emoji = "🔴" if premium_streak_days >= 10 else "⚠️"
+            prem_streak_line = (
+                f"┣ {_streak_emoji} Prem 20%+ Streak: `{premium_streak_days}d` — "
+                f"{'RO risk rising — board has sustained motive' if premium_streak_days >= 10 else 'watch — approaching board motive threshold (10d)'}\n"
+            )
+        if abs(premium_velocity_3d) >= 2.0:
+            _vel_dir = "↑ expanding" if premium_velocity_3d > 0 else "↓ compressing"
+            _vel_emoji = "⚠️" if premium_velocity_3d > 0 else "✅"
+            prem_velocity_line = (
+                f"┣ {_vel_emoji} Prem Velocity: `{premium_velocity_3d:+.1f}%` / 3d ({_vel_dir})\n"
+            )
+        if ro_interval_elevated and months_since_last_ro is not None:
+            ro_interval_line = (
+                f"┣ 🔴 RO Interval: `{months_since_last_ro:.1f}mo` since last completion — "
+                f"overdue window (10+ mo) + premium elevated = heightened cycle risk\n"
+            )
+        elif months_since_last_ro is not None and months_since_last_ro >= 7.0 and premium >= 15.0:
+            ro_interval_line = (
+                f"┣ Months since last RO: `{months_since_last_ro:.1f}mo` — "
+                f"approaching typical interval (10–18 mo)\n"
+            )
+
     # Conditional lines — only appear when triggered, inserted before Div. Yield
     vixy_line      = f"┣ VIXY: `{vixy_z:+.1f}σ` spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
@@ -1778,6 +1830,9 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         f"┣ NAV: `${nav:.2f}`\n"
         f"┣ Prem: `{premium:.2f}%` {prem_tag}\n"
         f"{trim_zone_line}"
+        f"{prem_streak_line}"
+        f"{prem_velocity_line}"
+        f"{ro_interval_line}"
         f"{edgar_sec_line}"
         f"┣ Whale Flow: {whale_tag}\n"
         f"┣ Dark Pool: {dp_tag}\n"
@@ -2010,6 +2065,59 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         # Premium retreated below 25% — reset the watch so it can fire again next cycle
         db.update_state(watch_key, "")
 
+    # ── PRE-N-2 EARLY WARNING SIGNALS ────────────────────────────────────────
+    # Gap 1: Premium elevation streak — how many consecutive ticks has premium
+    # been ≥ 20%? Duration matters: a board watching their own premium for weeks
+    # is more likely to file than one seeing a single elevated day.
+    # Stored as dict {count, start_date} so we can show days since streak began.
+    _streak_key  = f"premium_above20_streak_{ticker}"
+    _streak_data = db.get_state(_streak_key) or {}
+    if not isinstance(_streak_data, dict):
+        _streak_data = {}
+    if premium >= 20.0:
+        _streak_data["count"]      = _streak_data.get("count", 0) + 1
+        _streak_data["start_date"] = _streak_data.get("start_date", datetime.now().strftime("%Y-%m-%d"))
+    else:
+        _streak_data = {}  # reset on any close below 20%
+    db.update_state(_streak_key, _streak_data)
+    premium_streak_days = _streak_data.get("count", 0)
+
+    # Gap 2: Premium velocity — rolling 3-session change (fast expansion warning).
+    # Uses the same session-over-session cache as premium_compression but looks at
+    # the 3-tick moving window to smooth out intraday noise.
+    _vel_key  = f"premium_velocity_hist_{ticker}"
+    _vel_hist = db.get_state(_vel_key) or []
+    if not isinstance(_vel_hist, list):
+        _vel_hist = []
+    _vel_hist.append(round(premium, 3))
+    _vel_hist = _vel_hist[-3:]  # keep last 3 sessions
+    db.update_state(_vel_key, _vel_hist)
+    premium_velocity_3d = 0.0
+    if len(_vel_hist) == 3:
+        premium_velocity_3d = round(_vel_hist[-1] - _vel_hist[0], 2)
+
+    # Gap 3: Months since last RO completion — gives time-in-cycle context.
+    # CLM/CRF historically file every 10–18 months when premium is elevated.
+    # "Overdue" (≥ 10 months since last completion + elevated premium) raises risk.
+    _last_ro_str      = db.get_state(f"cornerstone_last_ro_completed_{ticker}", "")
+    months_since_last_ro = None
+    ro_interval_elevated = False
+    if _last_ro_str:
+        try:
+            _last_ro_date        = datetime.strptime(_last_ro_str, "%Y-%m-%d").date()
+            _days_since          = (datetime.utcnow().date() - _last_ro_date).days
+            months_since_last_ro = round(_days_since / 30.44, 1)
+            # "Overdue" = 10+ months since last completion AND premium currently elevated
+            ro_interval_elevated = months_since_last_ro >= 10.0 and premium >= 20.0
+        except Exception:
+            pass
+
+    # Write pre-N-2 signals to DB for cross-script reads (market_analysis.py morning brief)
+    db.update_state(f"{ticker.lower()}_premium_streak_days",   premium_streak_days)
+    db.update_state(f"{ticker.lower()}_premium_velocity_3d",   premium_velocity_3d)
+    db.update_state(f"{ticker.lower()}_months_since_last_ro",  months_since_last_ro)
+    db.update_state(f"{ticker.lower()}_ro_interval_elevated",  ro_interval_elevated)
+
     # ── Cross-script signal flags (DB reads — zero new API calls) ─────────────
     # Yield curve steepening: read spread written daily by cross_asset.py.
     # Rapid steepening (> 20bps) pressures yield-sensitive CEF premiums.
@@ -2077,6 +2185,8 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         long_rate_pressure=long_rate_pressure,
         hy_rapid_widen=hy_rapid_widen,
         dark_pool_cluster_count=dark_pool_cluster_count,
+        premium_streak_days=premium_streak_days,
+        ro_interval_elevated=ro_interval_elevated,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)
@@ -2172,6 +2282,10 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         implied_yield=implied_yield,
         is_dist_overvalued=is_dist_overvalued,
         nav_src=_nav_src,
+        premium_streak_days=premium_streak_days,
+        premium_velocity_3d=premium_velocity_3d,
+        months_since_last_ro=months_since_last_ro,
+        ro_interval_elevated=ro_interval_elevated,
     )
 
     # ── OBV + MFI: back-pocket volume pressure signals.
@@ -3180,7 +3294,7 @@ def run_monitor():
                             if not _already_alerted:
                                 # First alert for this RO cycle — clean format, N-2 only
                                 _ann_div   = 1.4268 if _ticker == "CLM" else 1.3824
-                                _nav_fb    = 6.45   if _ticker == "CLM" else 6.18
+                                _nav_fb    = 6.73   if _ticker == "CLM" else 6.18  # Aug 16 2026 N-2 filing NAV
                                 _fv        = round(_ann_div / 0.19, 2)
                                 # Re-entry range: NAV (post-dilution bottom) to FV (income buyer floor)
                                 _re_lo     = _nav_fb

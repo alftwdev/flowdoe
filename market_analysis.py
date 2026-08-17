@@ -746,6 +746,37 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             acc_lines.append(f"{_tkr}: {_status}" + (f" ({_detail})" if _detail else ""))
     acc_line = "┣ Accumulation: " + " | ".join(acc_lines) + "\n" if acc_lines else ""
 
+    # Pre-N-2 early warning block — reads signals written by monitor.py each tick.
+    # Only surfaces when no active RO dodge (avoid noise during active RO cycle).
+    # Three dimensions: streak (duration), velocity (speed), interval (cycle timing).
+    pre_n2_parts = []
+    try:
+        for _ct in ("CLM", "CRF"):
+            _ro_active_now = db.get_state(f"ro_dodge_active_{_ct}", "")
+            if _ro_active_now:
+                continue  # active RO — re-entry block already covers it
+            _streak  = int(db.get_state(f"{_ct.lower()}_premium_streak_days", 0) or 0)
+            _vel     = db.get_state(f"{_ct.lower()}_premium_velocity_3d")
+            _vel     = float(_vel) if _vel is not None else 0.0
+            _months  = db.get_state(f"{_ct.lower()}_months_since_last_ro")
+            _months  = float(_months) if _months is not None else None
+            _overdue = db.get_state(f"{_ct.lower()}_ro_interval_elevated", False)
+
+            parts = []
+            if _streak >= 5:
+                parts.append(f"streak `{_streak}d`")
+            if abs(_vel) >= 2.0:
+                parts.append(f"vel `{_vel:+.1f}%/3d`")
+            if _overdue:
+                parts.append(f"interval `{_months:.1f}mo` ⚠️ overdue")
+            elif _months is not None and _months >= 7.0:
+                parts.append(f"interval `{_months:.1f}mo`")
+            if parts:
+                pre_n2_parts.append(f"{_ct}: " + " | ".join(parts))
+    except Exception:
+        pass
+    pre_n2_line = "┣ Pre-N-2 watch: " + " | ".join(pre_n2_parts) + "\n" if pre_n2_parts else ""
+
     # Ex-div reaction signals — written by scheduler.py exdiv_check (20:35 UTC)
     # Only surfaces OVERSHOOT/UNDERSHOOT; EFFICIENT is noise-suppressed.
     _exdiv_parts = []
@@ -833,6 +864,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"{edgar_line}"
         f"{reentry_line}"
         f"{acc_line}"
+        f"{pre_n2_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
         f"{mood_fwd_line}"
