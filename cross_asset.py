@@ -903,8 +903,10 @@ if __name__ == "__main__":
     elif mode == "ib_breakout":
         run_ib_breakout_scan()
     else:
-        # Default cron invocation: change-gated board + IB breakout scanner.
-        # Profile deep-dive removed from scheduled runs — call `python cross_asset.py profile`
-        # manually if a session-specific deep-dive is needed.
+        # Default cron invocation: change-gated board + IB breakout scanner + DB profile write.
+        # run_intraday_futures_update() writes SPY_poc/vah/val/vwap to DB so market_analysis.py
+        # morning brief Overnight Market Structure section has real data. No extra API calls —
+        # it uses the same SPY time series already fetched by run_futures_board().
         run_futures_board()
         run_ib_breakout_scan()
+        run_intraday_futures_update()

@@ -3195,12 +3195,16 @@ class HighFidelityAnalyticsEngine:
             futures_line = ""  # nothing logged yet, skip the line entirely
 
         # ── #cornerstone: RO risk status today ──
-        ro_fired = self.db.get_state(f"cornerstone_alert_fired_{today_str}", False)
-        ro_tier  = self.db.get_state("clm_last_ro_score", 0)
+        # Use max of CLM and CRF scores — one fund at CRITICAL while the other is LOW
+        # should still show ELEVATED status, not average to LOW.
+        ro_fired    = self.db.get_state(f"cornerstone_alert_fired_{today_str}", False)
+        _clm_score  = int(self.db.get_state("clm_last_ro_score", 0) or 0)
+        _crf_score  = int(self.db.get_state("crf_last_ro_score", 0) or 0)
+        ro_score_max = max(_clm_score, _crf_score)
         if ro_fired:
             ro_line = f"┣ #cornerstone      RO Alert fired ⚠️ — CLM/CRF protection triggered\n"
-        elif ro_tier and int(ro_tier) >= 25:
-            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED (`{ro_tier}/100`) — monitoring ⚠️\n"
+        elif ro_score_max >= 25:
+            ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: ELEVATED (`{ro_score_max}/100`) — monitoring ⚠️\n"
         else:
             ro_line = f"┣ #cornerstone      CLM/CRF RO Risk: LOW ✅ — all clear\n"
 

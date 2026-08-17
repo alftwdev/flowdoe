@@ -2,11 +2,11 @@
 market_analysis.py — Always-on Morning Command Center.
 
 Runs as the 6th PythonAnywhere always-on task. Internal 60-second tick loop
-with DB-deduped firing at three daily windows:
+with DB-deduped firing at two daily windows (EOD is via scheduler.py):
 
-  18:00 UTC (08:00 HST) → Full morning synthesis brief
-  20:20 UTC (10:20 HST) → Mid-session pulse (intraday context update)
-  23:40 UTC (13:40 HST) → EOD brief (market close recap)
+  13:10 UTC (03:10 HST) → Full morning synthesis brief
+  17:00 UTC (07:00 HST) → Mid-session pulse (intraday context update)
+  20:20 UTC (10:20 HST) → EOD brief via scheduler.py --mode eod (not this script)
 
 Synthesizes ALL ecosystem feeds into a single #market-analysis embed:
   • FRED macro (VIX, yield curve, Fed Funds, HY spread)

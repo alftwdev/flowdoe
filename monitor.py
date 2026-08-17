@@ -2073,8 +2073,14 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         income_note  = "Distribution/Caution phase"
         verdict      = "🔴 SELL to ≥3 shares — NAV dilution imminent. ≥3 shares preserves DRIP permanently."
         recommendation = "Halt DRIP; sell to 3-share floor; monitor for RO completion."
-        # Set RO dodge flag so box pulse lines show the balloon reminder
-        db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+        # Set RO dodge flag so box pulse lines show the balloon reminder.
+        # Guard: once a re-entry path has fired and cleared the flag, do NOT re-set it
+        # on the next tick. N-2 stays in EDGAR permanently after filing, so without this
+        # guard the flag would be restored every 5 minutes, making re-entry impossible.
+        _path_a = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
+        _path_b = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
+        if not _path_a and not _path_b:
+            db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
         # Inject box context into verdict if boxes are active
         _active_boxes = read_active_box_positions()
         if _active_boxes:

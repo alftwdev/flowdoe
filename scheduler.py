@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "gex", "post_market", "options_flow", "macro", "market_intraday", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "post_market", "macro", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
     parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -275,21 +275,6 @@ def main():
                 logger.error(f"Morning options brief failed: {e}")
 
             logger.info("Morning primers successfully compiled and dispatched.")
-
-        elif args.mode == "market_intraday":
-            # Mid-day check-in: is today tracking the morning call, or has the tape diverged?
-            # No new cron slot exists for this yet — add one around 12:00-13:00 ET to PythonAnywhere's
-            # scheduled tasks: `python3.10 /home/alftw/scripts/scheduler.py --mode market_intraday`
-            try:
-                intraday_brief = engine.generate_market_analysis_intraday_report()
-                if intraday_brief and WEBHOOK_MARKET:
-                    _intra_bias = engine.db.get_state("market_analysis_bias") or {}
-                    _intra_score = _intra_bias.get("score", 0) if isinstance(_intra_bias, dict) else 0
-                    _intra_color = _bias_color(_intra_score)
-                    send_essentials_embed(WEBHOOK_MARKET, "MARKET ANALYSIS | INTRADAY PULSE", intraday_brief, _intra_color)
-                    logger.info("Intraday pulse dispatched.")
-            except Exception as e:
-                logger.error(f"Market analysis intraday report failed: {e}")
 
         elif args.mode == "weekly_scorecard":
             # Cron: daily at 20:30 UTC — Friday gate below ensures it only dispatches on Fridays.
@@ -1481,23 +1466,6 @@ def main():
                 send_essentials_embed(WEBHOOK_OPTIONS, "Options Market Flowstate", outlook_payload, _flowstate_color)
                 logger.info("Options fallback market conditions snapshot dispatched.")
 
-        elif args.mode == "gex":
-            gex_data = engine.calculate_gex_profile("SPY")
-            if gex_data['current_spot'] == 0.0 or gex_data['flip_strike'] == 0.0:
-                logger.warning("GEX Math returned zeros. Suppressing broadcast.")
-                return 
-                
-            payload = (
-                f"Automated Market Maker Positioning Map (SPY)\n\n"
-                f"┣ Current Spot Price: `${gex_data['current_spot']:.2f}`\n"
-                f"┣ Systemic Gamma Flip Line: `${gex_data['flip_strike']:.2f}`\n"
-                f"┗ Structural Posture Context: {gex_data['market_state']}\n\n"
-                f"Strategic Warning: Fading or breaking the Gamma Flip line will result in an immediate shift in institutional market-maker hedging algorithms."
-            )
-            # Dynamic look for market state: Red for Negative Gamma environments, Green for stable Positive Gamma environments
-            gex_color = 0x2ecc71 if "POSITIVE" in gex_data['market_state'].upper() else 0xe74c3c
-            send_essentials_embed(WEBHOOK_MARKET, "COGNITIVE ARCHITECTURE MATRIX: Pre-Market GEX Mapping", payload, gex_color)
-
         elif args.mode == "post_market":
             watchlist = ["AAPL", "NVDA", "MSFT", "TSLA", "META", "GOOGL", "AMZN"]
             triggered_assets = []
@@ -1522,41 +1490,6 @@ def main():
             if triggered_assets:
                 payload = "Institutional Extended-Hours Liquidity Sweep\n\n" + "\n".join(triggered_assets) + "\n\nContext: Abnormal post-market volatility usually signals an earnings release or breaking structural news."
                 send_essentials_embed(WEBHOOK_MARKET, "POST-MARKET SENTRY: Abnormal Volatility Detected", payload, 0xe74c3c)
-
-        elif args.mode == "options_flow":
-            # ── OPTIONS SETUP SCANNER ─────────────────────────────────────────
-            # Screens the dynamic universe for high-conviction directional setups.
-            # Sources: RVOL, RSI, MACD, ATR (strike zone), short interest, 52W range,
-            # social sentiment (StockTwits/WSB). No fake dark pool — every signal is
-            # derived from real publicly available equity data.
-            # Run once per session around 10:00-10:30 ET after the open settles.
-            try:
-                setups = engine.generate_options_setup_scan()
-                if not setups:
-                    logger.info("Options flow scan: no qualifying setups this session.")
-                else:
-                    today_label = datetime.now().strftime("%b %-d")
-                    header = f"OPTIONS SETUP SCANNER — {today_label}\n"
-                    for s in setups:
-                        direction_icon = "🟢 CALL" if s["direction"] == "CALL" else "🔴 PUT"
-                        squeeze_line = f"┣ Short squeeze risk: {s['short_pct']:.1f}% of float short\n" if s["short_pct"] > 5.0 else ""
-                        social_line  = f"┣ Social: {s['social_meter']} buzz — {s['social_lean']}\n" if s.get("social_meter") else ""
-                        payload = (
-                            f"{s['symbol']} — {direction_icon} BIAS\n"
-                            f"┣ Spot: ${s['spot']:,.2f} | RVOL: {s['rvol']:.1f}x | RSI: {s['rsi']:.0f}\n"
-                            f"┣ MACD: {s['macd_tag']} | ATR(14): ${s['atr']:.2f}\n"
-                            f"┣ Strike zone: ${s['strike_lo']:,.0f}–${s['strike_hi']:,.0f} | DTE: 21–30\n"
-                            f"┣ 52W range: {s['range_pct']:.0f}% ({s['range_tag']})\n"
-                            f"{squeeze_line}"
-                            f"{social_line}"
-                            f"┗ {s['verdict']}"
-                        )
-                        color = 0x2ecc71 if s["direction"] == "CALL" else 0xe74c3c
-                        if WEBHOOK_OPTIONS:
-                            send_essentials_embed(WEBHOOK_OPTIONS, f"OPTIONS SETUP: {s['symbol']}", payload, color)
-                    logger.info(f"Options flow scan dispatched: {len(setups)} setup(s).")
-            except Exception as e:
-                logger.error(f"Options flow scan failed: {e}")
 
         elif args.mode == "trending_plays":
             # ── SOCIAL SENTIMENT TRENDING OPTIONS PLAYS ─────────────────────
