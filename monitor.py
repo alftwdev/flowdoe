@@ -1339,10 +1339,17 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
         return "\n".join(lines)
 
     # ── Full breakdown version for Pushover / direct alert ───────────────────
+    # RO subscription price = ~104% of NAV (community-validated: Casey B Aug 2026).
+    # Open-market buyers who wait until price ≤ RO sub price capture better value
+    # than RO participants (no lock-up, margin-eligible, no subscription paperwork).
+    _nav_for_sub = r.get("nav_used", 6.45 if ticker == "CLM" else 6.18)
+    _ro_sub_px   = round(_nav_for_sub * 1.04, 2)
+
     lines = [
         f"POST-RO RE-ENTRY TRACKER — {ticker}",
         f"┣ {status_line}",
         f"┣ Re-entry zone:  `${zl:.2f} – ${zh:.2f}`  (NAV to +1.5% premium — max DRIP efficiency)",
+        f"┣ RO sub price:   ~`${_ro_sub_px:.2f}` (NAV×1.04) — open-market entry at/below this beats RO participants",
         f"┣ Fair value floor: `${fv:.2f}`  |  Implied yield at current price: `{iy:.1f}%`",
         "┣ Confluence breakdown:",
     ]
@@ -1738,6 +1745,22 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
     # NAV source label (compact)
     nav_label = "CEFConnect" if "cefconnect" in nav_src.lower() else "proxy"
 
+    # Pre-N-2 "Trim Zone" signal (community-validated insight from Todd Akin's Discord):
+    # When premium hits 20%+, start lightening BEFORE the N-2 drops. Once premium
+    # reaches 30%, the 30% watch alert fires a separate one-time Discord embed.
+    # This intermediate warning (20-29.9%) appears in the daily pulse only — no
+    # separate Discord embed, just a visible line to prompt review.
+    # Suppressed when RO dodge is already active (N-2 already filed — too late to trim).
+    _ro_dodge_now = db.get_state(f"ro_dodge_active_{ticker}", "")
+    trim_zone_line = ""
+    if not sec["ro_active"] and not _ro_dodge_now:
+        if 20.0 <= premium < 30.0:
+            trim_zone_line = (
+                f"┣ ⚠️ TRIM ZONE (`{premium:.1f}%`) — Premium entering exit range. "
+                f"Consider 30–50% reduction. 30% = full watch trigger.\n"
+            )
+        # 30%+ is handled by the separate 30pct_watch Discord embed (already fires in get_ticker_report)
+
     # Conditional lines — only appear when triggered, inserted before Div. Yield
     vixy_line      = f"┣ VIXY: `{vixy_z:+.1f}σ` spike — reduce size / close puts→calls\n" if crisis_day else ""
     ro_season_line = "┣ RO Season: Active (Feb–Apr window)\n" if ro_season else ""
@@ -1754,6 +1777,7 @@ def format_pulse_report(ticker, price, nav, rsi, premium, z_premium,
         f"┣ Price: `${price:.2f}`\n"
         f"┣ NAV: `${nav:.2f}`\n"
         f"┣ Prem: `{premium:.2f}%` {prem_tag}\n"
+        f"{trim_zone_line}"
         f"{edgar_sec_line}"
         f"┣ Whale Flow: {whale_tag}\n"
         f"┣ Dark Pool: {dp_tag}\n"
