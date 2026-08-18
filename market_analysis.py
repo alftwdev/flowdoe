@@ -27,6 +27,8 @@ import time
 import logging
 import traceback
 import requests
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -50,10 +52,11 @@ TWELVE_DATA_API_KEY     = os.getenv("TWELVE_DATA_API_KEY")
 
 # Fire times (UTC hour, minute) and their DB dedup keys
 FIRE_SCHEDULE = [
-    (13, 10, "ma_morning",   "morning"),   # 03:10 HST — shifted +70min so scheduler.py morning
-                                           # (12:50 UTC) has time to write SPY/QQQ POC/VAH/VAL
-                                           # and expected-range DB keys before we read them.
-    (17,  0, "ma_intraday",  "intraday"),  # 07:00 HST mid-session
+    (13, 10, "ma_morning",    "morning"),    # 03:10 HST — shifted +70min so scheduler.py morning
+                                             # (12:50 UTC) has time to write SPY/QQQ POC/VAH/VAL
+                                             # and expected-range DB keys before we read them.
+    (13, 13, "ma_headlines",  "headlines"),  # 03:13 HST — MarketWatch bulletins, 3 min after brief
+    (17,  0, "ma_intraday",   "intraday"),   # 07:00 HST mid-session
     # ma_eod disabled — scheduler.py --mode eod (20:20 UTC) produces a richer EOD recap
     # (morning call accuracy, signal grading). market_analysis.py EOD duplicated it.
 ]
@@ -443,6 +446,161 @@ def _calculate_bias_score(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         "spy_chg":     spy_chg,
         "qqq_chg":     qqq_chg,
     }
+
+
+# ── MarketWatch Headlines ─────────────────────────────────────────────────────
+
+_MW_MARKET_KEYWORDS = {
+    "stock", "stocks", "market", "markets", "nasdaq", "dow", "s&p", "spy", "qqq",
+    "fed", "federal", "powell", "treasury", "yield", "yields", "bond", "bonds",
+    "rate", "rates", "inflation", "cpi", "pce", "gdp",
+    "sector", "chip", "chips", "tech", "ai", "semiconductor",
+    "economy", "economic", "earnings", "revenue",
+    "fund", "funds", "hedge", "portfolio", "investor", "investors",
+    "oil", "crude", "energy", "commodity", "commodities",
+    "rally", "selloff", "surge", "plunge", "gains", "losses", "decline",
+    "lower", "higher", "fallen", "index", "indices", "bull", "bear",
+    "correction", "crash", "options", "futures", "volatility", "vix",
+}
+
+_MW_BULLISH = {
+    "rally", "gain", "gains", "rise", "higher", "surge", "beat", "breakout",
+    "bullish", "strong", "record", "advance", "soar", "jump", "climbs",
+    "climbed", "best", "boom", "outperform", "upgraded", "upgrade", "recover",
+    "positive", "optimistic", "rebound",
+}
+
+_MW_BEARISH = {
+    "selloff", "decline", "falls", "lower", "drop", "pullback", "retreat",
+    "risk", "warning", "concern", "plunge", "slump", "tumble", "crash",
+    "weakness", "downgrade", "bearish", "worst", "loss", "losses",
+    "collapse", "fear", "threat", "trouble", "struggle", "drag", "pressure",
+    "miss", "missed", "disappoint", "sell",
+}
+
+
+def _fetch_market_headlines(db: EcosystemDatabase) -> list:
+    """
+    Fetch MarketWatch bulletins RSS. Cached to DB once per calendar day.
+    Returns list of dicts: {title, url, age_h, sentiment} (max 5, market-relevant only).
+    Returns [] on stale feed or fetch failure.
+    Credit cost: 0 — external RSS, no Twelve Data calls.
+    """
+    date_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cache_key = f"mw_headlines_{date_str}"
+    cached    = db.get_state(cache_key)
+    if isinstance(cached, list) and cached:
+        return cached
+
+    try:
+        r = requests.get(
+            "https://feeds.marketwatch.com/marketwatch/bulletins",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=12,
+        )
+        if r.status_code != 200:
+            logger.warning(f"[MarketWatch] bulletins HTTP {r.status_code}")
+            return []
+
+        root  = ET.fromstring(r.text)
+        items = root.findall(".//item")
+        if not items:
+            return []
+
+        # Staleness guard — if the newest item is > 24h old the feed is broken
+        try:
+            newest_pub = parsedate_to_datetime(items[0].findtext("pubDate", ""))
+            newest_age_h = (datetime.now(timezone.utc) - newest_pub).total_seconds() / 3600
+            if newest_age_h > 24:
+                logger.warning(f"[MarketWatch] feed stale ({newest_age_h:.0f}h) — skipping dispatch")
+                return []
+        except Exception:
+            newest_age_h = 0.0
+
+        results = []
+        for item in items:
+            title = item.findtext("title", "").strip()
+            link  = item.findtext("link",  "").strip()
+            pub   = item.findtext("pubDate", "").strip()
+            if not title:
+                continue
+
+            # Relevance: at least one market keyword must appear in the title
+            words = set(title.lower().replace("-", " ").replace("'", "").split())
+            if not (words & _MW_MARKET_KEYWORDS):
+                continue
+
+            try:
+                pub_dt = parsedate_to_datetime(pub)
+                age_h  = (datetime.now(timezone.utc) - pub_dt).total_seconds() / 3600
+            except Exception:
+                age_h = 0.0
+
+            b_hits = len(words & _MW_BULLISH)
+            d_hits = len(words & _MW_BEARISH)
+            sentiment = "bullish" if b_hits > d_hits else ("bearish" if d_hits > b_hits else "neutral")
+
+            results.append({"title": title, "url": link, "age_h": age_h, "sentiment": sentiment})
+
+        results = results[:5]
+        if results:
+            db.update_state(cache_key, results)
+        return results
+
+    except Exception as e:
+        logger.warning(f"[MarketWatch] headlines fetch failed: {e}")
+        return []
+
+
+def _build_headlines_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> tuple:
+    """
+    Second morning embed: MarketWatch bulletins headline digest.
+    Fires 3 min after the morning brief (13:13 UTC / 03:13 HST).
+    No emojis. Embed sidebar: green=bullish, yellow=mixed, red=bearish.
+    """
+    try:
+        import zoneinfo
+        now_hst    = datetime.now(timezone.utc).astimezone(zoneinfo.ZoneInfo("US/Hawaii"))
+    except ImportError:
+        now_hst = datetime.now(timezone.utc)
+    date_label = now_hst.strftime("%a %b %-d")
+
+    headlines = _fetch_market_headlines(db)
+
+    if not headlines:
+        return (
+            f"MARKET HEADLINES — {date_label} | MarketWatch",
+            "No market-relevant headlines in current feed. Feed may be between update cycles.",
+            0xf1c40f,
+        )
+
+    b_count = sum(1 for h in headlines if h["sentiment"] == "bullish")
+    d_count = sum(1 for h in headlines if h["sentiment"] == "bearish")
+    n_count = sum(1 for h in headlines if h["sentiment"] == "neutral")
+
+    if d_count > b_count:
+        agg_label, color = "BEARISH",  0xe74c3c
+    elif b_count > d_count:
+        agg_label, color = "BULLISH",  0x2ecc71
+    else:
+        agg_label, color = "MIXED",    0xf1c40f
+
+    lines = []
+    for h in headlines:
+        age_str = f"{h['age_h']:.0f}h ago" if h["age_h"] < 24 else f"{h['age_h']/24:.0f}d ago"
+        pfx     = "(+)" if h["sentiment"] == "bullish" else ("(-)" if h["sentiment"] == "bearish" else "(~)")
+        lines.append(f"{pfx} {h['title']}  `[{age_str}]`")
+
+    freshness_h = headlines[0]["age_h"]
+    freshness   = f"{freshness_h:.1f}h ago" if freshness_h < 24 else f"{freshness_h/24:.1f}d ago"
+
+    body = (
+        "\n".join(lines)
+        + f"\n┣ **Aggregate: {agg_label}** ({b_count} bullish | {d_count} bearish | {n_count} neutral)"
+        + f"\n┗ `MarketWatch Bulletins | Freshness: {freshness} | {len(headlines)} of 10 items market-relevant`"
+    )
+
+    return f"MARKET HEADLINES — {date_label} | MarketWatch", body, color
 
 
 # ── Report Builders ───────────────────────────────────────────────────────────
@@ -1051,9 +1209,10 @@ def run():
     logger.info("Market Analysis online. Loop: 60s.")
 
     BUILDERS = {
-        "morning":  _build_morning_report,
-        "intraday": _build_intraday_report,
-        "eod":      _build_eod_report,
+        "morning":   _build_morning_report,
+        "headlines": _build_headlines_report,
+        "intraday":  _build_intraday_report,
+        "eod":       _build_eod_report,
     }
 
     while True:
