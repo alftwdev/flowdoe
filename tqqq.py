@@ -2714,8 +2714,8 @@ class TQQQTacticalSniper:
             ax.set_xlabel(f"{ticker} Underlying Price", fontsize=9.5, color=MUTED)
             ax.set_ylabel("P&L per Contract ($)", fontsize=9.5, color=MUTED)
             ax.set_title(
-                f"{ticker} {'PUT' if is_put else 'CALL'} K${float(strike):.2f} · "
-                f"{dte_remaining}d DTE remaining · Entry @ ${float(entry_underlying):.2f}",
+                f"{ticker} {'PUT' if is_put else 'CALL'} K\${float(strike):.2f} · "
+                f"{dte_remaining}d DTE remaining · Entry @ \${float(entry_underlying):.2f}",
                 fontsize=10.5, color=TEXT, fontweight="bold", pad=11
             )
             ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"${v:+.0f}"))
