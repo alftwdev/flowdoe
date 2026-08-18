@@ -1186,21 +1186,36 @@ def calculate_reentry_score(
     nav_fallback = 6.73 if ticker == "CLM" else 6.18  # CLM updated Aug 16 2026 per N-2 EDGAR filing
     _nav = nav if nav > 0 else nav_fallback
 
-    fair_value = round(annual_div / 0.19, 2)   # FV at 19% yield target
-    # Re-entry zone: NAV (bottom of post-RO dip) to NAV + 1.5% (max DRIP efficiency)
+    fair_value = round(annual_div / 0.19, 2)   # income buyer floor (19% yield support threshold)
+    # RO subscription price (SEC-confirmed formulae — open-market entry at/below beats participants)
+    _ro_sub_px = round(_nav * 1.12, 2) if ticker == "CLM" else round(_nav * 1.04, 2)
+    # Re-entry zone: NAV ± narrow band (max DRIP efficiency — shares issued at NAV)
     zone_low  = round(_nav * 0.99, 2)
     zone_high = round(_nav * 1.015, 2)
 
     score = 0
     breakdown = []
 
-    # Price at or below fair value floor (+30) — structural income buyer support
-    if price <= fair_value:
+    # Price tier check — 4-tier ladder anchored to NAV (most specific to re-entry timing)
+    # Tier 1 (best): at or below NAV zone — max DRIP efficiency, institutional income floor
+    # Tier 2: within NAV + 1.5% — good DRIP zone, approaching structural support
+    # Tier 3: at/below RO sub price — open-market entry beats rights participants (no paperwork)
+    # Tier 4: at/below income buyer floor (19% yield) — in accumulate zone but above NAV zone
+    if price <= zone_low:
         score += 30
-        breakdown.append(f"Price {price:.2f} <= FV {fair_value:.2f} (+30)")
+        breakdown.append(f"Price ${price:.2f} ≤ NAV zone ${zone_low:.2f} — max DRIP efficiency (+30)")
+    elif price <= zone_high:
+        score += 20
+        breakdown.append(f"Price ${price:.2f} in NAV zone (${zone_low:.2f}–${zone_high:.2f}) — DRIP zone (+20)")
+    elif price <= _ro_sub_px:
+        score += 10
+        breakdown.append(f"Price ${price:.2f} ≤ RO sub price ${_ro_sub_px:.2f} — open-market beats RO participants (+10)")
+    elif price <= fair_value:
+        score += 5
+        breakdown.append(f"Price ${price:.2f} ≤ income buyer floor ${fair_value:.2f} (19% yield) — accumulate zone (+5)")
     else:
         gap_pct = round((price - fair_value) / fair_value * 100, 1)
-        breakdown.append(f"Price {price:.2f} vs FV {fair_value:.2f} — {gap_pct}% above floor (0)")
+        breakdown.append(f"Price ${price:.2f} is {gap_pct:.1f}% above income buyer floor ${fair_value:.2f} (0)")
 
     # Premium < 10% — dilution fully priced in (+20)
     if premium < 10.0:
@@ -1329,15 +1344,19 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
 
     if short:
         # ── 3-line pulse version — status, zone, countdown only ──────────────
+        _nav_pulse = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
+        _annual_div_pulse = 1.4268 if ticker == "CLM" else 1.3824
+        _nav_yield_pulse = round(_annual_div_pulse / _nav_pulse * 100, 1) if _nav_pulse > 0 else 0.0
         lines = [
             f"POST-RO RE-ENTRY TRACKER — {ticker}",
             f"┣ {status_line}",
-            f"┣ Zone: `${zl:.2f} – ${zh:.2f}` | FV `${fv:.2f}` | Yield `{iy:.1f}%`",
+            f"┣ DRIP zone: `${zl:.2f}–${zh:.2f}` (NAV ±1.5%) | Income floor: `${fv:.2f}` (19% yield)",
+            f"┣ Yield @ mkt `{iy:.1f}%` | Yield @ NAV `{_nav_yield_pulse:.1f}%` | Gate: {age_days}/45d",
         ]
         if gate_met:
             lines.append("┗ All gates met — Pushover fired. Confirm fill and resume DRIP.")
         elif days_to_gate > 0:
-            lines.append(f"┗ RO subscription period: {age_days}/45d elapsed — continue monitoring")
+            lines.append(f"┗ RO window: {age_days}/45d elapsed — no re-entry before {days_to_gate}d remaining")
         else:
             unmet = [b for b in r["breakdown"] if "(0)" in b]
             top_unmet = unmet[0].split("(")[0].strip() if unmet else "score below threshold"
@@ -1356,12 +1375,24 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
     else:
         _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # CRF: 104% of NAV
 
+    _annual_div_full = 1.4268 if ticker == "CLM" else 1.3824
+    _nav_yield_full  = round(_annual_div_full / _nav_for_sub * 100, 1) if _nav_for_sub > 0 else 0.0
+    # z-score provenance line — operator needs to know if this is prior or empirical
+    _z_mu    = db.get_state(f"{ticker}_premium_mu",    15.0)
+    _z_sigma = db.get_state(f"{ticker}_premium_sigma",  4.0)
+    try:
+        _z_n = db.get_cef_premium_history(ticker, days=30)
+        _z_source = f"empirical ({len(_z_n)}d)" if len(_z_n) >= 20 else f"prior ({len(_z_n)}/20d)"
+    except Exception:
+        _z_source = "unknown"
+
     lines = [
         f"POST-RO RE-ENTRY TRACKER — {ticker}",
         f"┣ {status_line}",
-        f"┣ Re-entry zone:  `${zl:.2f} – ${zh:.2f}`  (NAV to +1.5% premium — max DRIP efficiency)",
-        f"┣ RO sub price:   ~`${_ro_sub_px:.2f}` (NAV×1.04) — open-market entry at/below this beats RO participants",
-        f"┣ Fair value floor: `${fv:.2f}`  |  Implied yield at current price: `{iy:.1f}%`",
+        f"┣ DRIP zone: `${zl:.2f}–${zh:.2f}` (NAV ±1.5% — max DRIP efficiency)",
+        f"┣ RO sub price: ~`${_ro_sub_px:.2f}` ({'NAV×1.12' if ticker == 'CLM' else 'NAV×1.04'}) — open-market entry at/below beats RO participants",
+        f"┣ Income buyer floor: `${fv:.2f}` (19% yield) | Yield @ mkt: `{iy:.1f}%` | Yield @ NAV: `{_nav_yield_full:.1f}%`",
+        f"┣ Z-score baseline: μ=`{float(_z_mu):.1f}%` σ=`{float(_z_sigma):.1f}%` [{_z_source}]",
         "┣ Confluence breakdown:",
     ]
     for item in r["breakdown"]:
@@ -2022,13 +2053,20 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if "N-2 RO REGISTRATION" in sec_shield or "N-2/A" in sec_shield:
         _path_a_done = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
         _path_b_done = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
-        if not db.get_state(n2_key, ""):
-            # First detection this cycle — set anchor and reset fired flags
+        _existing_n2 = db.get_state(n2_key, "")
+        # Reset the cycle anchor when:
+        #   a) No anchor exists — first detection this cycle
+        #   b) Prior cycle completed via fired flags but anchor wasn't cleared (stale state)
+        _prior_cycle_complete = bool(_path_a_done or _path_b_done)
+        if not _existing_n2 or _prior_cycle_complete:
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
             db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
             db.update_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
-            logger.info(f"[N-2 Cycle] {ticker} — N-2 anchor set {datetime.now().strftime('%Y-%m-%d')}, dodge active.")
-            _path_a_done = _path_b_done = ""  # just reset above
+            logger.info(
+                f"[N-2 Cycle] {ticker} — anchor set {datetime.now().strftime('%Y-%m-%d')} "
+                f"(prior_cycle_complete={_prior_cycle_complete})"
+            )
+            _path_a_done = _path_b_done = ""
         # Always assert ro_dodge_active when N-2 is live and re-entry not confirmed.
         # Defensive: if a prior bug cleared the flag between ticks, this restores it.
         if not _path_a_done and not _path_b_done:

@@ -5321,8 +5321,11 @@ class HighFidelityAnalyticsEngine:
         else:
             prems    = [h["premium_pct"] for h in history]
             mu       = round(sum(prems) / n, 4)
-            variance = sum((p - mu) ** 2 for p in prems) / n
-            sigma    = round(max(variance ** 0.5, 1.0), 4)  # floor at 1% to avoid division issues
+            variance = sum((p - mu) ** 2 for p in prems) / (n - 1) if n > 1 else 0.0
+            # Floor at 3.5%: CLM/CRF historical range is 0–40% premium; a tighter sigma
+            # produces absurd z-readings on routine premium moves. 3.5% is the minimum
+            # realistic inter-day volatility for these funds over any 30+ day window.
+            sigma    = round(max(variance ** 0.5, 3.5), 4)
             source   = f"empirical ({n} trading days)"
             logger.info(f"[CEFCalibrate] {ticker}: mu={mu:.2f}% sigma={sigma:.2f}% — {source}")
 
