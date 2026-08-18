@@ -86,9 +86,23 @@ LEAP_PUT_DELTA_BAND = 0.06     # accept delta in [-0.78, -0.66]
 LEAP_PUT_COOLDOWN_HOURS = 2    # same 2-hour re-evaluation cadence as CALL desk
 LEAP_PUT_SYMBOL = "QQQ"        # puts on QQQ — TQQQ puts have brutal theta + thin OI
 
-# Cycle position score thresholds — how oversold/overbought before a LEAP fires
-CYCLE_BOTTOM_THRESHOLD = 55    # bottom_score >= this unlocks CALL desk
-CYCLE_TOP_THRESHOLD = 55       # top_score >= this unlocks PUT desk
+# Cycle position score thresholds — tiered conviction ladder for LEAP entries.
+# The thesis is BUYING TIME (270-540 DTE calls, 180-365 DTE puts) — not scalping.
+# A higher conviction bar protects capital on a long-dated commitment.
+#
+#   WATCH     45-54: DB journal only — no Discord alert
+#   ELEVATED  55-64: "Prepare" alert — amber embed, no trade yet
+#   SIGNAL    65-74: "Consider entry" — orange embed, 75% Kelly size
+#   HIGH CONV   ≥75: "Full entry" — deep orange, 100% Kelly size
+#
+LEAP_WATCH_THRESHOLD     = 45
+LEAP_ELEVATED_THRESHOLD  = 55
+LEAP_SIGNAL_THRESHOLD    = 65
+LEAP_HIGH_CONV_THRESHOLD = 75
+
+# Backward-compatible aliases (used by evaluate_leap_entry / evaluate_leap_put_entry)
+CYCLE_BOTTOM_THRESHOLD = LEAP_ELEVATED_THRESHOLD
+CYCLE_TOP_THRESHOLD    = LEAP_ELEVATED_THRESHOLD
 
 # ── Seasonal size scalars for LEAP CALL desk (12-month calendar) ──────────────
 # Based on historical QQQ/TQQQ drawdown/rally patterns — bakes seasonal edge
@@ -118,6 +132,22 @@ def get_leap_seasonal_params(month: int = None) -> tuple:
     if month is None:
         month = datetime.now().month
     return _LEAP_SEASONAL.get(month, (1.0, "neutral"))
+
+
+def _leap_conviction_tier(score: int) -> tuple:
+    """
+    Maps a cycle score (0-100) to a conviction tier.
+    Returns: (tier_name, embed_color, kelly_scalar, action_label)
+      kelly_scalar: multiply recommended allocation by this (1.0 = full Kelly)
+    """
+    if score >= LEAP_HIGH_CONV_THRESHOLD:
+        return ("HIGH CONVICTION", 0xd35400, 1.00, "BTO — FULL ENTRY")
+    elif score >= LEAP_SIGNAL_THRESHOLD:
+        return ("SIGNAL", 0xe67e22, 0.75, "CONSIDER ENTRY — 75% size")
+    elif score >= LEAP_ELEVATED_THRESHOLD:
+        return ("ELEVATED — PREPARE", 0xf39c12, 0.50, "WATCH — NOT YET")
+    else:
+        return ("WATCH", 0x7f8c8d, 0.00, "STAND DOWN")
 
 
 def is_market_hours():
@@ -721,14 +751,14 @@ class TQQQTacticalSniper:
         structure_confirms = structure is not None and structure["bias"] == expected_bias
 
         if is_live:
-            title = f"TQQQ OPTIONS SNIPER | BTO {setup['contract']} EXECUTION"
+            title = f"TQQQ DIRECTIONAL SNIPER [10–21 DTE] | BTO {setup['contract']} EXECUTION"
             status_tag = (
                 "🎯🎯 GOLDEN SETUP — STRUCTURE-CONFIRMED LIVE EXECUTION" if structure_confirms
                 else "🎯 GOLDEN SETUP — LIVE EXECUTION SIGNAL"
             )
             color = 0x2ecc71 if setup["contract"] == "CALL" else 0xe74c3c
         else:
-            title = "TQQQ OPTIONS DESK | Setup Under Construction"
+            title = f"TQQQ DIRECTIONAL SNIPER [10–21 DTE] | Setup Under Construction"
             reason = f" ({setup['downgrade_reason']} — downgraded from live execution)" if setup.get("downgrade_reason") else ""
             status_tag = f"⚠️ SETUP FORMING — Monitor Closely{reason}"
             color = 0xf1c40f
@@ -799,7 +829,9 @@ class TQQQTacticalSniper:
         )
 
         # Embed 2: Contract/execution — the "what to do" block
+        _sniper_theta_dollar = abs(setup.get("bs_theta", 0.0) * 100)
         execution_payload = (
+            f"▸ **DIRECTIONAL SNIPER · Short-dated · 10–21 DTE** | Theta ~${_sniper_theta_dollar:.2f}/day per contract\n"
             f"TQQQ @ `${setup['tqqq_spot']:.2f}`\n"
             f"┣ 🎯 {setup['action']}: {contract_line}\n"
             f"{cost_line}"
@@ -1584,6 +1616,18 @@ class TQQQTacticalSniper:
             logger.debug(f"LEAP CALL: bottom_score {bottom_score} < {CYCLE_BOTTOM_THRESHOLD} — skip (not oversold enough)")
             return None
 
+        # VIXY hard gate: CALL desk requires genuine fear, not just a red day.
+        # The thesis is "buy time during capitulation" — capitulation means fear.
+        # vix_z < +0.5σ = no measurable fear spike = distribution/orderly selling.
+        # This gate is separate from the VIXY distribution dampener in calculate_cycle_score()
+        # which reduces the score but can still allow a 55+ signal on a calm dip day.
+        if vix_z < 0.5:
+            logger.debug(
+                f"LEAP CALL: VIXY hard gate — z {vix_z:+.2f}σ < +0.5σ minimum "
+                f"(CALL desk requires genuine fear, not a calm dip — score {bottom_score})"
+            )
+            return None
+
         qqq_spot = daily["spot"]
         ema21 = daily.get("ema21", 0.0)
 
@@ -1781,11 +1825,13 @@ class TQQQTacticalSniper:
 
     def dispatch_leap_signal(self, leap_setup):
         """
-        Two Discord embeds: (1) why now — red day conditions, (2) LEAP contract setup.
-        Orange color (0xe67e22) distinguishes LEAP signals from sniper (green/red) and
-        monitoring (yellow) so they're immediately recognizable in the channel.
+        Two Discord embeds: (1) why now — cycle conditions, (2) contract setup.
+        Color scales with conviction tier: amber (ELEVATED) → orange (SIGNAL) → deep orange (HIGH CONV).
+        Strategy type always shown in embed title so LEAP vs Sniper is unmistakable at a glance.
         """
-        color = 0xe67e22
+        score = leap_setup.get("bottom_score", 0)
+        tier_name, tier_color, kelly_scalar, action_label = _leap_conviction_tier(score)
+        color = tier_color
         is_panic = leap_setup.get("panic_mode", False)
 
         # --- Embed 1: Context ---
@@ -1815,7 +1861,6 @@ class TQQQTacticalSniper:
             "┣ MACD: Bullish histogram — structural pullback, not a momentum collapse\n"
         )
         breadth_line = f"┣ Breadth: `{leap_setup['breadth']:.0%}` of QQQ top-20 above SMA200\n"
-        score = leap_setup.get("bottom_score", 0)
         pc = leap_setup.get("put_call_ratio", 1.0)
         pc_z_v = leap_setup.get("put_call_ratio_z", 0.0)
         vts = leap_setup.get("vix_term_slope", 0.0)
@@ -1823,17 +1868,24 @@ class TQQQTacticalSniper:
         vix3m_v = leap_setup.get("vix3m", 0.0)
         term_label = ("BACKWARDATION ⚠️ — sustained fear" if vts > 1.5 else
                       "flat" if abs(vts) < 0.5 else "contango — calm structure")
+        # GEX environment proxy via VIX term structure (GEX data not available at this tier)
+        gex_env = (
+            "NEG GAMMA — dealers amplify moves (CALL edge ↑)" if vts > 1.5 else
+            "POS GAMMA — dealers suppress moves (confirm fear before entry)" if vts < -1.5 else
+            "NEUTRAL GAMMA"
+        )
         pc_label = f"z `{pc_z_v:+.1f}σ` vs 30D mean — {'SPIKE ⚠️ fear surge' if pc_z_v >= 1.2 else 'elevated' if pc_z_v >= 0.5 else 'normal'}"
         rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
         real_vix = leap_setup.get("real_vix")
         real_vix_str = f" | VIX: `{real_vix:.1f}` (prev close)" if real_vix else ""
-        pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}{real_vix_str}\n"
+        pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}\n"
+        gex_line = f"┣ GEX Environment: {gex_env}{real_vix_str}\n"
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
-        score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
+        score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
         regime_payload = (
             f"TQQQ LEAP Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + gex_line + score_line
         )
 
         # --- Embed 2: Contract setup ---
@@ -1906,14 +1958,17 @@ class TQQQTacticalSniper:
         else:
             vrp_buyer_line = ""
 
+        _seasonal_scalar, _seasonal_note = get_leap_seasonal_params()
+        _effective_kelly = round(kelly_scalar * _seasonal_scalar, 2)
         execution_payload = (
-            f"TQQQ @ `${leap_setup['tqqq_spot']:.2f}` | Buy Time on the Pullback\n"
-            f"┣ 🎯 BTO LEAP: {contract_line}\n"
+            f"▸ **LEAP CALL DESK · Deep ITM · 270–540 DTE (9–18 months)**\n"
+            f"TQQQ @ `${leap_setup['tqqq_spot']:.2f}` | Buy TIME on the Pullback\n"
+            f"┣ 🎯 {action_label}: {contract_line}\n"
             + delta_line + cost_line + liquidity_line + bs_block + breakeven_block
             + vrp_buyer_line
-            + f"┣ Sizing: Max 2-3% of portfolio (TQQQ 3× leveraged = leverage on leverage)"
-            + (f" | Seasonal scalar `{get_leap_seasonal_params()[0]:.2f}×` — {get_leap_seasonal_params()[1]}\n"
-               if get_leap_seasonal_params()[0] != 1.0 else "\n")
+            + f"┣ Sizing: `{_effective_kelly:.0%}` of Kelly allocation ({tier_name} tier)"
+            + (f" | Seasonal `{_seasonal_scalar:.2f}×` — {_seasonal_note}\n" if _seasonal_scalar != 1.0 else "\n")
+            + f"┣   Max 2–3% portfolio | TQQQ is 3× leveraged — this is leverage on leverage\n"
             + tranche_note
             + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
             "┣ Stop: −30% underlying move → reassessment alert (review thesis, not auto-close)\n"
@@ -1925,18 +1980,18 @@ class TQQQTacticalSniper:
         if WEBHOOK_TRADE_SIGNALS:
             send_essentials_embed(
                 WEBHOOK_TRADE_SIGNALS,
-                "TQQQ LEAP DESK | BTO CALL — Red Day Entry Window",
+                f"TQQQ LEAP CALL DESK [{score}/100 · {tier_name}] | {action_label}",
                 regime_payload, color
             )
             send_essentials_embed(
                 WEBHOOK_TRADE_SIGNALS,
-                "TQQQ LEAP DESK | CONTRACT SETUP",
+                f"TQQQ LEAP CALL DESK | CONTRACT SETUP · 270–540 DTE",
                 execution_payload, color
             )
 
         import time as _time
         db.update_state("tqqq_last_leap_signal_ts", _time.time())
-        logger.info(f"LEAP signal dispatched — TQQQ ${leap_setup['tqqq_spot']:.2f}, {header_tag}")
+        logger.info(f"LEAP CALL signal dispatched — score {score}/100 ({tier_name}) — TQQQ ${leap_setup['tqqq_spot']:.2f}, {header_tag}")
 
     def check_leap_position_status(self, tqqq_spot: float):
         """
@@ -2057,6 +2112,22 @@ class TQQQTacticalSniper:
                                 + f"┗ Thesis intact — holding time. Next alert: {LEAP_ROLL_DTE} DTE or profit target.",
                                 color_val
                             )
+                            # P&L chart — shows current position vs breakeven/targets
+                            chart_bytes = self.generate_leap_pnl_chart(
+                                ticker="TQQQ",
+                                strike=strike,
+                                option_type="call",
+                                entry_premium_per_share=premium,
+                                dte_remaining=dte_remaining,
+                                entry_underlying=entry_price,
+                                current_underlying=tqqq_spot,
+                            )
+                            if chart_bytes:
+                                self.post_pnl_chart_to_discord(
+                                    WEBHOOK_TRADE_SIGNALS,
+                                    chart_bytes,
+                                    f"TQQQ LEAP K${strike:.0f} · Month {days_held//30} P&L Curve",
+                                )
 
                 updated_positions.append(pos)
             except Exception as e:
@@ -2282,9 +2353,13 @@ class TQQQTacticalSniper:
     def dispatch_leap_put_signal(self, put_setup):
         """
         Two Discord embeds for PUT desk: (1) top context, (2) QQQ put contract setup.
-        Blue (0x3498db) — distinct from CALL desk (orange) and sniper (green/red).
+        Color scales with conviction tier (amber→blue). Strategy type always shown in
+        embed title so LEAP PUT vs Sniper is unmistakable.
         """
-        color = 0x3498db
+        score = put_setup.get("top_score", 0)
+        tier_name, _tier_color, kelly_scalar, action_label = _leap_conviction_tier(score)
+        # PUT desk uses blue family regardless of tier — distinct from CALL desk orange
+        color = 0x1a5276 if score >= LEAP_HIGH_CONV_THRESHOLD else (0x2980b9 if score >= LEAP_SIGNAL_THRESHOLD else 0x3498db)
         is_complacent = put_setup.get("complacency_mode", False)
 
         green_tag = "🟢 GREEN DAY" if put_setup["is_green_day"] else ""
@@ -2324,13 +2399,20 @@ class TQQQTacticalSniper:
         pc_label2 = f"z `{pc_z_v2:+.1f}σ` vs 30D mean — {'DROP ⚠️ complacency surge' if pc_z_v2 <= -1.2 else 'low' if pc_z_v2 <= -0.5 else 'normal'}"
         pc_line2 = f"┣ SPY P/C: `{pc2:.2f}` ({pc_label2}) | VIX Term: VIXY `{vix9d_v2:.2f}` / VXZ `{vix3m_v2:.2f}` = `{vts2:+.2f}` {term_label2}\n"
 
-        score = put_setup.get("top_score", 0)
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
-        score_line = f"┗ Top Score: `{score}/100` [{score_bar}] — {'HIGH conviction' if score >= 75 else 'MODERATE conviction' if score >= 55 else 'LOW'}"
+        # GEX environment proxy for PUT desk (deep contango = positive gamma = move suppression)
+        vts2 = put_setup.get("vix_term_slope", 0.0)
+        gex_env_put = (
+            "POS GAMMA — dealers suppress moves (top may extend further, use 2-tranche entry)" if vts2 < -1.5 else
+            "NEG GAMMA — moves amplified (correction risk elevated, PUT edge ↑)" if vts2 > 1.5 else
+            "NEUTRAL GAMMA"
+        )
+        score_line = f"┗ Top Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
+        gex_put_line = f"┣ GEX Environment: {gex_env_put}\n"
         context_payload = (
             f"QQQ LEAP PUT Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line2 + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line2 + gex_put_line + score_line
         )
 
         # Contract setup
@@ -2388,17 +2470,20 @@ class TQQQTacticalSniper:
             )
             vrp_put_line = f"┣ Vol Buyer's Rule: QQQ IV `{put_setup['bs_iv']:.1f}%` vs RV20 `{put_setup['bs_rv20']:.1f}%` — {_put_vbr_label}\n"
 
+        _put_seasonal_scalar, _put_seasonal_note = get_leap_seasonal_params()
+        _put_inv_scalar = round(1 / max(_put_seasonal_scalar, 0.5), 2)
+        _put_effective_kelly = round(kelly_scalar * _put_inv_scalar, 2)
         execution_payload = (
-            f"QQQ @ `${put_setup['qqq_spot']:.2f}` | Buy Time on the Extension\n"
-            f"┣ 🎯 BTO LEAP PUT: {contract_line}\n"
+            f"▸ **LEAP PUT DESK · Deep ITM · 180–365 DTE (6–12 months) · QQQ**\n"
+            f"QQQ @ `${put_setup['qqq_spot']:.2f}` | Buy TIME on the Extension\n"
+            f"┣ 🎯 {action_label}: {contract_line}\n"
             + delta_line + cost_line + liquidity_line + bs_block_put + vrp_put_line
-            + (f"┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)"
-               f" | Seasonal scalar `{1/max(get_leap_seasonal_params()[0],0.5):.2f}×` (PUT desk inverts CALL scalar)\n"
-               if get_leap_seasonal_params()[0] != 1.0 else
-               "┣ Sizing: Max 1-2% of portfolio (defined risk = premium paid)\n")
+            + f"┣ Sizing: `{_put_effective_kelly:.0%}` of Kelly allocation ({tier_name} tier)"
+            + (f" | Seasonal `{_put_inv_scalar:.2f}×` (PUT inverts CALL scalar) — {_put_seasonal_note}\n" if _put_seasonal_scalar != 1.0 else "\n")
+            + f"┣   Max 1–2% portfolio (defined risk = premium paid only)\n"
             + tranche_note
-            + "┣ Scale Out: 50% at +50% premium gain | Full close at +100%\n"
-            "┣ Stop: −30% underlying move (QQQ continues UP) → reassessment (review thesis)\n"
+            + "┣ Scale Out: 50% at +40% premium gain (early — ITM puts lose time value fast)\n"
+            "┣ Stop: −30% underlying move (QQQ extends UP) → reassessment (review thesis)\n"
             "┣ Roll: Alert fires at 90 DTE remaining — roll forward if thesis intact\n"
             f"┗ Log entry: `python tqqq.py --log-leap-put --strike X --expiration YYYY-MM-DD "
             f"--premium X --entry-price {put_setup['qqq_spot']:.2f}`"
@@ -2407,18 +2492,18 @@ class TQQQTacticalSniper:
         if WEBHOOK_TRADE_SIGNALS:
             send_essentials_embed(
                 WEBHOOK_TRADE_SIGNALS,
-                "TQQQ LEAP DESK | BTO PUT — Green Day / Top Hunting",
+                f"QQQ LEAP PUT DESK [{score}/100 · {tier_name}] | {action_label}",
                 context_payload, color
             )
             send_essentials_embed(
                 WEBHOOK_TRADE_SIGNALS,
-                "TQQQ LEAP DESK | QQQ PUT CONTRACT SETUP",
+                f"QQQ LEAP PUT DESK | CONTRACT SETUP · 180–365 DTE",
                 execution_payload, color
             )
 
         import time as _time
         db.update_state("tqqq_last_leap_put_signal_ts", _time.time())
-        logger.info(f"LEAP PUT signal dispatched — QQQ ${put_setup['qqq_spot']:.2f}, {header_tag}")
+        logger.info(f"LEAP PUT signal dispatched — score {score}/100 ({tier_name}) — QQQ ${put_setup['qqq_spot']:.2f}, {header_tag}")
 
     def check_leap_put_position_status(self, qqq_spot: float):
         """Monitors open LEAP put positions. Same thresholds as CALL desk, inverted direction."""
@@ -2521,6 +2606,154 @@ class TQQQTacticalSniper:
 
         if len(updated_positions) != len(positions):
             db.update_state("tqqq_leap_put_positions", updated_positions)
+
+    # =========================================================================
+    # P&L CHART — dark-theme P&L curve for an open LEAP position.
+    # Matches cornerstone chart style. PA-safe: Agg backend + BytesIO (no display).
+    # =========================================================================
+
+    def generate_leap_pnl_chart(self, ticker, strike, option_type, entry_premium_per_share,
+                                 dte_remaining, entry_underlying, current_underlying=None,
+                                 iv_est=None):
+        """
+        Generate a dark-theme P&L curve PNG for a LEAP position.
+        Returns PNG bytes or None on failure.
+
+        X-axis: underlying price ±35% of entry price
+        Y-axis: P&L per contract in dollars
+        Lines: P&L now (blue) · P&L at expiry (grey dashed) · TP1 (green) · Stop (red) · Breakeven
+        Markers: entry price (orange) · current price if different (white)
+        """
+        try:
+            import matplotlib
+            matplotlib.use("Agg")  # PA has no display — must be before pyplot import
+            import matplotlib.pyplot as plt
+            import io
+
+            r = RISK_FREE_RATE
+            is_put = option_type.lower() == "put"
+            # IV estimate: use provided value, fall back to typical realized vol
+            sigma = (iv_est / 100.0) if (iv_est and iv_est > 0) else (0.65 if ticker == "TQQQ" else 0.28)
+            T = max(int(dte_remaining), 1) / 365.0
+
+            center = float(current_underlying or entry_underlying)
+            lo = center * 0.65
+            hi = center * 1.35
+            prices = np.linspace(lo, hi, 300)
+
+            # P&L at current DTE (Black-Scholes)
+            pnl_now = np.array([
+                (bs_price(float(p), float(strike), T, r, sigma,
+                          "put" if is_put else "call") - entry_premium_per_share) * 100
+                for p in prices
+            ])
+
+            # P&L at expiry (intrinsic only)
+            pnl_expiry = np.array([
+                ((max(0.0, float(strike) - float(p)) if is_put else max(0.0, float(p) - float(strike)))
+                 - entry_premium_per_share) * 100
+                for p in prices
+            ])
+
+            # Key P&L dollar levels
+            entry_premium_dollars = entry_premium_per_share * 100
+            tp1_pct = LEAP_PUT_TP1_PCT if is_put else LEAP_TP1_PCT
+            tp2_pct = LEAP_TP2_PCT
+            tp1_dollars = entry_premium_dollars * tp1_pct / 100.0
+            tp2_dollars = entry_premium_dollars * tp2_pct / 100.0
+            stop_dollars = -entry_premium_dollars * 0.35  # −35% of premium
+
+            # --- Dark theme ---
+            BG      = "#1a1a2e"
+            SURFACE = "#16213e"
+            GRID    = "#2c3e50"
+            TEXT    = "#ecf0f1"
+            MUTED   = "#8e9aa0"
+
+            fig, ax = plt.subplots(figsize=(10, 5.2))
+            fig.patch.set_facecolor(BG)
+            ax.set_facecolor(BG)
+
+            # Fill zones
+            ax.fill_between(prices, pnl_now, 0,
+                            where=(pnl_now >= 0), alpha=0.10, color="#2ecc71")
+            ax.fill_between(prices, pnl_now, stop_dollars,
+                            where=(pnl_now <= stop_dollars), alpha=0.10, color="#e74c3c")
+
+            # Curves
+            ax.plot(prices, pnl_now, color="#4e9af1", linewidth=2.5,
+                    label=f"P&L now ({dte_remaining}d DTE)")
+            ax.plot(prices, pnl_expiry, color="#5d6d7e", linewidth=1.2,
+                    linestyle="--", label="P&L at expiry (intrinsic)")
+
+            # Horizontal reference lines
+            ax.axhline(tp1_dollars, color="#2ecc71", linewidth=1.4, linestyle="--", alpha=0.85)
+            ax.axhline(tp2_dollars, color="#27ae60", linewidth=1.0, linestyle=":",  alpha=0.65)
+            ax.axhline(stop_dollars, color="#e74c3c", linewidth=1.4, linestyle="--", alpha=0.85)
+            ax.axhline(0,           color="#bdc3c7", linewidth=0.8, linestyle="--", alpha=0.50)
+
+            # Vertical price markers
+            ax.axvline(float(entry_underlying), color="#e67e22", linewidth=1.8, alpha=0.90,
+                       label=f"Entry ${float(entry_underlying):.2f}")
+            if current_underlying and abs(float(current_underlying) - float(entry_underlying)) > 0.5:
+                ax.axvline(float(current_underlying), color="#ecf0f1", linewidth=1.5,
+                           linestyle=":", alpha=0.80, label=f"Now ${float(current_underlying):.2f}")
+
+            # Right-edge labels for horizontal lines
+            rx = prices[-4]
+            ax.text(rx, tp1_dollars + 8,  f"TP1 +{tp1_pct:.0f}% (${tp1_dollars:+.0f})",
+                    color="#2ecc71", fontsize=8, ha="right", va="bottom")
+            ax.text(rx, stop_dollars - 8, f"Stop −35% (${stop_dollars:.0f})",
+                    color="#e74c3c", fontsize=8, ha="right", va="top")
+            ax.text(rx, 6, "Breakeven", color="#bdc3c7", fontsize=8, ha="right", va="bottom", alpha=0.75)
+
+            # Axes and grid
+            ax.tick_params(colors=MUTED, labelsize=8.5)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(GRID)
+            ax.set_xlabel(f"{ticker} Underlying Price", fontsize=9.5, color=MUTED)
+            ax.set_ylabel("P&L per Contract ($)", fontsize=9.5, color=MUTED)
+            ax.set_title(
+                f"{ticker} {'PUT' if is_put else 'CALL'} K${float(strike):.2f} · "
+                f"{dte_remaining}d DTE remaining · Entry @ ${float(entry_underlying):.2f}",
+                fontsize=10.5, color=TEXT, fontweight="bold", pad=11
+            )
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"${v:+.0f}"))
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"${v:.0f}"))
+            ax.grid(True, color=GRID, linewidth=0.45, alpha=0.70)
+            ax.legend(fontsize=8, facecolor=SURFACE, edgecolor=GRID,
+                      labelcolor=TEXT, loc="upper left" if not is_put else "upper right")
+
+            plt.tight_layout(pad=1.0)
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=115, bbox_inches="tight",
+                        facecolor=fig.get_facecolor())
+            plt.close(fig)
+            buf.seek(0)
+            return buf.read()
+
+        except Exception as e:
+            logger.warning(f"P&L chart generation failed: {e}")
+            return None
+
+    def post_pnl_chart_to_discord(self, webhook_url, chart_bytes, title_text):
+        """
+        Post a P&L PNG chart as a file attachment to a Discord webhook.
+        PA-safe: plain requests.post multipart — no extra dependencies.
+        """
+        if not webhook_url or not chart_bytes:
+            return
+        try:
+            resp = requests.post(
+                webhook_url,
+                files={"file": ("leap_pnl.png", chart_bytes, "image/png")},
+                data={"content": f"**{title_text}**"},
+                timeout=20,
+            )
+            if resp.status_code not in (200, 204):
+                logger.warning(f"Chart post returned HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Chart post to Discord failed: {e}")
 
     def execute_sniper_sweep(self):
         if not is_market_hours():
@@ -2809,6 +3042,27 @@ if __name__ == "__main__":
             f"LEAP logged: ${args.strike} CALL exp {args.expiration} "
             f"premium ${args.premium:.2f}/share | TQQQ @ ${args.entry_price:.2f}"
         )
+        # P&L entry chart — sent once on position open
+        try:
+            from datetime import datetime as _dt
+            _dte = max(1, (_dt.strptime(args.expiration, "%Y-%m-%d") - _dt.today()).days)
+            _sniper = TQQQTacticalSniper()
+            _chart = _sniper.generate_leap_pnl_chart(
+                ticker="TQQQ",
+                strike=args.strike,
+                option_type="call",
+                entry_premium_per_share=args.premium,
+                dte_remaining=_dte,
+                entry_underlying=args.entry_price,
+            )
+            if _chart and WEBHOOK_TRADE_SIGNALS:
+                _sniper.post_pnl_chart_to_discord(
+                    WEBHOOK_TRADE_SIGNALS,
+                    _chart,
+                    f"TQQQ LEAP CALL K${args.strike:.0f} · Entry P&L Curve · {_dte}d DTE",
+                )
+        except Exception as _e:
+            logger.warning(f"Entry chart skipped: {_e}")
         sys.exit(0)
 
     if "--log-put" in sys.argv:
@@ -2847,6 +3101,27 @@ if __name__ == "__main__":
             f"LEAP PUT logged: ${args.strike} PUT exp {args.expiration} "
             f"premium ${args.premium:.2f}/share | QQQ @ ${args.entry_price:.2f}"
         )
+        # P&L entry chart — sent once on position open
+        try:
+            from datetime import datetime as _dt
+            _dte = max(1, (_dt.strptime(args.expiration, "%Y-%m-%d") - _dt.today()).days)
+            _sniper = TQQQTacticalSniper()
+            _chart = _sniper.generate_leap_pnl_chart(
+                ticker="QQQ",
+                strike=args.strike,
+                option_type="put",
+                entry_premium_per_share=args.premium,
+                dte_remaining=_dte,
+                entry_underlying=args.entry_price,
+            )
+            if _chart and WEBHOOK_TRADE_SIGNALS:
+                _sniper.post_pnl_chart_to_discord(
+                    WEBHOOK_TRADE_SIGNALS,
+                    _chart,
+                    f"QQQ LEAP PUT K${args.strike:.0f} · Entry P&L Curve · {_dte}d DTE",
+                )
+        except Exception as _e:
+            logger.warning(f"Entry chart skipped: {_e}")
         sys.exit(0)
 
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
