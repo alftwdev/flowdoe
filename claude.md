@@ -290,7 +290,7 @@ Hold TDAQ / KQQQ / MLPI as Tier 2 long positions
 WHEEL_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",  # CORE
     "SCHD", "JEPI", "JEPQ", "O", "ARCC",                      # INCOME
-    "TSLA", "COIN", "SOFI", "PLTR", "HIMS",                   # GROWTH/HIGH-IV
+    "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "PENG",            # GROWTH/HIGH-IV
     "SPY", "QQQ", "IWM", "GLD", "XLE",                        # SECTOR
 ]
 ```
