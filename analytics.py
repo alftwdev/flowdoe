@@ -3313,26 +3313,108 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"[Social Scanner] StockTwits fetch failed: {e}")
             return []
 
-    def fetch_thetagang_community_intel(self) -> list:
+    # =========================================================================
+    # REDDIT RSS COMMUNITY RADAR — shared engine + per-channel wrappers
+    # One call per subreddit every 6 hours. PA-safe (no persistent connections).
+    # =========================================================================
+
+    # ── Per-channel keyword sets (post must contain ≥1 keyword to be scanned) ──
+
+    _INCOME_REDDIT_KW = {
+        # Options-selling / wheel context
+        "csp", "cash secured", "cash-secured", "covered call", " cc ", "wheel",
+        "theta", "premium", "short put", "sold put", "sell put", "selling put",
+        "0dte", "dte", "expir", "strike", "assigned", "rolled", " put ", "puts",
+        # Dividend / income context (r/dividends)
+        "dividend", "yield", "distribution", "drip", "income", "monthly pay",
+        "ex-div", "ex dividend", "reit", "bdc", "cef", "closed-end fund",
+        "covered call etf", "preferred", "high yield", "payout",
+    }
+
+    _CRYPTO_REDDIT_KW = {
+        "bitcoin", "btc", "ethereum", "eth", "crypto", "altcoin", "defi",
+        "blockchain", "bullish", "bearish", "analysis", "technical",
+        "support", "resistance", "breakout", "halving", "staking", "protocol",
+        "funding rate", "liquidation", "sentiment", "market", "price",
+        "layer 2", "layer2", "smart contract", "on-chain",
+    }
+
+    _FUTURES_REDDIT_KW = {
+        "futures", "/es", "/nq", "/cl", "/gc", "/ym", "/rty", "/mes", "/mnq",
+        "es futures", "nq futures", "crude", "gold futures", "e-mini",
+        "margin", "contract", "rollover", "technical", "setup",
+        "scalp", "swing", "breakout", "vwap", "overnight", "pre-market",
+        "algo", "systematic", "quant", "economic calendar",
+    }
+
+    # ── Per-channel jargon excludes (on top of _SOCIAL_SCANNER_EXCLUDE) ───────
+
+    _INCOME_EXTRA_EXCLUDE = {
+        # Options jargon that looks like tickers
+        "CSP", "CC", "OTM", "ITM", "ATM", "DTE", "PMCC", "IC", "PCS", "CCS",
+        "BFLY", "CALL", "BULL", "BEAR", "PUTS", "LEAPS", "STRAD",
+        "IV", "IVR", "HV", "VIX", "PL", "RR", "ROR", "ROI", "APY",
+        "YTD", "MTD", "API", "PSA", "JPY", "EUR", "GBP", "INR", "KRW",
+        "ROLL", "DEBIT", "CREDIT", "SPREAD", "YOLO", "FOMO", "WSB",
+        "TOS", "IBKR", "TD", "RH", "HOOD",
+        # Dividend jargon
+        "DRIP", "CEF", "REIT", "BDC", "DGI", "DIVI",
+    }
+
+    # Crypto scanner uses its own base exclude (keeps BTC, ETH, SOL valid)
+    _CRYPTO_BASE_EXCLUDE = {
+        "CSP", "CC", "OTM", "ITM", "ATM", "DTE", "PMCC", "IC",
+        "BULL", "BEAR", "CALL", "PUTS", "IV", "IVR", "HV",
+        "YTD", "MTD", "PL", "RR", "ROI", "APY", "API", "PSA",
+        "ROLL", "DEBIT", "CREDIT", "SPREAD", "YOLO", "FOMO",
+        # Crypto slang / acronyms that aren't ticker symbols
+        "NFT", "DAO", "DEX", "CEX", "TVL", "APR", "FIAT", "HODL",
+        "REKT", "MOON", "DYOR", "FUD", "FOMO", "NGMI", "WAGMI",
+        # Fiat currencies
+        "USD", "EUR", "GBP", "JPY", "CNY", "KRW", "INR",
+        # Common stopwords that regex could catch
+        "I", "A", "IT", "AT", "ON", "BY", "OR", "DO", "GO", "NO",
+        "AI", "AM", "PM", "THE", "AND", "FOR",
+        # Brokers/platforms
+        "IBKR", "TOS", "CB", "FTX",
+    }
+
+    _FUTURES_EXTRA_EXCLUDE = {
+        "CSP", "CC", "OTM", "ITM", "ATM", "IV", "IVR", "DTE",
+        "YTD", "MTD", "PL", "RR", "ROI", "BULL", "BEAR", "CALL", "PUTS",
+        "VWAP", "EMA", "SMA", "RSI", "MACD",  # TA indicators (not tickers)
+        "BTC", "ETH", "DOGE",                   # crypto (irrelevant for futures channel)
+        "CPI", "GDP", "NFP", "FOMC", "PCE",    # macro releases (acronyms, not tickers)
+        "API", "TOS", "IBKR", "HOOD", "RH",
+    }
+
+    def _parse_reddit_rss(
+        self,
+        subreddits: dict,
+        context_keywords: set,
+        extra_exclude: set,
+        cache_key: str,
+        cache_ttl_hours: int = 6,
+        min_mentions: int = 2,
+        max_results: int = 12,
+        base_exclude: set = None,
+    ) -> list:
         """
-        Auto-pulls wheel/CSP/theta strategy posts from r/thetagang and r/options.
-        Returns [{ticker, mentions, subreddits, sample_titles}] sorted by score.
+        Generic Reddit RSS parser. Shared engine for all community radar channels.
 
-        Primary:  Reddit RSS/Atom feeds (lighter bot detection than JSON API).
-        Fallback: StockTwits trending filtered by wheel context keywords.
-        Cache:    6-hour DB key 'thetagang_intel_cache'.
-
-        Filters for posts containing wheel/options-selling keywords before extracting
-        tickers — avoids picking up unrelated news that happens to name a ticker.
+        subreddits:       {subreddit_name: score_weight}
+        context_keywords: post must contain ≥1 keyword to be scanned (empty = scan all)
+        extra_exclude:    symbols to block beyond base_exclude
+        base_exclude:     None = use _SOCIAL_SCANNER_EXCLUDE; a set = use it instead
+                          (crypto channel passes its own set to allow BTC/ETH/SOL)
+        cache_key:        DB key for 6h result cache
+        min_mentions:     minimum posts mentioning symbol before it surfaces
         """
-        CACHE_KEY = "thetagang_intel_cache"
-        CACHE_TTL_HOURS = 6
-
-        cached = self.db.get_state(CACHE_KEY)
+        cached = self.db.get_state(cache_key)
         if cached and isinstance(cached, dict):
             try:
                 ts = datetime.strptime(cached.get("ts", ""), "%Y-%m-%d %H:%M")
-                if (datetime.now() - ts).total_seconds() < CACHE_TTL_HOURS * 3600:
+                if (datetime.now() - ts).total_seconds() < cache_ttl_hours * 3600:
                     return cached.get("results", [])
             except Exception:
                 pass
@@ -3340,34 +3422,18 @@ class HighFidelityAnalyticsEngine:
         import re
         import xml.etree.ElementTree as ET
 
-        # On r/thetagang, "put" always means the options contract — this is a
-        # theta-selling community. Include it here even though it's a common word.
-        WHEEL_KW = {
-            "csp", "cash secured", "cash-secured", "covered call", " cc ", "wheel",
-            "theta", "premium", "short put", "sold put", "sell put", "selling put",
-            "0dte", "dte", "expir", "otm", "delta", "strike", "assigned", "rolled",
-            " put ", "puts", "strangle", "iron",
-        }
-        # Bare-uppercase words that look like tickers but are options/finance jargon.
-        # Extracted separately so they don't pollute _SOCIAL_SCANNER_EXCLUDE globally.
-        THETA_JARGON_EXCLUDE = {
-            "CSP", "CC", "OTM", "ITM", "ATM", "DTE", "PMCC", "IC", "PCS", "CCS",
-            "BFLY", "CALL", "BULL", "BEAR", "PUTS", "LEAPS", "STRAD",
-            "IV", "IVR", "HV", "VIX", "PL", "RR", "ROR", "ROI", "APY",
-            "YTD", "MTD", "API", "PSA", "JPY", "EUR", "GBP", "INR", "KRW",
-            "ROLL", "DEBIT", "CREDIT", "SPREAD", "YOLO", "FOMO", "WSB",
-            "TOS", "IBKR", "TD", "RH", "RHN", "HOOD",
-        }
-        TITLE_RE  = re.compile(r'(?<!\w)([A-Z]{2,5})(?!\w)')          # bare uppercase in title
-        DOLLAR_RE = re.compile(r'\$([A-Z]{1,5})\b')                   # $TICKER anywhere
-        HTML_RE   = re.compile(r'<[^>]+>')                            # HTML tag stripper
-        # Subreddit → score weight (thetagang is more targeted → higher weight)
-        SOURCES = {"thetagang": 2, "options": 1}
+        TITLE_RE  = re.compile(r'(?<!\w)([A-Z]{2,5})(?!\w)')   # bare uppercase
+        DOLLAR_RE = re.compile(r'\$([A-Z]{1,5})\b')             # $TICKER (high confidence)
+        SLASH_RE  = re.compile(r'/([A-Z]{2,5})\b')              # /ES /NQ (futures)
+        HTML_RE   = re.compile(r'<[^>]+>')
 
-        ticker_data: dict = {}  # {ticker: {score, mentions, subs, titles}}
+        effective_base = base_exclude if base_exclude is not None else self._SOCIAL_SCANNER_EXCLUDE
+        all_exclude = effective_base | (extra_exclude or set())
+
+        ticker_data: dict = {}
         rss_ok = False
 
-        for sub, weight in SOURCES.items():
+        for sub, weight in subreddits.items():
             try:
                 resp = requests.get(
                     f"https://www.reddit.com/r/{sub}/new/.rss?limit=75",
@@ -3375,19 +3441,16 @@ class HighFidelityAnalyticsEngine:
                     timeout=14,
                 )
                 if resp.status_code != 200:
-                    logger.debug(f"thetagang RSS {sub}: HTTP {resp.status_code} — skipping")
+                    logger.debug(f"[Community Radar] r/{sub}: HTTP {resp.status_code}")
                     continue
 
-                # Parse from bytes (avoids encoding issues). Use iter() + tag-suffix
-                # matching because Reddit's Atom feed uses a default namespace
-                # ({http://www.w3.org/2005/Atom}), making namespace-prefix findall
-                # unreliable across Python versions.
+                # Parse bytes; iter()+tag-suffix because Reddit Atom has a default
+                # namespace ({http://www.w3.org/2005/Atom}) that breaks prefix findall.
                 root = ET.fromstring(resp.content)
                 entries = [c for c in root.iter() if c.tag.endswith("}entry") or c.tag == "entry"]
 
                 for entry in entries:
-                    title = ""
-                    content = ""
+                    title = content = ""
                     for child in entry:
                         local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                         if local == "title":
@@ -3395,28 +3458,31 @@ class HighFidelityAnalyticsEngine:
                         elif local in ("content", "summary", "description"):
                             content = child.text or ""
 
-                    body_plain = HTML_RE.sub(" ", content)
+                    body_plain    = HTML_RE.sub(" ", content)
                     combined_lower = (title + " " + body_plain).lower()
-                    if not any(kw in combined_lower for kw in WHEEL_KW):
-                        continue  # skip posts with no options-selling context
 
-                    # Collect tickers from this post (deduplicated per post so one
-                    # post can only contribute 1 mention per symbol)
+                    if context_keywords and not any(kw in combined_lower for kw in context_keywords):
+                        continue
+
                     post_syms: set = set()
 
-                    # Source A: bare uppercase in title + body (e.g. "NVDA", "PENG → $60 Put")
+                    # Bare uppercase in title + body
                     for m in TITLE_RE.findall(title + " " + body_plain):
                         sym = m.strip()
-                        if (sym and len(sym) >= 2
-                                and sym not in self._SOCIAL_SCANNER_EXCLUDE
-                                and sym not in THETA_JARGON_EXCLUDE):
+                        if sym and len(sym) >= 2 and sym not in all_exclude:
                             post_syms.add(sym)
 
-                    # Source B: $TICKER anywhere (e.g. "$PLTR CSP", "opened $CRDO")
-                    # Dollar-prefixed mentions are high-confidence — skip jargon check.
+                    # $TICKER (dollar-prefixed) — high confidence, skip jargon check
                     for m in DOLLAR_RE.findall(title + " " + body_plain):
                         sym = m.strip()
-                        if sym and len(sym) >= 2 and sym not in self._SOCIAL_SCANNER_EXCLUDE:
+                        if sym and len(sym) >= 2 and sym not in effective_base:
+                            post_syms.add(sym)
+
+                    # /SYMBOL (slash-prefixed) — futures contract notation (/ES /NQ)
+                    # These always bypass the exclude list — context makes them unambiguous
+                    for m in SLASH_RE.findall(title + " " + body_plain):
+                        sym = m.strip()
+                        if sym and len(sym) >= 2:
                             post_syms.add(sym)
 
                     for sym in post_syms:
@@ -3429,51 +3495,89 @@ class HighFidelityAnalyticsEngine:
                             ticker_data[sym]["titles"].append(title[:90])
 
                 rss_ok = True
-                logger.info(f"[Community Radar] r/{sub} RSS: parsed {len(entries)} posts")
+                logger.info(f"[Community Radar] r/{sub} RSS: {len(entries)} posts")
 
             except ET.ParseError as e:
-                logger.debug(f"[Community Radar] r/{sub} RSS XML parse error: {e}")
+                logger.debug(f"[Community Radar] r/{sub} RSS parse error: {e}")
             except Exception as e:
                 logger.debug(f"[Community Radar] r/{sub} RSS failed: {e}")
 
-        # Fallback: if RSS is blocked (PA 403), surface anything via StockTwits
-        # that matches our existing wheel universe as a minimal signal.
         if not rss_ok:
-            logger.info("[Community Radar] RSS unavailable — StockTwits fallback")
-            try:
-                trending = self._fetch_stocktwits_trending()
-                for item in trending:
-                    sym = item.get("symbol", "")
-                    if sym and sym not in self._SOCIAL_SCANNER_EXCLUDE:
-                        ticker_data[sym] = {
-                            "score": 1, "mentions": 1,
-                            "subs": {"stocktwits"}, "titles": [],
-                        }
-            except Exception as e:
-                logger.debug(f"[Community Radar] StockTwits fallback failed: {e}")
+            logger.info(f"[Community Radar] All RSS feeds unavailable for cache_key={cache_key}")
 
-        # Require ≥2 mentions across any source (filters noise/one-off references)
         results = sorted(
             [
                 {
-                    "ticker":  k,
+                    "ticker":   k,
                     "mentions": v["mentions"],
-                    "score":   v["score"],
-                    "sources": sorted(v["subs"]),
-                    "titles":  v["titles"],
+                    "score":    v["score"],
+                    "sources":  sorted(v["subs"]),
+                    "titles":   v["titles"],
                 }
-                for k, v in ticker_data.items() if v["mentions"] >= 2
+                for k, v in ticker_data.items() if v["mentions"] >= min_mentions
             ],
             key=lambda x: x["score"],
             reverse=True,
-        )[:12]  # cap at top 12 to keep embed readable
+        )[:max_results]
 
-        self.db.update_state(CACHE_KEY, {
+        self.db.update_state(cache_key, {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "results": results,
         })
-        logger.info(f"[Community Radar] {len(results)} tickers with ≥2 mentions (RSS ok={rss_ok})")
+        logger.info(f"[Community Radar] {len(results)} symbols ≥{min_mentions} mentions (RSS ok={rss_ok})")
         return results
+
+    # ── Channel-specific wrappers ──────────────────────────────────────────────
+
+    def fetch_income_community_intel(self) -> list:
+        """
+        Income channel radar: r/thetagang (wheel/CSP), r/options, r/dividends.
+        Dispatches to #dividend-ccetfs via MODULE 8 of --mode wheel_signals.
+        """
+        return self._parse_reddit_rss(
+            subreddits={"thetagang": 2, "options": 1, "dividends": 2},
+            context_keywords=self._INCOME_REDDIT_KW,
+            extra_exclude=self._INCOME_EXTRA_EXCLUDE,
+            cache_key="income_community_radar_cache",
+        )
+
+    def fetch_thetagang_community_intel(self) -> list:
+        """Backward-compat alias — routes to fetch_income_community_intel()."""
+        return self.fetch_income_community_intel()
+
+    def fetch_crypto_community_intel(self) -> list:
+        """
+        Crypto channel radar: 5 subreddits covering general crypto, BTC, ETH,
+        markets, and blockchain technology. Uses crypto-specific base exclude
+        so BTC/ETH/SOL are valid output symbols (not filtered by global exclude).
+        """
+        return self._parse_reddit_rss(
+            subreddits={
+                "CryptoCurrency": 1,
+                "CryptoMarkets":  2,
+                "Bitcoin":        2,
+                "Ethereum":       2,
+                "CryptoTechnology": 1,
+            },
+            context_keywords=self._CRYPTO_REDDIT_KW,
+            extra_exclude=set(),
+            base_exclude=self._CRYPTO_BASE_EXCLUDE,
+            cache_key="crypto_community_radar_cache",
+        )
+
+    def fetch_futures_community_intel(self) -> list:
+        """
+        Futures channel radar: r/FuturesTrading (primary), r/Daytrading, r/algotrading.
+        Extracts futures instrument codes (ES, NQ, CL, GC) and strategy discussions.
+        Note per community consensus: Reddit is for strategy + psychology context —
+        NOT for breaking macro data (CPI/FOMC/NFP → use economic calendars for those).
+        """
+        return self._parse_reddit_rss(
+            subreddits={"FuturesTrading": 3, "Daytrading": 1, "algotrading": 2},
+            context_keywords=self._FUTURES_REDDIT_KW,
+            extra_exclude=self._FUTURES_EXTRA_EXCLUDE,
+            cache_key="futures_community_radar_cache",
+        )
 
     def _fetch_reddit_wsb_mentions(self) -> dict:
         """

@@ -1337,13 +1337,11 @@ def main():
                 logger.error(f"Re-entry radar module failed: {e}")
 
             # ── MODULE 8: COMMUNITY RADAR ──────────────────────────────────────
-            # Auto-pulls wheel/CSP/theta strategy posts from r/thetagang and
-            # r/options RSS feeds. Replaces manual community intel sharing with
-            # an automated 6-hour scan. Only surfaces tickers mentioned ≥2×
-            # in posts with actual options-selling context (CSP/wheel/premium
-            # keywords required — not just any ticker mention).
+            # Auto-pulls wheel/CSP/dividend strategy posts from r/thetagang,
+            # r/options, and r/dividends RSS feeds. Only surfaces tickers
+            # mentioned ≥2× in posts with actual income-strategy context.
             try:
-                radar_results = engine.fetch_thetagang_community_intel()
+                radar_results = engine.fetch_income_community_intel()
                 if radar_results:
                     wheel_set = {
                         "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
@@ -1375,23 +1373,23 @@ def main():
                             if new_names else ""
                         )
                         radar_payload = (
-                            "Tickers appearing ≥2× in r/thetagang and r/options posts "
-                            "with wheel/CSP/premium context — auto-scanned every 6h.\n\n"
+                            "Tickers appearing ≥2× in r/thetagang, r/options, and r/dividends "
+                            "with wheel/CSP/income context — auto-scanned every 6h.\n\n"
                             + "\n".join(radar_lines)
                             + new_tag
                         )
                         if WEBHOOK_INCOME:
                             send_essentials_embed(
                                 WEBHOOK_INCOME,
-                                "📡 COMMUNITY RADAR | r/thetagang + r/options",
+                                "📡 COMMUNITY RADAR | r/thetagang + r/options + r/dividends",
                                 radar_payload, 0x8e44ad
                             )
                             logger.info(
-                                f"Community radar dispatched: {len(radar_results)} tickers "
+                                f"Income community radar dispatched: {len(radar_results)} tickers "
                                 f"({len(new_names)} new names not in universe)."
                             )
                 else:
-                    logger.info("Community radar: no tickers with ≥2 wheel-context mentions this scan.")
+                    logger.info("Income community radar: no tickers with ≥2 income-context mentions this scan.")
             except Exception as e:
                 logger.error(f"Community radar module failed: {e}")
 
@@ -1875,6 +1873,40 @@ def main():
                     _crypto_color = COLOR_GREEN if ct_score < 40 else (COLOR_RED if ct_score >= 70 else COLOR_YELLOW)
                     send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Derivatives", payload, _crypto_color)
                     logger.info("Crypto social snapshot dispatched.")
+
+                # ── Crypto Community Radar ─────────────────────────────────────
+                # r/CryptoCurrency, r/CryptoMarkets, r/Bitcoin, r/Ethereum,
+                # r/CryptoTechnology — surfaces tokens/projects mentioned ≥2×
+                # in posts with actual crypto analysis context (not news aggregation).
+                try:
+                    _crypto_radar = engine.fetch_crypto_community_intel()
+                    if _crypto_radar and WEBHOOK_CRYPTO:
+                        _cr_lines = []
+                        for item in _crypto_radar:
+                            sym      = item["ticker"]
+                            mentions = item["mentions"]
+                            sources  = "+".join(item["sources"])
+                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions · `{sources}`")
+                        if _cr_lines:
+                            _cr_lines[-1] = _cr_lines[-1].replace("┣", "┗", 1)
+                            _cr_payload = (
+                                "Tokens / projects appearing ≥2× in r/CryptoCurrency, "
+                                "r/CryptoMarkets, r/Bitcoin, r/Ethereum, r/CryptoTechnology — "
+                                "auto-scanned every 6h. Strategy/sentiment context only — "
+                                "not a price call.\n\n"
+                                + "\n".join(_cr_lines)
+                            )
+                            send_essentials_embed(
+                                WEBHOOK_CRYPTO,
+                                "📡 CRYPTO COMMUNITY RADAR | Reddit",
+                                _cr_payload, 0xf39c12
+                            )
+                            logger.info(f"Crypto community radar dispatched: {len(_crypto_radar)} tokens.")
+                    else:
+                        logger.info("Crypto community radar: no tokens with ≥2 mentions this scan.")
+                except Exception as _cre:
+                    logger.error(f"Crypto community radar failed: {_cre}")
+
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")
 
@@ -1941,6 +1973,43 @@ def main():
                         logger.info(f"Pattern scan dispatched: {len(bullish)} bullish, {len(bearish)} bearish.")
                 else:
                     logger.info("Pattern scan: no qualifying patterns returned (may be outside market hours).")
+
+                # ── Futures Community Radar ────────────────────────────────────
+                # r/FuturesTrading (primary), r/Daytrading, r/algotrading.
+                # Surfaces instrument codes and setups mentioned ≥2× in posts
+                # with futures/strategy context. Per community consensus: Reddit
+                # is for strategy/psychology — NOT breaking macro data (CPI/FOMC).
+                try:
+                    _futures_radar = engine.fetch_futures_community_intel()
+                    if _futures_radar and WEBHOOK_FUTURES:
+                        _fr_lines = []
+                        for item in _futures_radar:
+                            sym      = item["ticker"]
+                            mentions = item["mentions"]
+                            sources  = "+".join(item["sources"])
+                            # Display slash-notation for well-known futures codes
+                            display_sym = f"/{sym}" if sym in {"ES","NQ","CL","GC","YM","RTY","MES","MNQ","ZB","ZN"} else sym
+                            _fr_lines.append(f"┣ **{display_sym}** — `{mentions}` mentions · `{sources}`")
+                        if _fr_lines:
+                            _fr_lines[-1] = _fr_lines[-1].replace("┣", "┗", 1)
+                            _fr_payload = (
+                                "Instruments / setups appearing ≥2× in r/FuturesTrading, "
+                                "r/Daytrading, r/algotrading — auto-scanned every 6h.\n"
+                                "Strategy + sentiment context only — CPI/FOMC/NFP data "
+                                "comes from economic calendars, not Reddit.\n\n"
+                                + "\n".join(_fr_lines)
+                            )
+                            send_essentials_embed(
+                                WEBHOOK_FUTURES,
+                                "📡 FUTURES COMMUNITY RADAR | Reddit",
+                                _fr_payload, 0x2980b9
+                            )
+                            logger.info(f"Futures community radar dispatched: {len(_futures_radar)} symbols.")
+                    else:
+                        logger.info("Futures community radar: no symbols with ≥2 mentions this scan.")
+                except Exception as _fre:
+                    logger.error(f"Futures community radar failed: {_fre}")
+
             except Exception as e:
                 logger.error(f"Futures social scan failed: {e}")
 
