@@ -9,7 +9,6 @@ Free tier: 1,000 req/mo | PRO: unlimited @ 300 req/min.
 Auth header: X-SentiSense-API-Key
 
 Cache keys (all DB global_state, JSON-encoded):
-  ss_market_mood         — Market Mood index (once/day)
   ss_congressional       — Congressional trades top-10 (once/day)
   ss_institutional_{SYM} — 13F institutional flows per symbol (once/day)
   ss_insights_{SYM}      — Insider + institutional + sentiment signals per symbol (once/day)
@@ -96,47 +95,12 @@ def _cache_save(db, key: str, data: dict) -> None:
 
 def get_market_mood(db) -> dict:  # Optional[dict]
     """
-    SentiSense proprietary Market Mood index (0-100, fear=low / greed=high).
-    Cached once per calendar day. Requires auth.
-    Returns: {"score": int, "label": str, "signal": str} or None on failure.
+    DEPRECATED — /market/mood moved to /private/ (session-cookie auth only, API key rejected).
+    All callers now read fg_last_known_score from DB (written by tqqq.py CNN F&G fetch).
+    Returns None unconditionally; retained for call-site safety only.
     """
-    cached = _cache_load(db, "ss_market_mood")
-    if cached:
-        return cached
-
-    data = _get("/market/mood")
-    if not data:
-        # Fallback: return last cached value (any age) so the signal isn't blank
-        raw = db.get_state("ss_market_mood")
-        if isinstance(raw, dict) and raw.get("data"):
-            logger.debug(f"[SentiSense] market_mood unavailable — using stale cache from {raw.get('date', '?')}")
-            return raw["data"]
-        return None
-
-    # API may wrap under "data" key or return flat
-    inner = data.get("data") or data
-    score = inner.get("score") or inner.get("mood_score") or inner.get("value")
-    label = inner.get("label") or inner.get("classification") or inner.get("mood_label") or "Unknown"
-    if score is None:
-        logger.warning(f"[SentiSense] market_mood: score missing, keys={list(inner.keys())[:8]}")
-        return None
-
-    score = int(score)
-    if score >= 75:
-        signal = "EXTREME GREED — elevated top risk"
-    elif score >= 60:
-        signal = "GREED — cautious of overbought conditions"
-    elif score <= 25:
-        signal = "EXTREME FEAR — bottom-hunting window"
-    elif score <= 40:
-        signal = "FEAR — accumulation zone"
-    else:
-        signal = "NEUTRAL"
-
-    result = {"score": score, "label": label, "signal": signal}
-    _cache_save(db, "ss_market_mood", result)
-    logger.info(f"[SentiSense] Market Mood fetched: {score} ({label})")
-    return result
+    logger.debug("[SentiSense] get_market_mood() called but endpoint is deprecated — use fg_last_known_score from DB")
+    return None
 
 
 def get_institutional_flows(db, ticker: str) -> dict:  # Optional[dict]

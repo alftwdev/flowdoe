@@ -164,7 +164,7 @@ RO_SCORE_WEIGHTS = {
     "yield_steepen":       5,   # T10-T2 spread steepened > 20bps in a session (rate pressure on CEF)
     "long_rate_pressure":  8,   # 30-yr Treasury ≥ 5.0% — income buyer rotation risk, CEF premium headwind
     "hy_rapid_widen":      8,   # HY spread widens > 40bps in 5 trading days — credit deterioration signal
-    "sentiment_fear":      5,   # SentiSense market mood ≤ 25 (extreme fear = CEF premium risk)
+    "sentiment_fear":      5,   # CNN Fear & Greed ≤ 25 (extreme fear = CEF premium risk)
     # Distribution reset cycle signals
     "nav_determination":  12,   # October = NAV lock month; heightened sensitivity window
     "cef_inst_exit":      20,   # High vol + flat SPY = institutional distribution cycle exit
@@ -2221,12 +2221,13 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     except Exception:
         pass
 
-    # SentiSense market mood ≤ 25 = extreme fear → CEF premium compression risk
+    # CNN Fear & Greed ≤ 25 = extreme fear → CEF premium compression risk
+    # (replaces dead SentiSense /market/mood endpoint — tqqq.py writes fg_last_known_score)
     sentiment_fear = False
     try:
-        ss_mood = db.get_state("ss_market_mood")
-        if isinstance(ss_mood, dict):
-            sentiment_fear = int(ss_mood.get("score", 50)) <= 25
+        _fg = db.get_state("fg_last_known_score")
+        if _fg is not None:
+            sentiment_fear = float(_fg) <= 25.0
     except Exception:
         pass
 

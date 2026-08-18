@@ -717,11 +717,11 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     reentry_line = "┣ 🔄 Re-entry: " + " | ".join(reentry_lines) + "\n" if reentry_lines else ""
 
     # Bollen (2010) mood forward signal — "Twitter Mood Predicts the Stock Market."
-    # Low calmness/high anxiety (SS mood ≤ 25) Granger-causes DJIA declines 2–6 days later.
-    # High euphoria (≥ 75) predicts mean reversion. Source: SentiSense market_mood, cached daily.
+    # Low calmness/high anxiety (F&G ≤ 25) Granger-causes DJIA declines 2–6 days later.
+    # High euphoria (≥ 75) predicts mean reversion. Source: CNN F&G via tqqq.py (fg_last_known_score).
     mood_fwd_line = ""
     try:
-        _ss_mood = db.get_state("ss_market_mood_score")
+        _ss_mood = db.get_state("fg_last_known_score")
         if _ss_mood is not None:
             _ssv = float(_ss_mood)
             if _ssv <= 25:
@@ -902,11 +902,21 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     try:
         import sentisense_client as ss
 
-        # Market Mood — proprietary equity-native fear/greed (not crypto-origin)
-        mood = ss.get_market_mood(db)
-        if mood:
-            mood_emoji = "🔴" if mood["score"] <= 25 else ("🟢" if mood["score"] >= 75 else "🟡")
-            mood_line  = f"┣ Market Mood: {mood_emoji} `{mood['score']}` · {mood['label']} — {mood['signal']}\n"
+        # Market Mood via CNN Fear & Greed (tqqq.py writes fg_last_known_score daily)
+        _fg_raw = db.get_state("fg_last_known_score")
+        if _fg_raw is not None:
+            _fg_val = float(_fg_raw)
+            if _fg_val <= 25:
+                _fg_label, _fg_emoji = "Extreme Fear", "🔴"
+            elif _fg_val <= 40:
+                _fg_label, _fg_emoji = "Fear", "🟠"
+            elif _fg_val >= 75:
+                _fg_label, _fg_emoji = "Extreme Greed", "🟢"
+            elif _fg_val >= 60:
+                _fg_label, _fg_emoji = "Greed", "🟡"
+            else:
+                _fg_label, _fg_emoji = "Neutral", "⚪"
+            mood_line = f"┣ CNN F&G: {_fg_emoji} `{_fg_val:.0f}` · {_fg_label}\n"
         else:
             mood_line = ""
 
