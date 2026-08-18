@@ -961,11 +961,19 @@ def detect_premium_compression(current_premium: float, ticker: str) -> tuple:
 
 def detect_ro_completion_dip(session, ticker, current_price, current_premium) -> bool:
     """
-    Returns True (and dispatches a rebuy alert) when all three conditions are met:
+    Returns True (and dispatches a rebuy alert) when all four conditions are met:
       1. N-2 was previously detected for this ticker (DB key set)
-      2. Premium has collapsed from >20% to <10% (post-RO dilution repricing)
-      3. Price is ≥10% below the 60D high (dip confirmed, not just sideways)
+      2. ≥ 30 days since N-2 detection (SEC review + record date can't be set in < 30d)
+      3. Premium has collapsed from >20% to <10% (post-RO dilution repricing)
+      4. Price is ≥10% below the 60D high (dip confirmed, not just sideways)
     Fires once per RO cycle — cleared when conditions reset.
+
+    30-day minimum gate: the CRF/CLM rights offering process has a mandatory
+    SEC review period before the record date and subscription period can begin.
+    A premium collapse that happens within 30 days of the N-2 filing reflects
+    market repricing of the distribution reset — not the actual post-RO dilution.
+    Gate is set at 30d (not 45d) because conditions 3+4 are concrete market signals;
+    the 45-day gate applies to the score-based Path B where signals are weaker.
     """
     try:
         n2_key        = f"cornerstone_n2_detected_{ticker}"
@@ -976,11 +984,24 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
         if not prev_n2 or already_fired:
             return False
 
-        # Condition 2: premium collapsed back below 10%
+        # Condition 2: ≥30 days since N-2 detection (RO process has minimum timeline)
+        try:
+            _n2_date = datetime.strptime(prev_n2, "%Y-%m-%d").date()
+            _age_days = (datetime.utcnow().date() - _n2_date).days
+        except Exception:
+            _age_days = 0
+        if _age_days < 30:
+            logger.info(
+                f"[RO Completion Dip] {ticker} — conditions met but suppressed: "
+                f"only {_age_days}d since N-2 (need 30d minimum — RO has not had time to complete)"
+            )
+            return False
+
+        # Condition 3: premium collapsed back below 10%
         if current_premium >= 10.0:
             return False
 
-        # Condition 3: price ≥10% below 60D high
+        # Condition 4: price ≥10% below 60D high
         values = fetch_time_series(session, ticker, outputsize=60)
         if len(values) < 10:
             return False
@@ -1038,16 +1059,24 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
                 f"┣   Boxes roll on their own schedule — redeploy freed margin into this rebuy\n"
             )
 
+        _annual_div_dip = 1.4268 if ticker == "CLM" else 1.3824
+        _nav_dip_raw, _, _ = fetch_nav_cefconnect(session, ticker)
+        _nav_dip = _nav_dip_raw if _nav_dip_raw and _nav_dip_raw > 0 else (6.73 if ticker == "CLM" else 6.18)
+        _zone_low  = round(_nav_dip * 0.99, 2)
+        _zone_high = round(_nav_dip * 1.015, 2)
+        _implied_yield = round(_annual_div_dip / current_price * 100, 1) if current_price > 0 else 0
+        _ro_sub = round(_nav_dip * 1.12, 2) if ticker == "CLM" else round(_nav_dip * 1.04, 2)
         dip_msg = (
-            f"**{ticker} — 🟢 POST-RO DIP: REBUY ZONE**\n"
-            f"┣ Price: `${current_price:.2f}` ({pct_below_high:.1f}% below 60D high)\n"
-            f"┣ Premium to NAV: `{current_premium:.2f}%` (was >20% during RO)\n"
-            f"┣ RO Cycle: N-2 was previously detected — price has repriced toward NAV\n"
-            f"┣ Signal: Premium collapse + price off high = classic post-RO dip pattern\n"
+            f"**{ticker} — 🟢 POST-RO DIP: REBUY ZONE CONFIRMED**\n"
+            f"┣ Price: `${current_price:.2f}` ({pct_below_high:.1f}% below 60D high) | Yield: `{_implied_yield:.1f}%`\n"
+            f"┣ Premium to NAV: `{current_premium:.2f}%` (compressed from >20% during RO period)\n"
+            f"┣ {_age_days}d since N-2 — RO subscription window had time to close\n"
+            f"┣ Optimal DRIP zone: `${_zone_low:.2f}–${_zone_high:.2f}` (NAV ±1.5%) | RO sub ~`${_ro_sub:.2f}`\n"
+            f"┣ Signal: Premium collapse + price off high = post-RO dilution repricing pattern\n"
             f"{_box_lines}"
-            f"┣ ⚠️ Verify: Confirm Cornerstone announced 'RO complete' before acting\n"
-            f"┣ Action: Rebuy position + resume CS DRIP (call broker to confirm DRIP status)\n"
-            f"┗ Note: Keep ≥3 shares at all times to preserve NAV DRIP eligibility"
+            f"┣ ⚠️ Confirm: Cornerstone 'Fund Announces Completion' press release on GlobeNewswire\n"
+            f"┣ Action: Rebuy into DRIP zone (${_zone_low:.2f}–${_zone_high:.2f}) — resume DRIP at NAV after fill\n"
+            f"┗ Keep ≥3 shares at all times to preserve NAV DRIP eligibility"
         )
         if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
             send_essentials_embed(
