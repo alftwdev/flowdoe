@@ -3313,6 +3313,168 @@ class HighFidelityAnalyticsEngine:
             logger.error(f"[Social Scanner] StockTwits fetch failed: {e}")
             return []
 
+    def fetch_thetagang_community_intel(self) -> list:
+        """
+        Auto-pulls wheel/CSP/theta strategy posts from r/thetagang and r/options.
+        Returns [{ticker, mentions, subreddits, sample_titles}] sorted by score.
+
+        Primary:  Reddit RSS/Atom feeds (lighter bot detection than JSON API).
+        Fallback: StockTwits trending filtered by wheel context keywords.
+        Cache:    6-hour DB key 'thetagang_intel_cache'.
+
+        Filters for posts containing wheel/options-selling keywords before extracting
+        tickers — avoids picking up unrelated news that happens to name a ticker.
+        """
+        CACHE_KEY = "thetagang_intel_cache"
+        CACHE_TTL_HOURS = 6
+
+        cached = self.db.get_state(CACHE_KEY)
+        if cached and isinstance(cached, dict):
+            try:
+                ts = datetime.strptime(cached.get("ts", ""), "%Y-%m-%d %H:%M")
+                if (datetime.now() - ts).total_seconds() < CACHE_TTL_HOURS * 3600:
+                    return cached.get("results", [])
+            except Exception:
+                pass
+
+        import re
+        import xml.etree.ElementTree as ET
+
+        # On r/thetagang, "put" always means the options contract — this is a
+        # theta-selling community. Include it here even though it's a common word.
+        WHEEL_KW = {
+            "csp", "cash secured", "cash-secured", "covered call", " cc ", "wheel",
+            "theta", "premium", "short put", "sold put", "sell put", "selling put",
+            "0dte", "dte", "expir", "otm", "delta", "strike", "assigned", "rolled",
+            " put ", "puts", "strangle", "iron",
+        }
+        # Bare-uppercase words that look like tickers but are options/finance jargon.
+        # Extracted separately so they don't pollute _SOCIAL_SCANNER_EXCLUDE globally.
+        THETA_JARGON_EXCLUDE = {
+            "CSP", "CC", "OTM", "ITM", "ATM", "DTE", "PMCC", "IC", "PCS", "CCS",
+            "BFLY", "CALL", "BULL", "BEAR", "PUTS", "LEAPS", "STRAD",
+            "IV", "IVR", "HV", "VIX", "PL", "RR", "ROR", "ROI", "APY",
+            "YTD", "MTD", "API", "PSA", "JPY", "EUR", "GBP", "INR", "KRW",
+            "ROLL", "DEBIT", "CREDIT", "SPREAD", "YOLO", "FOMO", "WSB",
+            "TOS", "IBKR", "TD", "RH", "RHN", "HOOD",
+        }
+        TITLE_RE  = re.compile(r'(?<!\w)([A-Z]{2,5})(?!\w)')          # bare uppercase in title
+        DOLLAR_RE = re.compile(r'\$([A-Z]{1,5})\b')                   # $TICKER anywhere
+        HTML_RE   = re.compile(r'<[^>]+>')                            # HTML tag stripper
+        # Subreddit → score weight (thetagang is more targeted → higher weight)
+        SOURCES = {"thetagang": 2, "options": 1}
+
+        ticker_data: dict = {}  # {ticker: {score, mentions, subs, titles}}
+        rss_ok = False
+
+        for sub, weight in SOURCES.items():
+            try:
+                resp = requests.get(
+                    f"https://www.reddit.com/r/{sub}/new/.rss?limit=75",
+                    headers={"User-Agent": "CashflowBot/1.0 (personal trading research)"},
+                    timeout=14,
+                )
+                if resp.status_code != 200:
+                    logger.debug(f"thetagang RSS {sub}: HTTP {resp.status_code} — skipping")
+                    continue
+
+                # Parse from bytes (avoids encoding issues). Use iter() + tag-suffix
+                # matching because Reddit's Atom feed uses a default namespace
+                # ({http://www.w3.org/2005/Atom}), making namespace-prefix findall
+                # unreliable across Python versions.
+                root = ET.fromstring(resp.content)
+                entries = [c for c in root.iter() if c.tag.endswith("}entry") or c.tag == "entry"]
+
+                for entry in entries:
+                    title = ""
+                    content = ""
+                    for child in entry:
+                        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                        if local == "title":
+                            title = child.text or ""
+                        elif local in ("content", "summary", "description"):
+                            content = child.text or ""
+
+                    body_plain = HTML_RE.sub(" ", content)
+                    combined_lower = (title + " " + body_plain).lower()
+                    if not any(kw in combined_lower for kw in WHEEL_KW):
+                        continue  # skip posts with no options-selling context
+
+                    # Collect tickers from this post (deduplicated per post so one
+                    # post can only contribute 1 mention per symbol)
+                    post_syms: set = set()
+
+                    # Source A: bare uppercase in title + body (e.g. "NVDA", "PENG → $60 Put")
+                    for m in TITLE_RE.findall(title + " " + body_plain):
+                        sym = m.strip()
+                        if (sym and len(sym) >= 2
+                                and sym not in self._SOCIAL_SCANNER_EXCLUDE
+                                and sym not in THETA_JARGON_EXCLUDE):
+                            post_syms.add(sym)
+
+                    # Source B: $TICKER anywhere (e.g. "$PLTR CSP", "opened $CRDO")
+                    # Dollar-prefixed mentions are high-confidence — skip jargon check.
+                    for m in DOLLAR_RE.findall(title + " " + body_plain):
+                        sym = m.strip()
+                        if sym and len(sym) >= 2 and sym not in self._SOCIAL_SCANNER_EXCLUDE:
+                            post_syms.add(sym)
+
+                    for sym in post_syms:
+                        if sym not in ticker_data:
+                            ticker_data[sym] = {"score": 0, "mentions": 0, "subs": set(), "titles": []}
+                        ticker_data[sym]["score"]    += weight
+                        ticker_data[sym]["mentions"] += 1
+                        ticker_data[sym]["subs"].add(sub)
+                        if len(ticker_data[sym]["titles"]) < 2:
+                            ticker_data[sym]["titles"].append(title[:90])
+
+                rss_ok = True
+                logger.info(f"[Community Radar] r/{sub} RSS: parsed {len(entries)} posts")
+
+            except ET.ParseError as e:
+                logger.debug(f"[Community Radar] r/{sub} RSS XML parse error: {e}")
+            except Exception as e:
+                logger.debug(f"[Community Radar] r/{sub} RSS failed: {e}")
+
+        # Fallback: if RSS is blocked (PA 403), surface anything via StockTwits
+        # that matches our existing wheel universe as a minimal signal.
+        if not rss_ok:
+            logger.info("[Community Radar] RSS unavailable — StockTwits fallback")
+            try:
+                trending = self._fetch_stocktwits_trending()
+                for item in trending:
+                    sym = item.get("symbol", "")
+                    if sym and sym not in self._SOCIAL_SCANNER_EXCLUDE:
+                        ticker_data[sym] = {
+                            "score": 1, "mentions": 1,
+                            "subs": {"stocktwits"}, "titles": [],
+                        }
+            except Exception as e:
+                logger.debug(f"[Community Radar] StockTwits fallback failed: {e}")
+
+        # Require ≥2 mentions across any source (filters noise/one-off references)
+        results = sorted(
+            [
+                {
+                    "ticker":  k,
+                    "mentions": v["mentions"],
+                    "score":   v["score"],
+                    "sources": sorted(v["subs"]),
+                    "titles":  v["titles"],
+                }
+                for k, v in ticker_data.items() if v["mentions"] >= 2
+            ],
+            key=lambda x: x["score"],
+            reverse=True,
+        )[:12]  # cap at top 12 to keep embed readable
+
+        self.db.update_state(CACHE_KEY, {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "results": results,
+        })
+        logger.info(f"[Community Radar] {len(results)} tickers with ≥2 mentions (RSS ok={rss_ok})")
+        return results
+
     def _fetch_reddit_wsb_mentions(self) -> dict:
         """
         Returns {ticker: mention_count} for Reddit conviction names.

@@ -1191,7 +1191,7 @@ def main():
                         # CONSUMER / DIVIDEND
                         "NKE", "CLX", "TROW",
                         # GROWTH / HIGH-IV
-                        "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "UBER",
+                        "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "UBER", "PENG",
                         # CRYPTO MINERS (extreme IV — premium machine, size small)
                         "MARA", "CLSK",
                         # ENERGY / CLEAN TECH
@@ -1335,6 +1335,65 @@ def main():
                     logger.info("Re-entry radar: no recently closed positions in queue.")
             except Exception as e:
                 logger.error(f"Re-entry radar module failed: {e}")
+
+            # ── MODULE 8: COMMUNITY RADAR ──────────────────────────────────────
+            # Auto-pulls wheel/CSP/theta strategy posts from r/thetagang and
+            # r/options RSS feeds. Replaces manual community intel sharing with
+            # an automated 6-hour scan. Only surfaces tickers mentioned ≥2×
+            # in posts with actual options-selling context (CSP/wheel/premium
+            # keywords required — not just any ticker mention).
+            try:
+                radar_results = engine.fetch_thetagang_community_intel()
+                if radar_results:
+                    wheel_set = {
+                        "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+                        "MRVL", "ANET", "CRM", "WDAY", "NOW", "NKE", "CLX", "TROW",
+                        "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "UBER", "PENG",
+                        "MARA", "CLSK", "BE",
+                        "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+                        "SPY", "QQQ", "IWM", "GLD", "XLE",
+                    }
+                    radar_lines = []
+                    new_names = []
+                    for item in radar_results:
+                        sym      = item["ticker"]
+                        mentions = item["mentions"]
+                        sources  = "+".join(item["sources"])
+                        in_univ  = "✅" if sym in wheel_set else "🆕"
+                        tag      = " ← **NEW** — not in universe yet" if sym not in wheel_set else ""
+                        radar_lines.append(
+                            f"┣ {in_univ} **{sym}** — `{mentions}` mentions · `{sources}`{tag}"
+                        )
+                        if sym not in wheel_set:
+                            new_names.append(sym)
+
+                    if radar_lines:
+                        radar_lines[-1] = radar_lines[-1].replace("┣", "┗", 1)
+                        new_tag = (
+                            f"\n\n🆕 Not in wheel universe: `{'`, `'.join(new_names)}` — "
+                            "screen manually before adding (VRP gate + IVR + earnings check)."
+                            if new_names else ""
+                        )
+                        radar_payload = (
+                            "Tickers appearing ≥2× in r/thetagang and r/options posts "
+                            "with wheel/CSP/premium context — auto-scanned every 6h.\n\n"
+                            + "\n".join(radar_lines)
+                            + new_tag
+                        )
+                        if WEBHOOK_INCOME:
+                            send_essentials_embed(
+                                WEBHOOK_INCOME,
+                                "📡 COMMUNITY RADAR | r/thetagang + r/options",
+                                radar_payload, 0x8e44ad
+                            )
+                            logger.info(
+                                f"Community radar dispatched: {len(radar_results)} tickers "
+                                f"({len(new_names)} new names not in universe)."
+                            )
+                else:
+                    logger.info("Community radar: no tickers with ≥2 wheel-context mentions this scan.")
+            except Exception as e:
+                logger.error(f"Community radar module failed: {e}")
 
         elif args.mode == "wheel_position":
             if args.action == "open":
