@@ -2083,23 +2083,31 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         _path_a_done = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
         _path_b_done = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
         _existing_n2 = db.get_state(n2_key, "")
-        # Reset the cycle anchor when:
-        #   a) No anchor exists — first detection this cycle
-        #   b) Prior cycle completed via fired flags but anchor wasn't cleared (stale state)
-        _prior_cycle_complete = bool(_path_a_done or _path_b_done)
-        if not _existing_n2 or _prior_cycle_complete:
+        # Determine anchor staleness — age > 180d means a prior RO cycle from 6+ months ago
+        # whose re-entry was never confirmed (the normal cycle closure clears n2_key via the
+        # else-branch below). Using age rather than fired-flags prevents an oscillation loop:
+        # dip_fired set → "prior complete" → clear dip_fired → Path A re-fires → repeat.
+        try:
+            _anchor_age = (
+                datetime.utcnow().date() - datetime.strptime(_existing_n2, "%Y-%m-%d").date()
+            ).days if _existing_n2 else 9999
+        except Exception:
+            _anchor_age = 9999
+        if not _existing_n2 or _anchor_age > 180:
+            # Fresh start OR stale anchor from a prior RO cycle (> 6 months = different cycle)
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
             db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
             db.update_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
-            logger.info(
-                f"[N-2 Cycle] {ticker} — anchor set {datetime.now().strftime('%Y-%m-%d')} "
-                f"(prior_cycle_complete={_prior_cycle_complete})"
-            )
+            logger.info(f"[N-2 Cycle] {ticker} — cycle reset (anchor_age={_anchor_age}d)")
             _path_a_done = _path_b_done = ""
-        # Always assert ro_dodge_active when N-2 is live and re-entry not confirmed.
-        # Defensive: if a prior bug cleared the flag between ticks, this restores it.
+        # Assert ro_dodge_active only when neither re-entry path has confirmed — this is the
+        # primary dodge signal; if Path A or B already fired, re-entry was confirmed and the
+        # dodge flag should remain cleared (or be cleared if still set from a prior bug).
         if not _path_a_done and not _path_b_done:
             db.update_state(f"ro_dodge_active_{ticker}", datetime.now().strftime("%Y-%m-%d"))
+        elif _path_a_done or _path_b_done:
+            # Re-entry confirmed this cycle — ensure dodge is cleared
+            db.update_state(f"ro_dodge_active_{ticker}", "")
     else:
         # N-2 scrolled out of recent filings list.
         # Only clear the cycle anchor once re-entry has been confirmed via one of the two
