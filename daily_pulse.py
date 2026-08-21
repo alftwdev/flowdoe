@@ -17,7 +17,7 @@ import json
 import base64
 import logging
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +47,7 @@ CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "
 # NAV proxy tickers and defaults
 NAV_TICKERS  = {"CLM": "XCLMX", "CRF": "XCRFX"}
 NAV_DEFAULTS = {"CLM": 6.73, "CRF": 6.18}   # CLM updated Aug 16 2026 per N-2 EDGAR filing; CRF corrected Jul 23 2026
+CEF_ANNUAL_DIST = {"CLM": 1.4268, "CRF": 1.3824}  # 2026 reset — CLM $0.1189/mo×12, CRF $0.1152/mo×12
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP — Claim SimpleFIN Access URL
@@ -416,6 +417,40 @@ def fetch_ro_status():
     return results
 
 
+def fetch_ro_gate_info():
+    """
+    Reads ecosystem DB for N-2 detection anchor dates and computes Path A/B gate dates.
+    Path A = anchor + 30d (premium collapse + price drop gate).
+    Path B = anchor + 45d (yield floor re-entry gate).
+    Returns {} silently if DB unavailable — daily_pulse gracefully degrades.
+    """
+    try:
+        from database import EcosystemDatabase
+        db = EcosystemDatabase()
+        today = date.today()
+        result = {}
+        for ticker in ("CLM", "CRF"):
+            anchor_str = db.get_state(f"cornerstone_n2_detected_{ticker}", "")
+            if not anchor_str:
+                continue
+            try:
+                anchor = date.fromisoformat(anchor_str)
+            except ValueError:
+                continue
+            path_a = anchor + timedelta(days=30)
+            path_b = anchor + timedelta(days=45)
+            result[ticker] = {
+                "path_a_date": path_a.strftime("%b %-d"),
+                "path_b_date": path_b.strftime("%b %-d"),
+                "path_a_open": today >= path_a,
+                "path_b_open": today >= path_b,
+            }
+        return result
+    except Exception as e:
+        logger.warning(f"fetch_ro_gate_info: DB read failed — {e}")
+        return {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FORMAT — ┣/┗ Pulse Message
 # ─────────────────────────────────────────────────────────────────────────────
@@ -500,7 +535,7 @@ def _portfolio_deltas(current_total, state):
     return " | ".join(parts)
 
 
-def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None, simplefin_stale=False):  # noqa: ARG001 (regime/market_mood reserved for future use)
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None, simplefin_stale=False, ro_gate_info=None):  # noqa: ARG001 (regime/market_mood reserved for future use)
     today     = date.today().strftime("%b %d, %Y")
     lines     = []
 
@@ -558,25 +593,40 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
     real_nw = round(net_worth / (1 + cpi_yoy / 100), 2)
     lines.append(f"┗ Real NW (CPI-adj): ${real_nw:,.2f} — ${net_worth - real_nw:,.0f} lost to {cpi_yoy:.1f}% inflation/yr")
 
-    # ── Section 5: CLM / CRF Cornerstone — EDGAR status + live metrics from DB
+    # ── Section 5: CLM / CRF Cornerstone — bite-size snippet (price + re-entry range + gate note)
     lines.append("")
     lines.append("CORNERSTONE (CLM / CRF)")
     tickers_list = list(ro_status.keys()) if ro_status else ["CLM", "CRF"]
-    for i, ticker in enumerate(tickers_list):
-        is_last = (i == len(tickers_list) - 1)
-        edgar_str = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
-        snap = cef.get(ticker, {}) if cef else {}
-        price   = snap.get("price", 0.0)
-        nav     = snap.get("nav", 0.0)
-        prem    = snap.get("premium", 0.0)
-        nav_src = snap.get("nav_src", "")
-        ro_sc   = snap.get("ro_score")
-        # Build compact line: EDGAR status + price/NAV/prem if available
-        price_part = f" | ${price:.2f} / NAV ${nav:.2f} / Prem {prem:.1f}%" if price > 0 else ""
-        ro_part    = f" | RO {ro_sc}/100" if ro_sc is not None else ""
-        nav_tag    = f" ({nav_src})" if nav_src and nav_src != "default" else ""
-        prefix = "┣" if not is_last else "┗"
-        lines.append(f"{prefix} {ticker}: {edgar_str}{price_part}{nav_tag}{ro_part}")
+    for ticker in tickers_list:
+        edgar_str  = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
+        snap       = cef.get(ticker, {}) if cef else {}
+        price      = snap.get("price", 0.0)
+        nav        = snap.get("nav", 0.0) or NAV_DEFAULTS.get(ticker, 0.0)
+        annual_dist = CEF_ANNUAL_DIST.get(ticker, 0.0)
+        fair_value  = round(annual_dist / 0.19, 2) if annual_dist else 0.0
+        reentry_lo  = round(nav * 0.99, 2)   # DRIP floor: slight NAV discount
+        gate        = (ro_gate_info or {}).get(ticker, {})
+
+        lines.append(f"{ticker}: {edgar_str}")
+        if price > 0:
+            lines.append(f"┣ Current price: ${price:.2f}")
+        if reentry_lo > 0 and fair_value > 0:
+            lines.append(f"┣ Re-entry range: ${reentry_lo:.2f} – ${fair_value:.2f}")
+
+        if gate:
+            path_a_open = gate.get("path_a_open", False)
+            path_b_open = gate.get("path_b_open", False)
+            path_a_date = gate.get("path_a_date", "")
+            path_b_date = gate.get("path_b_date", "")
+            if path_b_open:
+                lines.append(f"┗ Note: Path B OPEN — yield floor re-entry active ({path_b_date}+)")
+            elif path_a_open:
+                lines.append(f"┗ Note: Path A OPEN — monitor for entry signal ({path_a_date}+)")
+            else:
+                lines.append(f"┗ Note: {path_a_date} — Path A gate opens (30d from N-2)")
+        elif fair_value > 0:
+            lines.append(f"┗ Re-entry: accumulate at or below ${fair_value:.2f}")
+        lines.append("")  # blank line between tickers
 
     if bp.get("cpi_yoy") is not None:
         lines.append("")
@@ -653,10 +703,11 @@ def run_daily_pulse(force=False, debug=False):
             logger.warning("SimpleFIN fetch failed and no cache available — balances will show $0")
 
     ro_status   = fetch_ro_status()
+    ro_gate_info = fetch_ro_gate_info()
     cef_data    = fetch_cef_snapshot()
 
     title, message, _ = format_pulse_message(liquid, credit, brokerage, cef_data, None, state, ro_status,
-                                             simplefin_stale=simplefin_stale)
+                                             ro_gate_info=ro_gate_info, simplefin_stale=simplefin_stale)
     success = push_to_pushover(title, message, priority=0)
 
     if success:
