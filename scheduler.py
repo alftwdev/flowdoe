@@ -1356,11 +1356,9 @@ def main():
                     for item in radar_results:
                         sym      = item["ticker"]
                         mentions = item["mentions"]
-                        sources  = "+".join(item["sources"])
                         in_univ  = "✅" if sym in wheel_set else "🆕"
-                        tag      = " ← **NEW** — not in universe yet" if sym not in wheel_set else ""
                         radar_lines.append(
-                            f"┣ {in_univ} **{sym}** — `{mentions}` mentions · `{sources}`{tag}"
+                            f"┣ {in_univ} **{sym}** — `{mentions}` mentions"
                         )
                         if sym not in wheel_set:
                             new_names.append(sym)
@@ -1368,14 +1366,12 @@ def main():
                     if radar_lines:
                         radar_lines[-1] = radar_lines[-1].replace("┣", "┗", 1)
                         new_tag = (
-                            f"\n\n🆕 Not in wheel universe: `{'`, `'.join(new_names)}` — "
+                            f"\n\n🆕 Wheel candidates: `{'`, `'.join(new_names)}` — "
                             "screen manually before adding (VRP gate + IVR + earnings check)."
                             if new_names else ""
                         )
                         radar_payload = (
-                            "Tickers appearing ≥2× in r/thetagang, r/options, and r/dividends "
-                            "with wheel/CSP/income context — auto-scanned every 6h.\n\n"
-                            + "\n".join(radar_lines)
+                            "\n".join(radar_lines)
                             + new_tag
                         )
                         if WEBHOOK_INCOME:

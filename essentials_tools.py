@@ -106,7 +106,7 @@ def send_essentials_embed(webhook_url, title, description, color=0x00ff00, user_
             "title": title,
             "description": secured_description,
             "color": color,
-            "footer": {"text": "ESSENTIALS | Not financial advice — for informational/educational use only."}
+            "footer": {"text": "Not financial advice — for informational/educational use only."}
         }]
     }
 
@@ -177,7 +177,7 @@ def send_essentials_embed_with_chart(webhook_url, title, description, chart_byte
             "description": secured_description,
             "color": color,
             "image": {"url": "attachment://chart.png"},
-            "footer": {"text": f"ESSENTIALS | Not financial advice — for informational/educational use only. · {trace_code}"}
+            "footer": {"text": f"Not financial advice — for informational/educational use only. · {trace_code}"}
         }]
     }
 

@@ -3398,29 +3398,36 @@ class HighFidelityAnalyticsEngine:
         min_mentions: int = 2,
         max_results: int = 12,
         base_exclude: set = None,
+        max_post_age_hours: int = 24,
     ) -> list:
         """
         Generic Reddit RSS parser. Shared engine for all community radar channels.
 
-        subreddits:       {subreddit_name: score_weight}
-        context_keywords: post must contain ≥1 keyword to be scanned (empty = scan all)
-        extra_exclude:    symbols to block beyond base_exclude
-        base_exclude:     None = use _SOCIAL_SCANNER_EXCLUDE; a set = use it instead
-                          (crypto channel passes its own set to allow BTC/ETH/SOL)
-        cache_key:        DB key for 6h result cache
-        min_mentions:     minimum posts mentioning symbol before it surfaces
+        subreddits:          {subreddit_name: score_weight}
+        context_keywords:    post must contain ≥1 keyword to be scanned (empty = scan all)
+        extra_exclude:       symbols to block beyond base_exclude
+        base_exclude:        None = use _SOCIAL_SCANNER_EXCLUDE; a set = use it instead
+                             (crypto channel passes its own set to allow BTC/ETH/SOL)
+        cache_key:           DB key for 6h result cache
+        min_mentions:        minimum posts mentioning symbol before it surfaces
+        max_post_age_hours:  discard RSS entries older than this (default 24h).
+                             Prevents multi-day-old posts from inflating mention counts
+                             and producing stale/identical results across consecutive runs.
         """
         cached = self.db.get_state(cache_key)
         if cached and isinstance(cached, dict):
             try:
                 ts = datetime.strptime(cached.get("ts", ""), "%Y-%m-%d %H:%M")
-                if (datetime.now() - ts).total_seconds() < cache_ttl_hours * 3600:
+                age_h = (datetime.now() - ts).total_seconds() / 3600
+                if age_h < cache_ttl_hours:
+                    logger.info(f"[Community Radar] {cache_key}: cache hit ({age_h:.1f}h old, TTL {cache_ttl_hours}h)")
                     return cached.get("results", [])
             except Exception:
                 pass
 
         import re
         import xml.etree.ElementTree as ET
+        from datetime import timezone
 
         TITLE_RE  = re.compile(r'(?<!\w)([A-Z]{2,5})(?!\w)')   # bare uppercase
         DOLLAR_RE = re.compile(r'\$([A-Z]{1,5})\b')             # $TICKER (high confidence)
@@ -3430,13 +3437,17 @@ class HighFidelityAnalyticsEngine:
         effective_base = base_exclude if base_exclude is not None else self._SOCIAL_SCANNER_EXCLUDE
         all_exclude = effective_base | (extra_exclude or set())
 
+        # Cutoff: only count posts published within max_post_age_hours
+        now_utc   = datetime.now(timezone.utc)
+        age_cutoff = now_utc - timedelta(hours=max_post_age_hours)
+
         ticker_data: dict = {}
         rss_ok = False
 
         for sub, weight in subreddits.items():
             try:
                 resp = requests.get(
-                    f"https://www.reddit.com/r/{sub}/new/.rss?limit=75",
+                    f"https://www.reddit.com/r/{sub}/new/.rss?limit=100",
                     headers={"User-Agent": "CashflowBot/1.0 (personal trading research)"},
                     timeout=14,
                 )
@@ -3449,14 +3460,28 @@ class HighFidelityAnalyticsEngine:
                 root = ET.fromstring(resp.content)
                 entries = [c for c in root.iter() if c.tag.endswith("}entry") or c.tag == "entry"]
 
+                fresh_count = 0
                 for entry in entries:
-                    title = content = ""
+                    title = content = post_ts_str = ""
                     for child in entry:
                         local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                         if local == "title":
                             title = child.text or ""
                         elif local in ("content", "summary", "description"):
                             content = child.text or ""
+                        elif local in ("updated", "published"):
+                            if not post_ts_str:
+                                post_ts_str = child.text or ""
+
+                    # Skip posts older than max_post_age_hours
+                    if post_ts_str:
+                        try:
+                            post_dt = datetime.fromisoformat(post_ts_str.replace("Z", "+00:00"))
+                            if post_dt < age_cutoff:
+                                continue
+                        except Exception:
+                            pass  # unparseable timestamp → include the post (be permissive)
+                    fresh_count += 1
 
                     body_plain    = HTML_RE.sub(" ", content)
                     combined_lower = (title + " " + body_plain).lower()
@@ -3495,7 +3520,7 @@ class HighFidelityAnalyticsEngine:
                             ticker_data[sym]["titles"].append(title[:90])
 
                 rss_ok = True
-                logger.info(f"[Community Radar] r/{sub} RSS: {len(entries)} posts")
+                logger.info(f"[Community Radar] r/{sub} RSS: {len(entries)} total, {fresh_count} within {max_post_age_hours}h")
 
             except ET.ParseError as e:
                 logger.debug(f"[Community Radar] r/{sub} RSS parse error: {e}")
