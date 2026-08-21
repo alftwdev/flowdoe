@@ -506,6 +506,10 @@ def main():
                                 bull_pct   = bz.get("bull_pct", 0)
                                 lean_emoji = "🟢" if lean == "BULLISH" else ("🔴" if lean == "BEARISH" else "🟡")
 
+                                # Activity badge — only show HIGH BUZZ or TRENDING (skip WATCHING)
+                                _label = bz.get("label", "")
+                                label_badge = {"HIGH BUZZ": " | 🔥 High Buzz", "TRENDING": " | 📈 Trending"}.get(_label, "")
+
                                 # SentiSense underlying — now comes from buzz dict (pre-fetched in analytics.py)
                                 bz_ul_sent  = bz.get("ul_sent") or {}
                                 bz_ul_tick  = bz.get("ul_ticker", "")
@@ -514,7 +518,7 @@ def main():
                                 if bz_ul_sent and bz_ul_tick:
                                     _boost_str = f" · +{bz_ul_boost:.1f} score boost" if bz_ul_boost > 0 else ""
                                     ss_line = (
-                                        f"┣ Underlying ({bz_ul_tick}): "
+                                        f"┗ Underlying ({bz_ul_tick}): "
                                         f"`{bz_ul_sent.get('score', 0):+.0f}` {bz_ul_sent.get('lean', '')} "
                                         f"({bz_ul_sent.get('mentions', 0)} mentions){_boost_str}\n"
                                     )
@@ -522,24 +526,24 @@ def main():
                                     # fallback: legacy ss_map path (if buzz dict missing ul_sent)
                                     sent = ss_map[e["symbol"]]
                                     ss_line = (
-                                        f"┣ Underlying ({underlying_map.get(e['symbol'], '?')}): "
+                                        f"┗ Underlying ({underlying_map.get(e['symbol'], '?')}): "
                                         f"`{sent['score']:+.0f}` {sent['lean']} ({sent['mentions']} mentions)\n"
                                     )
 
                                 if buzz_score > 0:
                                     buzz_line = f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
-                                    source_line = "┗ Source: StockTwits + SentiSense underlying\n\n"
                                 else:
                                     buzz_line = "┣ Buzz: — (yield-sorted fill — no social signal today)\n"
-                                    source_line = "┗ Source: yield-sorted fallback\n\n"
 
+                                # Build entry — ┗ on final line (ss_line if present, else next_pay)
+                                next_pay_prefix = "┣" if ss_line else "┗"
                                 new_payload += (
-                                    f"**#{rank} {e['symbol']}** | {e['family']} | {e['freq']}\n"
+                                    f"**#{rank} {e['symbol']}** | {e['family']} | {e['freq']}{label_badge}\n"
                                     f"{buzz_line}"
-                                    f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann. | AUM: `{e['aum']}`\n"
-                                    f"┣ Next pay: `{e['next_ex_date']}`\n"
+                                    f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann.\n"
+                                    f"{next_pay_prefix} Next pay: `{e['next_ex_date']}`\n"
                                     f"{ss_line}"
-                                    f"{source_line}"
+                                    "\n"
                                 )
                             new_payload = new_payload.rstrip()
 
@@ -576,8 +580,7 @@ def main():
                                 fb_payload += (
                                     f"**{e['symbol']}** | {e['family']} | {e['freq']}\n"
                                     f"┣ Spot: `${e['spot']:.2f}` | Yield: `{e['ann_yield']:.1f}%` ann.\n"
-                                    f"┣ Next pay: `{e['next_ex_date']}`\n"
-                                    f"┗ Source: yield-sorted fallback (no buzz signal today)\n\n"
+                                    f"┗ Next pay: `{e['next_ex_date']}`\n\n"
                                 )
                             send_essentials_embed(
                                 WEBHOOK_INCOME,
@@ -1848,9 +1851,9 @@ def main():
                         })
                         snip_payload = (
                             "**Passive cash alternative — beat 0% idle cash**\n"
-                            "//Staking is locking digital coins in a network to validate transactions, secure blockchains, and earn rewards.\n\n"
+                            "//Staking is locking crypto coins in a network to validate transactions, secure blockchains, and earn rewards.\n\n"
                             + "\n".join(snip_lines)
-                            + "\n\n┗ Source: DeFiLlama live Proof of Stake (PoS) rates"
+                            + "\n┗ Source: DeFiLlama live Proof of Stake (PoS) rates"
                         )
                         _stk_dedupe = f"staking_snippet_{datetime.now().strftime('%Y-%m-%d')}"
                         if not engine.db.get_state(_stk_dedupe):
