@@ -607,7 +607,7 @@ def _build_headlines_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDa
 
 def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> tuple:
     """
-    Full morning synthesis brief (0800 HST). Returns (title, description, color).
+    Full morning synthesis brief (0310 HST). Returns (title, description, color).
     """
     now_utc   = datetime.now(timezone.utc)   # used for Q1 tax-char gate (lines below)
     now_label = datetime.now().strftime("%a %b %-d | %H:%M HST")
@@ -743,9 +743,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         crf_prem  = float(db.get_state("crf_last_premium") or 0.0)
         clm_score = int(db.get_state("clm_last_ro_score") or 0)
         crf_score = int(db.get_state("crf_last_ro_score") or 0)
+        # When N-2 is active, append note so negative z-score isn't misread as "safe"
+        _clm_n2 = db.get_state("ro_dodge_active_CLM", "")
+        _crf_n2 = db.get_state("ro_dodge_active_CRF", "")
+        _clm_z_label = f"`{clm_z:+.1f}σ` (N-2: z irrelevant)" if _clm_n2 else f"`{clm_z:+.1f}σ`"
+        _crf_z_label = f"`{crf_z:+.1f}σ` (N-2: z irrelevant)" if _crf_n2 else f"`{crf_z:+.1f}σ`"
         cef_line = (
-            f"CLM z:`{clm_z:+.1f}σ` prem:`{clm_prem:.1f}%` RO:`{clm_score}/100` ({clm_ro}) | "
-            f"CRF z:`{crf_z:+.1f}σ` prem:`{crf_prem:.1f}%` RO:`{crf_score}/100` ({crf_ro})"
+            f"CLM z:{_clm_z_label} prem:`{clm_prem:.1f}%` RO:`{clm_score}/100` ({clm_ro}) | "
+            f"CRF z:{_crf_z_label} prem:`{crf_prem:.1f}%` RO:`{crf_score}/100` ({crf_ro})"
         )
     except Exception:
         cef_line = "CLM/CRF: data pending monitor.py pulse"
@@ -1002,7 +1007,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             if not isinstance(_tc, dict) or "roc_pct" not in _tc:
                 continue
             _nav_k = f"{_ts}_last_nav"
-            _nav   = float(db.get_state(_nav_k) or (6.45 if _ts == "clm" else 6.18))
+            _nav   = float(db.get_state(_nav_k) or (6.73 if _ts == "clm" else 6.18))
             _hl_y  = _ad / _nav * 100
             _at_y  = _hl_y * (
                 (_tc["roc_pct"] / 100) * 1.0
@@ -1140,7 +1145,7 @@ def _build_intraday_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDat
             desc += f"┣ 🟢 TQQQ PUT desk UNLOCKED — top score {top}/100\n"
     except Exception:
         pass
-    desc += "┗ Intraday context — full brief at 0800 HST daily."
+    desc += "┗ Intraday context — full brief at 0310 HST daily."
     return "MID-SESSION PULSE", desc, bias["color"]
 
 

@@ -489,6 +489,40 @@ def check_sec_edgar(session, ticker):
                 if age <= N2_RECENCY_DAYS:
                     flags.append(f"⚠️ N-2/A RO AMENDMENT ({date})")
                     seen_forms.add("N-2/A")
+                    # First-detection Pushover: N-2/A contains the actual subscription
+                    # price, record date, and subscription window — fire once per cycle.
+                    _n2a_db_key = f"cornerstone_n2a_detected_{ticker}"
+                    if not db.get_state(_n2a_db_key, ""):
+                        db.update_state(_n2a_db_key, date)
+                        try:
+                            _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                            _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                            if _p_tok and _p_usr:
+                                _cik = cik_map.get(ticker, "")
+                                _edgar_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={_cik}&type=N-2&dateb=&owner=include&count=10"
+                                requests.post(
+                                    "https://api.pushover.net/1/messages.json",
+                                    data={
+                                        "token": _p_tok,
+                                        "user":  _p_usr,
+                                        "title": f"{ticker} N-2/A FILED — Final RO Terms Public",
+                                        "message": (
+                                            f"N-2/A amendment detected for {ticker} (filed {date}).\n\n"
+                                            f"This contains the actual subscription price, record date, "
+                                            f"subscription window, and max shares offered.\n\n"
+                                            f"Check EDGAR now for exact terms — the estimated sub price "
+                                            f"({'NAV x1.12' if ticker == 'CLM' else 'NAV x1.04'}) "
+                                            f"will be confirmed or corrected by this filing.\n\n"
+                                            f"EDGAR: {_edgar_url}"
+                                        ),
+                                        "priority": 1,
+                                        "sound": "cashregister",
+                                    },
+                                    timeout=10,
+                                )
+                                logger.info(f"[EDGAR] {ticker} N-2/A first-detection Pushover sent (filed {date})")
+                        except Exception as _pe:
+                            logger.warning(f"[EDGAR] N-2/A Pushover failed ({ticker}): {_pe}")
             elif "SC 13D" in form and "SC 13D" not in seen_forms:
                 if age <= HOLDER_RECENCY_DAYS:
                     flags.append(f"⚠️ 13D LARGE HOLDER CHANGE ({date})")

@@ -194,6 +194,29 @@ def _direction_label(d: str, stype: str) -> str:
     return "Neutral ➖"
 
 
+def _miss_magnitude(notes: str, outcome: str) -> str:
+    """For LOSS outcomes, parse the actual move from notes and return '(off X.X%)' string."""
+    if outcome != "LOSS":
+        return ""
+    import re
+    # Format from _grade_one: "SPY -0.82% — opposite direction"
+    m = re.search(r"([+-]?\d+\.\d+)%", notes or "")
+    if m:
+        return f" (off {abs(float(m.group(1))):.1f}%)"
+    # Format from futures/other logs: "entry=773.26 current=770.42"
+    e = re.search(r"entry=([\d.]+)", notes or "")
+    c = re.search(r"current=([\d.]+)", notes or "")
+    if e and c:
+        try:
+            entry = float(e.group(1))
+            current = float(c.group(1))
+            if entry > 0:
+                return f" (off {abs((current - entry) / entry * 100):.1f}%)"
+        except Exception:
+            pass
+    return ""
+
+
 def build_scorecard_embed(db, week_label: str = None):
     """Builds the Discord embed payload for the weekly scorecard."""
     week_label = week_label or date.today().strftime("Week of %b %d, %Y")
@@ -209,38 +232,51 @@ def build_scorecard_embed(db, week_label: str = None):
     week_pct = round(week_wins / week_total * 100) if week_total else 0
     mtd_pct   = round(mtd_wins / mtd_total * 100)  if mtd_total else 0
 
-    # Header
     accuracy_bar = "🎯" if week_pct >= 75 else ("📊" if week_pct >= 50 else "📉")
 
-    # Signal rows — max 6 most recent to keep mobile-readable
+    # Signal rows — max 6 most recent. LOSS rows append miss magnitude.
     signal_lines = []
     for r in rows[:6]:
         label   = SIGNAL_LABELS.get(r["signal_type"], r["signal_type"])
         pred    = _direction_label(r["predicted_direction"], r["signal_type"])
-        actual  = r.get("notes", "—")
-        emoji   = _outcome_emoji(r["outcome"])
+        notes   = r.get("notes", "—")
+        outcome = r.get("outcome", "")
+        miss    = _miss_magnitude(notes, outcome)
+        actual  = f"{notes}{miss}"
+        emoji   = _outcome_emoji(outcome)
         signal_lines.append(f"`{label:<18}` | {pred:<12} | {actual:<18} | {emoji}")
 
     table_header = f"`{'Signal':<18}` | `{'Predicted':<12}` | `{'Actual':<18}` | Score"
     table_sep    = "─" * 60
 
-    # System Heat block — Winner Effect: shows signal accuracy to drive subscription conversion.
-    # Reads last 5 resolved journal entries per strategy. Safe for public Discord (no $ amounts).
+    # System Heat block — shows last 5 resolved signal outcomes per strategy.
+    # When CLM/CRF has no resolved trades yet, show active N-2 status instead.
     _heat_parts = []
     for _strat, _label in [("CLM_CRF", "CLM/CRF signals"), ("TQQQ", "TQQQ LEAP signals"), ("WHEEL", "Wheel setups")]:
         _h = db.get_system_heat(_strat, last_n=5)
         if _h["win_rate"] is not None:
             _streak = " 🔥 on streak" if _h["on_streak"] else ""
             _heat_parts.append(f"┣ {_label}: {_h['wins']}/{_h['total']} ({_h['win_rate']:.0%}) {_h['heat']}{_streak}")
+        elif _strat == "CLM_CRF":
+            # Show N-2 status rather than generic "building data"
+            _clm_n2 = db.get_state("cornerstone_n2_detected_CLM", "")
+            _crf_n2 = db.get_state("cornerstone_n2_detected_CRF", "")
+            _ro_clm = db.get_state("ro_dodge_active_CLM", "")
+            _ro_crf = db.get_state("ro_dodge_active_CRF", "")
+            if _ro_clm or _ro_crf:
+                _n2_date = _clm_n2 or _crf_n2 or "recent"
+                _heat_parts.append(f"┣ {_label}: N-2 filed {_n2_date} — RO dodge active, awaiting re-entry")
+            else:
+                _heat_parts.append(f"┣ {_label}: accumulating signal history")
     if _heat_parts:
         _heat_parts[-1] = _heat_parts[-1].replace("┣", "┗", 1)
     _heat_block = ("\n🔥 **SYSTEM HEAT (last 5 resolved signals)**\n" + "\n".join(_heat_parts) + "\n") if _heat_parts else ""
 
-    # Locked content tease — the hook that drives conversion
+    # Locked content tease
     locked_tease = (
         _heat_block
-        + "\n🔒 **Subscribers this week received:**\n"
-        "┣ Full morning conviction brief (8-flag bias)\n"
+        + "\n🔒 **Subscribers were informed of:**\n"
+        "┣ Full morning conviction brief (12+ signal bias)\n"
         "┣ TQQQ LEAP desk cycle score + entry alerts\n"
         "┣ Wheel strike targets + Kelly-sized positions\n"
         "┣ CLM/CRF yield-floor accumulation signals\n"
@@ -260,9 +296,9 @@ def build_scorecard_embed(db, week_label: str = None):
 
     color = 0x2ecc71 if week_pct >= 75 else (0xe67e22 if week_pct >= 50 else 0xe74c3c)
 
+    # Title removed — the scorecard header is in the description body
     return {
         "embeds": [{
-            "title": "Rockefeller Intelligence | Free Tier Scorecard",
             "description": description,
             "color": color,
             "footer": {"text": "Research only — not financial advice. Predictions logged at signal time, graded at target date."}

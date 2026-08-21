@@ -46,7 +46,7 @@ CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "
 
 # NAV proxy tickers and defaults
 NAV_TICKERS  = {"CLM": "XCLMX", "CRF": "XCRFX"}
-NAV_DEFAULTS = {"CLM": 6.45, "CRF": 6.18}   # CRF corrected Jul 23 2026 (was 6.30)
+NAV_DEFAULTS = {"CLM": 6.73, "CRF": 6.18}   # CLM updated Aug 16 2026 per N-2 EDGAR filing; CRF corrected Jul 23 2026
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP — Claim SimpleFIN Access URL
