@@ -1,10 +1,11 @@
 import os
+import json
 import time as _time_module
 import logging
 import requests
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 from market_structure import calculate_supertrend
@@ -3859,7 +3860,7 @@ class HighFidelityAnalyticsEngine:
             sym = c["symbol"]
             try:
                 ts = self._execute_query("time_series", {
-                    "symbol": sym, "interval": "1day", "outputsize": "6"
+                    "symbol": sym, "interval": "1day", "outputsize": "55"
                 })
                 if not ts or "values" not in ts or len(ts["values"]) < 2:
                     continue
@@ -3868,8 +3869,16 @@ class HighFidelityAnalyticsEngine:
                 prev5     = float(vals[min(5, len(vals)-1)]["close"])
                 chg_5d    = (spot - prev5) / prev5 * 100
                 vol_today = float(vals[0].get("volume", 0))
-                vol_avg   = sum(float(v.get("volume", 0)) for v in vals[1:]) / max(len(vals)-1, 1)
-                vol_ratio = vol_today / vol_avg if vol_avg > 0 else 1.0
+                vol_avg   = sum(float(v.get("volume", 0)) for v in vals[1:6]) / 5.0 if len(vals) >= 6 else None
+                vol_ratio = vol_today / vol_avg if vol_avg else 1.0
+
+                # ── TA indicators from the 55-bar daily series
+                import pandas as _pd
+                _closes = [float(v["close"]) for v in reversed(vals)]
+                _s = _pd.Series(_closes)
+                sma50 = round(float(_s.rolling(50).mean().iloc[-1]), 2) if len(_closes) >= 50 else None
+                ema21 = round(float(_s.ewm(span=21, adjust=False).mean().iloc[-1]), 2) if len(_closes) >= 21 else None
+                vwap  = round((float(vals[0].get("high", spot)) + float(vals[0].get("low", spot)) + spot) / 3.0, 2)
 
                 rsi_data = self._execute_query("rsi", {
                     "symbol": sym, "interval": "1day", "time_period": "14"
@@ -3966,6 +3975,9 @@ class HighFidelityAnalyticsEngine:
                     "chg_5d":         chg_5d,
                     "vol_ratio":      vol_ratio,
                     "rsi":            rsi,
+                    "sma50":          sma50,
+                    "ema21":          ema21,
+                    "vwap":           vwap,
                     "ivr":            ivr,
                     "ivr_tag":        ivr_tag,
                     "ivr_days":       ivr_days,
@@ -4040,6 +4052,194 @@ class HighFidelityAnalyticsEngine:
         except Exception as e:
             logger.error(f"[Crypto Social] Reddit r/CryptoCurrency fetch failed: {e}")
             return {}
+
+    # ── BTC ON-CHAIN PULSE ────────────────────────────────────────────────────
+    # Three public free-tier data sources cached daily:
+    #   1. Blockchain.com Stats (no key) — transactions, hash rate, on-chain volume
+    #   2. DeFiLlama /charts (no key) — total DeFi TVL, 7d trend
+    #   3. Twelve Data BTC/USD 200-bar — 200d SMA as realized-price proxy for MVRV
+    # MVRV proxy written to DB so tqqq.py cycle scorer can consume it.
+
+    def fetch_btc_onchain_stats(self) -> dict:
+        """Blockchain.com daily stats — cached once per calendar day."""
+        today = date.today().isoformat()
+        cache_key = f"btc_onchain_stats_{today}"
+        cached = self.db.get_state(cache_key, None)
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+        try:
+            r = requests.get("https://api.blockchain.info/stats", timeout=10)
+            r.raise_for_status()
+            d = r.json()
+            result = {
+                "n_tx":        int(d.get("n_tx", 0)),
+                "hash_rate_eh": round(float(d.get("hash_rate", 0)) / 1e9, 1),  # GH/s → EH/s
+                "volume_usd":  float(d.get("estimated_transaction_volume_usd", 0)),
+                "price_usd":   float(d.get("market_price_usd", 0)),
+                "blocks_24h":  int(d.get("n_blocks_mined", 0)),
+            }
+            self.db.update_state(cache_key, json.dumps(result))
+            logger.info("[BTC On-Chain] Blockchain.com stats fetched and cached.")
+            return result
+        except Exception as e:
+            logger.error(f"[BTC On-Chain] Blockchain.com fetch failed: {e}")
+            return {}
+
+    def fetch_defi_tvl_trend(self) -> dict:
+        """DeFiLlama total DeFi TVL — current + 7d change, cached once per calendar day."""
+        today = date.today().isoformat()
+        cache_key = f"defi_tvl_cache_{today}"
+        cached = self.db.get_state(cache_key, None)
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+        try:
+            r = requests.get("https://api.llama.fi/charts", timeout=15)
+            r.raise_for_status()
+            entries = r.json()  # [{date, totalLiquidityUSD}, ...]
+            if len(entries) < 8:
+                return {}
+            current_tvl  = float(entries[-1]["totalLiquidityUSD"])
+            tvl_7d_ago   = float(entries[-8]["totalLiquidityUSD"])
+            tvl_30d_ago  = float(entries[-31]["totalLiquidityUSD"]) if len(entries) >= 31 else tvl_7d_ago
+            chg_7d_pct   = (current_tvl - tvl_7d_ago)  / tvl_7d_ago  * 100 if tvl_7d_ago  else 0.0
+            chg_30d_pct  = (current_tvl - tvl_30d_ago) / tvl_30d_ago * 100 if tvl_30d_ago else 0.0
+            result = {
+                "tvl_usd":      current_tvl,
+                "tvl_7d_ago":   tvl_7d_ago,
+                "chg_7d_pct":   round(chg_7d_pct,  1),
+                "chg_30d_pct":  round(chg_30d_pct, 1),
+            }
+            self.db.update_state(cache_key, json.dumps(result))
+            logger.info(f"[DeFi TVL] Fetched: ${current_tvl/1e9:.1f}B, 7d: {chg_7d_pct:+.1f}%")
+            return result
+        except Exception as e:
+            logger.error(f"[DeFi TVL] DeFiLlama fetch failed: {e}")
+            return {}
+
+    def fetch_btc_mvrv_proxy(self) -> dict:
+        """
+        MVRV proxy: current BTC price / 200-day SMA.
+        Uses Twelve Data BTC/USD 200-bar series (1 credit, cached daily).
+        Proxy written to DB as 'btc_mvrv_proxy' for tqqq.py cycle scorer.
+        Interpretation:
+          < 1.0 → historically undervalued (deep accumulation)
+          1.0–2.0 → fair value / accumulation zone
+          2.0–3.5 → bull market momentum
+          > 3.5 → cycle top territory
+        """
+        today = date.today().isoformat()
+        cache_key = f"btc_mvrv_proxy_{today}"
+        cached = self.db.get_state(cache_key, None)
+        if cached:
+            try:
+                result = json.loads(cached)
+                self.db.update_state("btc_mvrv_proxy", str(result.get("mvrv_proxy", "")))
+                return result
+            except Exception:
+                pass
+        try:
+            ts = self._execute_query("time_series", {
+                "symbol": "BTC/USD", "interval": "1day", "outputsize": "200"
+            })
+            if not ts or "values" not in ts or len(ts["values"]) < 50:
+                return {}
+            vals = ts["values"]
+            closes = [float(v["close"]) for v in reversed(vals)]
+            sma200 = sum(closes) / len(closes)
+            sma50  = sum(closes[-50:]) / 50
+            current = closes[-1]
+            mvrv_proxy = round(current / sma200, 2) if sma200 > 0 else None
+
+            if mvrv_proxy is None:
+                return {}
+
+            if mvrv_proxy > 3.5:
+                cycle_label = "Cycle top territory — reduce exposure"
+                cycle_icon  = "🔴"
+            elif mvrv_proxy > 2.0:
+                cycle_label = "Bull market — riding momentum"
+                cycle_icon  = "🟡"
+            elif mvrv_proxy >= 1.0:
+                cycle_label = "Accumulation zone — fair value"
+                cycle_icon  = "🟢"
+            else:
+                cycle_label = "Historically undervalued — strong accumulation"
+                cycle_icon  = "🟢"
+
+            result = {
+                "mvrv_proxy":  mvrv_proxy,
+                "sma200":      round(sma200, 2),
+                "sma50":       round(sma50, 2),
+                "current":     round(current, 2),
+                "cycle_label": cycle_label,
+                "cycle_icon":  cycle_icon,
+            }
+            self.db.update_state(cache_key, json.dumps(result))
+            self.db.update_state("btc_mvrv_proxy", str(mvrv_proxy))
+            logger.info(f"[MVRV Proxy] {mvrv_proxy:.2f} ({cycle_label})")
+            return result
+        except Exception as e:
+            logger.error(f"[MVRV Proxy] Fetch failed: {e}")
+            return {}
+
+    def generate_btc_onchain_pulse(self) -> str:
+        """
+        Builds the #crypto embed body for the BTC On-Chain Pulse section.
+        Calls all three data sources (all cached daily — no duplicate API hits).
+        Returns formatted description string ready for send_essentials_embed().
+        """
+        onchain = self.fetch_btc_onchain_stats()
+        tvl     = self.fetch_defi_tvl_trend()
+        mvrv    = self.fetch_btc_mvrv_proxy()
+
+        if not onchain and not tvl and not mvrv:
+            return ""
+
+        lines = []
+
+        # ── BTC Network Health
+        if onchain:
+            vol_b = onchain["volume_usd"] / 1e9
+            lines.append(f"┣ On-chain vol: `${vol_b:.1f}B/day` | Txns: `{onchain['n_tx']:,}`")
+            hr = onchain["hash_rate_eh"]
+            hr_label = "all-time high zone" if hr > 800 else ("healthy" if hr > 500 else "watch miner capitulation")
+            lines.append(f"┣ Hash rate: `{hr:.0f} EH/s` — {hr_label}")
+
+        # ── MVRV Cycle Position
+        if mvrv:
+            lines.append(
+                f"┣ MVRV proxy: `{mvrv['mvrv_proxy']:.2f}` {mvrv['cycle_icon']} {mvrv['cycle_label']}"
+            )
+            lines.append(f"┣ BTC 200d avg (realized proxy): `${mvrv['sma200']:,.0f}`")
+
+        # ── DeFi TVL Capital Flow
+        if tvl:
+            tvl_b     = tvl["tvl_usd"] / 1e9
+            chg_7d    = tvl["chg_7d_pct"]
+            chg_30d   = tvl["chg_30d_pct"]
+            flow_dir  = "↑ inflows" if chg_7d > 1 else ("↓ outflows" if chg_7d < -1 else "→ flat")
+            flow_icon = "🟢" if chg_7d > 2 else ("🔴" if chg_7d < -2 else "⚪")
+            lines.append(
+                f"┣ DeFi TVL: `${tvl_b:.1f}B` | 7d `{chg_7d:+.1f}%` {flow_dir} {flow_icon}"
+            )
+            lines.append(f"┣ 30d TVL trend: `{chg_30d:+.1f}%`")
+
+        if not lines:
+            return ""
+
+        # Ensure last line uses ┗
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith("┣"):
+                lines[i] = "┗" + lines[i][1:]
+                break
+
+        return "\n".join(lines)
 
     def generate_crypto_social_snapshot(self) -> dict:
         """

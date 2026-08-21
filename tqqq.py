@@ -1457,6 +1457,22 @@ class TQQQTacticalSniper:
         # Low VIXY (z < 0) on a red day = orderly selling, not capitulation.
         # Capitulation requires fear. Without fear, the CALL desk should not fire.
         # Three-signal distribution flag: calm VIXY + bearish MACD + below EMA21
+        # ── BTC MVRV Proxy cross-signal (written daily by scheduler.py crypto_social)
+        # Undervalued BTC (<1.5) = crypto fear = broader risk-off = adds CALL conviction.
+        # Overheated BTC (>3.5) = cycle top = reduces CALL conviction (not time to buy LEAPs).
+        try:
+            _mvrv_raw = db.get_state("btc_mvrv_proxy", None)
+            _mvrv = float(_mvrv_raw) if _mvrv_raw else None
+            if _mvrv is not None:
+                if _mvrv < 1.0:
+                    b += 8   # deep undervalued — strong cross-signal
+                elif _mvrv < 1.5:
+                    b += 5   # accumulation zone — mild cross-signal
+                elif _mvrv > 3.5:
+                    b = max(0, b - 8)  # cycle top — dampen CALL thesis
+        except Exception:
+            pass
+
         # is the exact pattern of a distribution move, not a fear bottom.
         is_distribution = (vix_z < 0.0 and macd_hist < 0 and ema21_pct < 0)
         if is_distribution:

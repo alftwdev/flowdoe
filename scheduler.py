@@ -77,7 +77,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
     }
     for webhook, payload in targets.items():
         if webhook:
-            send_essentials_embed(webhook, f"Market Analysis Sync | {report_label}", payload, color)
+            send_essentials_embed(webhook, "", payload, color)
     logger.info(f"Conviction sync ({report_label}) cross-dispatched to {sum(1 for w in targets if w)} channels.")
 
 
@@ -1559,7 +1559,7 @@ def main():
                     logger.info("Trending plays: no qualifying plays found this session.")
                 else:
                     today_label = datetime.now().strftime("%b %-d")
-                    payload = f"**TRENDING OPTIONS PLAYS — {today_label}**\n\n"
+                    payload = ""
                     for p in plays:
                         chg_arrow = "▲" if p["chg_5d"] >= 0 else "▼"
 
@@ -1576,17 +1576,20 @@ def main():
                         if p.get("earnings_flag") == "REVIEW":
                             earn_line = f"┣ ⚠️ Earnings: `{p['earnings_date']}` — within 21d, size down\n"
 
-                        # ── SentiSense enrichment
-                        ss_line = ""
-                        if p.get("ss_score") is not None:
-                            dom_str = f" · {p['ss_dominance']:.2f}% voice" if p.get("ss_dominance") else ""
-                            men_str = f" · {p['ss_mentions']:,} mentions" if p.get("ss_mentions") else ""
-                            ss_line = f"┣ SentiSense: `{p['ss_score']:.1f}` {p['lean']}{men_str}{dom_str}\n"
-
                         # ── Insider cluster signal (HIGH plays only, shown when detected)
                         insider_line = ""
                         if p.get("insider_signal"):
                             insider_line = f"┣ Insider: `{p['insider_signal']}` (SentiSense cluster)\n"
+
+                        # ── TA indicators
+                        _ta_parts = [f"RSI `{p['rsi']:.0f}`"]
+                        if p.get("vwap") is not None:
+                            _ta_parts.append(f"VWAP `${p['vwap']:.2f}`")
+                        if p.get("ema21") is not None:
+                            _ta_parts.append(f"EMA21 `${p['ema21']:.2f}`")
+                        if p.get("sma50") is not None:
+                            _ta_parts.append(f"SMA50 `${p['sma50']:.2f}`")
+                        ta_line = f"┣ {' · '.join(_ta_parts)}\n"
 
                         # ── BTO setup block
                         bto = p.get("bto_setup")
@@ -1603,9 +1606,8 @@ def main():
                             f"**{p['symbol']}** `${p['spot']:.2f}`  "
                             f"{chg_arrow} `{abs(p['chg_5d']):.1f}%` (5D)\n"
                             f"┣ Buzz: `{p['meter']}` · {p['lean']}\n"
-                            f"┣ Vol: `{p['vol_ratio']:.1f}x` avg · RSI `{p['rsi']:.0f}`\n"
+                            f"{ta_line}"
                             f"{ivr_line}"
-                            f"{ss_line}"
                             f"{insider_line}"
                             f"{earn_line}"
                             f"{bto_block}"
@@ -1618,7 +1620,7 @@ def main():
                     if WEBHOOK_OPTIONS:
                         send_essentials_embed(
                             WEBHOOK_OPTIONS,
-                            "OPTIONS DESK | Trending Plays",
+                            f"Trending Plays — {today_label}",
                             payload, 0x9b59b6
                         )
                         logger.info(f"Trending plays dispatched: {len(plays)} plays.")
@@ -1873,6 +1875,21 @@ def main():
                     send_essentials_embed(WEBHOOK_CRYPTO, "CRYPTO DESK | Social + Funding + Derivatives", payload, _crypto_color)
                     logger.info("Crypto social snapshot dispatched.")
 
+                # ── BTC On-Chain Pulse ────────────────────────────────────────
+                # Blockchain.com Stats + DeFiLlama TVL + MVRV proxy (all cached daily).
+                # MVRV proxy also written to DB as 'btc_mvrv_proxy' for tqqq.py.
+                try:
+                    _onchain_body = engine.generate_btc_onchain_pulse()
+                    if _onchain_body and WEBHOOK_CRYPTO:
+                        send_essentials_embed(
+                            WEBHOOK_CRYPTO,
+                            "🔗 BTC On-Chain Pulse",
+                            _onchain_body, 0xf39c12
+                        )
+                        logger.info("BTC on-chain pulse dispatched.")
+                except Exception as _oce:
+                    logger.error(f"BTC on-chain pulse failed: {_oce}")
+
                 # ── Crypto Community Radar ─────────────────────────────────────
                 # r/CryptoCurrency, r/CryptoMarkets, r/Bitcoin, r/Ethereum,
                 # r/CryptoTechnology — surfaces tokens/projects mentioned ≥2×
@@ -1884,15 +1901,11 @@ def main():
                         for item in _crypto_radar:
                             sym      = item["ticker"]
                             mentions = item["mentions"]
-                            sources  = "+".join(item["sources"])
-                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions · `{sources}`")
+                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions")
                         if _cr_lines:
                             _cr_lines[-1] = _cr_lines[-1].replace("┣", "┗", 1)
                             _cr_payload = (
-                                "Tokens / projects appearing ≥2× in r/CryptoCurrency, "
-                                "r/CryptoMarkets, r/Bitcoin, r/Ethereum, r/CryptoTechnology — "
-                                "auto-scanned every 6h. Strategy/sentiment context only — "
-                                "not a price call.\n\n"
+                                "Social Buzz\n\n"
                                 + "\n".join(_cr_lines)
                             )
                             send_essentials_embed(
@@ -2417,11 +2430,9 @@ def main():
                     if status == "UNKNOWN":
                         continue
                     status_icon = "▲" if status == "BULLISH" else ("▼" if status == "BEARISH" else "—")
-                    vol_ok  = "✓" if r.get("volume_confirmed") else "✗"
-                    vwap_ok = "✓" if r.get("vwap_aligned") else "✗"
                     src = r.get("data_source", "?")[:2].upper()  # TR or TD
                     lines.append(
-                        f"`{sym:<5}` {status_icon} SS:{ss:>3}  vol:{vol_ok} vwap:{vwap_ok}  [{src}]"
+                        f"`{sym:<5}` {status_icon} SS:{ss:>3}  [{src}]"
                     )
 
                 if not lines:
@@ -2429,7 +2440,7 @@ def main():
 
                 description = (
                     f"{bias_emoji} **Intraday ORB Bias: {bias}** — {date_str}\n"
-                    "```\nSym   Dir  SS  vol  vwap  src\n" + "\n".join(lines) + "\n```\n"
+                    "```\nSym   Dir  SS  src\n" + "\n".join(lines) + "\n```\n"
                     "⚡ 15-min ORB | Filters: close-confirm · vol×1.5 · VWAP · VIX 15-25 · no macro"
                 )
 
