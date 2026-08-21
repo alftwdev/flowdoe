@@ -3225,34 +3225,20 @@ class HighFidelityAnalyticsEngine:
         else:
             options_line = ""  # no setups today — omit rather than show noise
 
-        # ── #dividend-ccetfs: income ETF spotlight ──
+        # ── income-machine: income ETF spotlight ──
         etf_spot = self.db.get_state("cc_etf_spotlight_latest")
         if etf_spot:
-            income_line = f"┣ #dividend-ccetfs  Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
+            income_line = f"┣ #income-machine   Top Yield: `{etf_spot.get('symbol','—')}` `{etf_spot.get('ann_yield',0):.1f}%` annual — {etf_spot.get('freq','')}\n"
         else:
             income_line = ""  # screener output not fresh today — omit
 
-        # ── #crypto: Fear & Greed + mover ──
+        # ── #crypto: Fear & Greed (no mover — kept in dedicated crypto channel) ──
         fng_val   = snap.get("fng", {}).get("value", "—")
         fng_label = snap.get("fng", {}).get("label", "")
-        crypto_mover = ""
-        if snap.get("crypto_mover"):
-            sym, _, _, pct = snap["crypto_mover"]
-            crypto_mover = f" | Mover: {sym} `{pct:+.2f}%`"
-        crypto_line = f"┗ #crypto           Fear & Greed: `{fng_val}` ({fng_label}){crypto_mover}\n"
+        crypto_line = f"┗ #crypto           Fear & Greed: `{fng_val}` ({fng_label})\n"
 
+        # All channel_lines stay ┣ — crypto_line is always the terminal ┗
         channel_lines = "".join(filter(None, [futures_line, ro_line, options_line, income_line]))
-        # Replace last ┣ with ┗ before crypto line
-        if channel_lines:
-            last_box = channel_lines.rfind("┣")
-            if last_box != -1:
-                channel_lines = channel_lines[:last_box] + "┗" + channel_lines[last_box + 1:]
-        else:
-            crypto_line = crypto_line.replace("┗", "┣", 1)  # crypto becomes only line; will get ┗ below
-
-        # Ensure crypto is always the last line with ┗
-        if channel_lines:
-            crypto_line = crypto_line.replace("┗", "┗")  # already correct
 
         payload = (
             f"📣 **DAILY ACCURACY INDEX**\n"

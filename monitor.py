@@ -3094,12 +3094,19 @@ def send_daily_pulse(is_test=False):
             flip      = gex.get("flip_strike", 0.0)
             gex_total = gex.get("gex_total")
             is_neg    = "NEGATIVE" in gex.get("market_state", "")
-            gex_note  = (
-                "dealers amplify moves — volatility risk elevated for CLM/CRF premium" if is_neg else
-                "dealers suppress moves — stable CEF premium environment"
-            )
+            # State context: POSITIVE = dealers are long gamma → they sell rallies/buy dips
+            # → suppresses large moves. NEGATIVE = dealers short gamma → they chase moves,
+            # amplifying volatility. Both affect CLM/CRF premium stability.
+            # Net GEX magnitude from Tradier chain (directionally reliable; absolute $ may be
+            # understated if Tradier chain covers a limited strike range — use state label, not $ size).
+            if is_neg:
+                state_context = " — ⚠️ volatile, tail risk elevated"
+                gex_note = "Dealers amplify moves — increased volatility risk for CLM/CRF premium"
+            else:
+                state_context = " — ✅ stable, range-bound"
+                gex_note = "Dealers absorb volatility — range-bound conditions favor stable CEF premium"
             gex_snippet = (
-                f"┣ State: `{gex['market_state']}`\n"
+                f"┣ State: `{gex['market_state']}`{state_context}\n"
                 f"┣ Flip Level: `${flip:,.0f}`"
                 + (f" | Net GEX: `{gex_total:+.1f}B`" if gex_total is not None else "")
                 + f"\n┗ {gex_note}"

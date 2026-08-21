@@ -605,12 +605,27 @@ def _build_headlines_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDa
 
 # ── Report Builders ───────────────────────────────────────────────────────────
 
+def _wheel_idle_str(db: EcosystemDatabase) -> str:
+    """Returns top-IVR opportunity when no wheel positions are open."""
+    try:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        ws = db.get_state("wheel_candidates_snapshot")
+        if ws and isinstance(ws, dict) and ws.get("date") == today_str and ws.get("high_count", 0) > 0:
+            tops = ws.get("top_candidates", [])[:2]
+            if tops:
+                top_str = " | ".join(f"`{t['sym']}` IVR {t.get('ivr', 0):.0f}%" for t in tops)
+                return f"Idle — top IVR: {top_str}"
+    except Exception:
+        pass
+    return "Idle — run wheel_signals for setups"
+
+
 def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> tuple:
     """
     Full morning synthesis brief (0310 HST). Returns (title, description, color).
     """
     now_utc   = datetime.now(timezone.utc)   # used for Q1 tax-char gate (lines below)
-    now_label = datetime.now().strftime("%a %b %-d | %H:%M HST")
+    now_label = datetime.now().strftime("%a %b %-d")
 
     bias = _calculate_bias_score(engine, db)
 
@@ -758,9 +773,19 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     try:
         bottom_score = int(db.get_state("tqqq_bottom_score") or 0)
         top_score    = int(db.get_state("tqqq_top_score") or 0)
-        call_locked  = "🟢 UNLOCKED" if bottom_score >= 55 else f"🔒 locked ({bottom_score}/100)"
-        put_locked   = "🟢 UNLOCKED" if top_score >= 55 else f"🔒 locked ({top_score}/100)"
-        tqqq_line    = f"CALL desk {call_locked} | PUT desk {put_locked}"
+        if bottom_score >= 55:
+            call_locked = f"🟢 CALL OPEN ({bottom_score}/100) — fear confirmed, LEAP entry eligible"
+        elif bottom_score >= 40:
+            call_locked = f"🔒 CALL ({bottom_score}/100) — approaching threshold, watch for fear spike"
+        else:
+            call_locked = f"🔒 CALL ({bottom_score}/100) — no fear signal, market calm"
+        if top_score >= 55:
+            put_locked = f"🔴 PUT OPEN ({top_score}/100) — extension confirmed, LEAP put eligible"
+        elif top_score >= 40:
+            put_locked = f"🔒 PUT ({top_score}/100) — building, watch overbought levels"
+        else:
+            put_locked = f"🔒 PUT ({top_score}/100) — not extended"
+        tqqq_line = f"{call_locked} | {put_locked}"
     except Exception:
         tqqq_line = "TQQQ: awaiting cycle update"
 
@@ -789,7 +814,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             f"{pos_count} open position{'s' if pos_count != 1 else ''}"
             + (f" | Nearest exp: {nearest_exp}d" if nearest_exp is not None else "")
             + notional_str
-        ) if pos_count > 0 else "No open positions"
+        ) if pos_count > 0 else _wheel_idle_str(db)
     except Exception:
         wheel_line = "Wheel: DB read pending"
 
@@ -990,7 +1015,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             _t  = _r["total"]
             _pct = round(_w / _t * 100) if _t else 0
             _flag = "⚠️" if _pct < 50 else "✅"
-            _conf_parts.append(f"{_label} {_w}/{_t} {_flag}")
+            _conf_parts.append(f"{_label} {_pct}% ({_w}/{_t}) {_flag}")
         if _conf_parts:
             ledger_conf_line = "┣ 📈 Signal accuracy (30d): " + " | ".join(_conf_parts) + "\n"
     except Exception:
@@ -1022,11 +1047,10 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             _tax_note = "┣ Tax char (" + str(now_utc.year - 1) + " 1099): " + " | ".join(_tax_parts) + "\n"
 
     signals_section = (
-        "\n**CROSS-CHANNEL SIGNALS**\n"
+        "\n**CROSS-CHANNEL CONFLUENCE**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"{edgar_line}"
         f"{reentry_line}"
-        f"{acc_line}"
         f"{pre_n2_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
@@ -1035,7 +1059,6 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"┣ Wheel: {wheel_line}\n"
         f"{ledger_conf_line}"
         f"{mlpi_entry_line}"
-        f"┗ Synthesized: #cornerstone · #crypto · #futures · #options-wheel\n"
     )
 
     # ── BIAS + DIRECTIVES ─────────────────────────────────────────────────────
@@ -1058,11 +1081,10 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     )
 
     # ── SENTISENSE CONFLUENCE BLOCK ───────────────────────────────────────────
-    # Market Mood + Congressional trades. One API call each (cached daily).
-    # Adds the "stars align" layer: when macro + market mood + insider/political
-    # activity all converge, it reinforces the posture with external data.
+    # Congressional trades removed from morning brief (user preference Aug 2026).
+    # Data still available via SentiSense API — can be surfaced on demand.
     ss_section = ""
-    try:
+    if False:  # disabled — congressional trades removed from morning brief
         import sentisense_client as ss
 
         # Market Mood via CNN Fear & Greed (tqqq.py writes fg_last_known_score daily)

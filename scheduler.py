@@ -363,7 +363,7 @@ def main():
                             )
 
                         if WEBHOOK_ANNOUNCEMENTS:
-                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "SESSION QUANT PERFORMANCE VERIFICATION", acc_payload, 0x00ffcc)
+                            send_essentials_embed(WEBHOOK_ANNOUNCEMENTS, "📣 Daily Accuracy Index", acc_payload, 0x00ffcc)
                     else:
                         logger.warning("EOD Accuracy: Failed to fetch final closing price from Twelve Data.")
                 except Exception as e:
