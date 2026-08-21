@@ -693,10 +693,21 @@ def main():
                             )
                             ivr_src = f.get("ivr_source", "proxy")
                             ivr_label = "IVR" if ivr_src == "Tradier" else "IVR est"
+                            # Relative strength grade — demand footprint quality indicator
+                            _rs_icon = {"STRONG": "🟢", "NEUTRAL": "🟡", "WEAK": "🔴"}.get(f.get("rs_grade", "NEUTRAL"), "🟡")
+                            _rs_delta = f.get("rs_delta", 0.0)
+                            _rs_days  = f.get("rs_days_held", 0)
+                            _rs_near  = " · near recent high" if f.get("rs_near_high") else ""
+                            _rs_red   = f.get("rs_red_days", 0)
+                            rs_line = (
+                                f"┣ RS vs QQQ: {_rs_icon} `{f.get('rs_grade','?')}` | "
+                                f"Avg outperformance: `{_rs_delta:+.1f}%` on `{_rs_days}/{_rs_red}` red-QQQ days{_rs_near}\n"
+                            )
                             ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | {ivr_label}: `{f['ivr_proxy']:.0f}%` [{ivr_src}]\n"
                                 f"{iv_context}"
+                                f"{rs_line}"
                                 f"{setup_line}"
                                 f"{div_line}"
                                 f"{assigned_line}"
@@ -1591,6 +1602,18 @@ def main():
                             _ta_parts.append(f"SMA50 `${p['sma50']:.2f}`")
                         ta_line = f"┣ {' · '.join(_ta_parts)}\n"
 
+                        # ── Relative strength vs QQQ (hidden demand footprint)
+                        _rs_g = p.get("rs_grade", "NEUTRAL")
+                        _rs_icon2 = {"STRONG": "🟢", "NEUTRAL": "🟡", "WEAK": "🔴"}.get(_rs_g, "🟡")
+                        _rs_detail_parts = [f"{p.get('rs_days_held', 0)}d held flat/green on red-QQQ days"]
+                        _delta = p.get("rs_delta", 0.0)
+                        _rs_detail_parts.append(f"Avg Δ{_delta:+.1f}% vs QQQ")
+                        if p.get("rs_near_high"):
+                            _rs_detail_parts.append("near recent high")
+                        if p.get("rs_sma_stacked"):
+                            _rs_detail_parts.append("MAs stacked")
+                        rs_line = f"┣ RS vs QQQ: {_rs_icon2} `{_rs_g}` — {' · '.join(_rs_detail_parts)}\n"
+
                         # ── BTO setup block
                         bto = p.get("bto_setup")
                         bto_block = ""
@@ -1607,6 +1630,7 @@ def main():
                             f"{chg_arrow} `{abs(p['chg_5d']):.1f}%` (5D)\n"
                             f"┣ Buzz: `{p['meter']}` · {p['lean']}\n"
                             f"{ta_line}"
+                            f"{rs_line}"
                             f"{ivr_line}"
                             f"{insider_line}"
                             f"{earn_line}"

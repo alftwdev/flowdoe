@@ -170,9 +170,10 @@ RO_SCORE_WEIGHTS = {
     "cef_inst_exit":      20,   # High vol + flat SPY = institutional distribution cycle exit
     "dist_overvalued":    10,   # Price > fair-value floor by >10% at new annual distribution rate
     # Pre-N-2 early warning signals (elevation duration — community-validated)
-    "premium_streak":     10,   # 10+ consecutive days above 20% premium — board has motive
+    "premium_streak":        10,   # 10+ consecutive days above 20% premium — board has motive
+    "consecutive_year_ro":   12,   # prior offering within 6–18 months (consecutive-year cluster pattern)
     # Suppressors
-    "ex_div_relief":      -10,
+    "ex_div_relief":         -10,
 }
 
 # EDGAR forms watched and their conviction weights.
@@ -1676,6 +1677,7 @@ def calculate_ro_risk_score(
     long_rate_pressure=False, hy_rapid_widen=False,
     dark_pool_cluster_count=1,
     premium_streak_days=0, ro_interval_elevated=False,
+    consecutive_year_ro=False,
 ):
     """
     Composite Rights-Offering risk score (0–100).
@@ -1738,6 +1740,9 @@ def calculate_ro_risk_score(
         score += RO_SCORE_WEIGHTS["cef_inst_exit"]
     if dist_overvalued:
         score += RO_SCORE_WEIGHTS["dist_overvalued"]
+    # Consecutive-year cluster: prior offering 6–18 months ago = board in cluster mode
+    if consecutive_year_ro:
+        score += RO_SCORE_WEIGHTS["consecutive_year_ro"]
     # Premium elevation streak: board has clear motive when premium stays elevated for weeks
     if premium_streak_days >= 10:
         score += RO_SCORE_WEIGHTS["premium_streak"]
@@ -2023,6 +2028,15 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # ── SEC EDGAR (original + 13D/G added)
     sec_shield = check_sec_edgar(session, ticker)
 
+    # If EDGAR returns no signal but ro_dodge_active is set, the N-2 was already confirmed
+    # in a prior successful fetch. Augment sec_shield so the RO score stays elevated through
+    # transient EDGAR failures (DNS hiccups on PA are common). ro_dodge_active IS the canonical
+    # N-2 confirmation — it is only set when N-2 is first detected and cleared only on re-entry.
+    _dodge_date = db.get_state(f"ro_dodge_active_{ticker}", "")
+    if _dodge_date and "N-2 RO REGISTRATION" not in sec_shield and "N-2/A" not in sec_shield:
+        _n2_date = db.get_state(f"cornerstone_n2_detected_{ticker}", _dodge_date)
+        sec_shield = f"⚠️ N-2 RO REGISTRATION ({_n2_date}) [confirmed — dodge flag active]"
+
     # ── Macro/seasonal context (original)
     credit_spread = fetch_hy_spread_live()  # FRED BAMLH0A0HYM2 — live, cached daily
     ex_div_near   = is_near_ex_dividend_window()
@@ -2128,7 +2142,10 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         except Exception:
             _anchor_age = 9999
         if not _existing_n2 or _anchor_age > 180:
-            # Fresh start OR stale anchor from a prior RO cycle (> 6 months = different cycle)
+            # Fresh start OR stale anchor from a prior RO cycle (> 6 months = different cycle).
+            # Save old anchor as prev_detected so consecutive-year scorer can reference it.
+            if _existing_n2 and _anchor_age > 180:
+                db.update_state(f"cornerstone_n2_prev_detected_{ticker}", _existing_n2)
             db.update_state(n2_key, datetime.now().strftime("%Y-%m-%d"))
             db.update_state(f"cornerstone_ro_dip_fired_{ticker}", "")
             db.update_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
@@ -2149,6 +2166,11 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         _path_a_done = db.get_state(f"cornerstone_ro_dip_fired_{ticker}", "")
         _path_b_done = db.get_state(f"cornerstone_floor_reentry_fired_{ticker}", "")
         if _path_a_done or _path_b_done:
+            # Save current cycle's N-2 date to prev before clearing — future clusters can
+            # reference it to detect the consecutive-year pattern.
+            _closing_n2 = db.get_state(n2_key, "")
+            if _closing_n2:
+                db.update_state(f"cornerstone_n2_prev_detected_{ticker}", _closing_n2)
             db.update_state(n2_key, "")
             db.update_state(f"ro_dodge_active_{ticker}", "")
             db.update_state(f"cornerstone_n2_initial_alerted_{ticker}", "")  # reset for next cycle
@@ -2235,7 +2257,22 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         except Exception:
             pass
 
+    # Consecutive-year cluster: if the prior N-2 was 6–18 months ago (different offering cycle),
+    # the board is in "cluster mode". Historical pattern (2016-18, 2021-22, 2025-26) shows
+    # ~60-75% probability of a consecutive-year offering once the first in a cluster fires.
+    # +12pts — moderate signal, not as strong as a live N-2 (60pts) but meaningful for posture.
+    _prev_n2_str = db.get_state(f"cornerstone_n2_prev_detected_{ticker}", "")
+    consecutive_year_ro = False
+    if _prev_n2_str:
+        try:
+            _prev_n2_dt    = datetime.strptime(_prev_n2_str, "%Y-%m-%d").date()
+            _days_prev     = (datetime.utcnow().date() - _prev_n2_dt).days
+            consecutive_year_ro = 180 <= _days_prev <= 550  # 6–18 months window
+        except Exception:
+            pass
+
     # Write pre-N-2 signals to DB for cross-script reads (market_analysis.py morning brief)
+    db.update_state(f"{ticker.lower()}_consecutive_year_ro",  consecutive_year_ro)
     db.update_state(f"{ticker.lower()}_premium_streak_days",   premium_streak_days)
     db.update_state(f"{ticker.lower()}_premium_velocity_3d",   premium_velocity_3d)
     db.update_state(f"{ticker.lower()}_months_since_last_ro",  months_since_last_ro)
@@ -2311,6 +2348,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         dark_pool_cluster_count=dark_pool_cluster_count,
         premium_streak_days=premium_streak_days,
         ro_interval_elevated=ro_interval_elevated,
+        consecutive_year_ro=consecutive_year_ro,
     )
 
     # ── Ledger prediction logging (original — only on ELEVATED/CRITICAL)

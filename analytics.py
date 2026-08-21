@@ -854,6 +854,86 @@ class HighFidelityAnalyticsEngine:
         "SPY", "QQQ", "IWM", "GLD", "XLE",
     ]
 
+    def _calculate_relative_strength(self, ticker_vals: list, qqq_vals: list) -> dict:
+        """
+        SMB Capital 'hidden relative strength' scorer.
+
+        Identifies stocks showing real demand during market weakness — the institutional
+        accumulation footprint that precedes breakouts. Uses up to 15 daily bars,
+        focusing exclusively on red-QQQ days to filter out noise from calm sessions.
+
+        Logic:
+          - avg_rs_delta: avg(stock_pct - qqq_pct) on days QQQ was negative (>-0.3%)
+            Positive = held up better; negative = underperformed on weakness
+          - days_held:    count of those days where stock was flat (>-0.5%) or green
+          - near_recent_high: within 12% of the highest close in the series window
+          - sma10_above_20: 10-day SMA above 20-day SMA (trend confirmation; needs ≥20 bars)
+
+        Grade:
+          STRONG  — avg_rs_delta ≥ 1.5 AND days_held ≥ 3
+                  OR avg_rs_delta ≥ 0.5 AND near_recent_high AND days_held ≥ 2
+          NEUTRAL — avg_rs_delta ≥ 0.0 AND days_held ≥ 1
+          WEAK    — underperforming on down days (negative avg_rs_delta) or never held up
+
+        Zero extra API calls when caller already has the 55-bar series (trending plays).
+        One 15-bar TD credit per symbol when called from the wheel screener.
+        """
+        _default = {
+            "rs_grade": "NEUTRAL", "avg_rs_delta": 0.0, "days_held": 0,
+            "near_recent_high": False, "sma10_above_20": False, "red_qqq_days": 0,
+        }
+        try:
+            n = min(len(ticker_vals), len(qqq_vals), 15)
+            if n < 4:
+                return _default
+
+            # Build chronological arrays (oldest → newest) for SMA
+            t_cls = [float(ticker_vals[i]["close"]) for i in range(n - 1, -1, -1)]
+            q_cls = [float(qqq_vals[i]["close"])    for i in range(n - 1, -1, -1)]
+
+            # Daily pct changes (bar 1 onward, chronological)
+            t_chg = [(t_cls[i] - t_cls[i-1]) / t_cls[i-1] * 100 for i in range(1, n)]
+            q_chg = [(q_cls[i] - q_cls[i-1]) / q_cls[i-1] * 100 for i in range(1, n)]
+
+            # Only care about days when QQQ was genuinely negative (>0.3% down = real pressure)
+            red_pairs = [(t_chg[i], q_chg[i]) for i in range(len(q_chg)) if q_chg[i] < -0.3]
+            if not red_pairs:
+                return {**_default, "rs_grade": "NEUTRAL"}  # no red days yet — neutral, not weak
+
+            # Outperformance on those days: positive = held up, negative = sold off harder
+            rs_deltas  = [td - qd for td, qd in red_pairs]
+            avg_delta  = round(sum(rs_deltas) / len(rs_deltas), 2)
+            days_held  = sum(1 for td, _ in red_pairs if td >= -0.5)
+
+            # Proximity to recent high — "near all-time/52w high" proxy using available bars
+            highs = [float(v.get("high", v["close"])) for v in ticker_vals[:n]]
+            near_high = (max(highs) - float(ticker_vals[0]["close"])) / max(highs) <= 0.12
+
+            # 10 SMA vs 20 SMA — only when enough bars
+            sma10_gt_20 = False
+            if len(t_cls) >= 20:
+                sma10_gt_20 = (sum(t_cls[-10:]) / 10) > (sum(t_cls[-20:]) / 20)
+
+            # Grade
+            if (avg_delta >= 1.5 and days_held >= 3) or (avg_delta >= 0.5 and near_high and days_held >= 2):
+                grade = "STRONG"
+            elif avg_delta >= 0.0 and days_held >= 1:
+                grade = "NEUTRAL"
+            else:
+                grade = "WEAK"
+
+            return {
+                "rs_grade":        grade,
+                "avg_rs_delta":    avg_delta,
+                "days_held":       days_held,
+                "near_recent_high": near_high,
+                "sma10_above_20":  sma10_gt_20,
+                "red_qqq_days":    len(red_pairs),
+            }
+        except Exception as _e:
+            logger.debug(f"[RS] Calc error: {_e}")
+            return _default
+
     def generate_tier2_iv_rank_alerts(self, universe=None, ivr_threshold=35.0):
         """
         Wheel Strategy IV Rank Scanner — dynamic universe, not a fixed watchlist.
@@ -882,6 +962,15 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             pass
 
+        # QQQ reference series for relative strength scoring (1 credit, fetched once)
+        _qqq_vals_ivr = []
+        try:
+            _qqq_ts = self._execute_query("time_series", {"symbol": "QQQ", "interval": "1day", "outputsize": "15"})
+            if _qqq_ts and "values" in _qqq_ts:
+                _qqq_vals_ivr = _qqq_ts["values"]
+        except Exception:
+            pass
+
         for symbol in universe:
             try:
                 hv30 = self.calculate_historical_volatility(symbol, lookback=30)
@@ -889,6 +978,19 @@ class HighFidelityAnalyticsEngine:
                 spot = float(spot_data.get("price", 0.0)) if spot_data else 0.0
                 if spot == 0.0:
                     continue
+
+                # Relative strength vs QQQ (15-bar daily series, 1 credit)
+                _sym_rs = {"rs_grade": "NEUTRAL", "avg_rs_delta": 0.0,
+                           "days_held": 0, "near_recent_high": False}
+                if _qqq_vals_ivr:
+                    try:
+                        _sym_ts = self._execute_query(
+                            "time_series", {"symbol": symbol, "interval": "1day", "outputsize": "15"}
+                        )
+                        if _sym_ts and "values" in _sym_ts:
+                            _sym_rs = self._calculate_relative_strength(_sym_ts["values"], _qqq_vals_ivr)
+                    except Exception:
+                        pass
 
                 # RSI-14 filter: skip overbought names (RSI > 65 = assignment risk on reversal)
                 try:
@@ -1016,25 +1118,34 @@ class HighFidelityAnalyticsEngine:
                     pass
 
                 iv_hv_ratio = round(float(atm_iv) / float(hv30), 2) if hv30 > 0 else None
+                _rs_rank = {"STRONG": 0, "NEUTRAL": 1, "WEAK": 2}.get(_sym_rs["rs_grade"], 1)
                 flagged.append({
-                    "symbol": symbol,
-                    "spot": spot,
-                    "iv": round(float(atm_iv), 1),
-                    "hv30": round(float(hv30), 1),
-                    "ivr_proxy": round(float(ivr_proxy), 1),
-                    "ivr_source": ivr_source,
-                    "iv_hv_ratio": iv_hv_ratio,
-                    "vrp": vrp,
-                    "spread_pct": round(spread_pct, 1),
-                    "strategy": "CSP (Cash-Secured Put)",
-                    "csp_setup": csp_setup,
-                    "div_yield": div_yield,
-                    "div_freq": div_freq,
-                    "div_amount": div_amount,
+                    "symbol":          symbol,
+                    "spot":            spot,
+                    "iv":              round(float(atm_iv), 1),
+                    "hv30":            round(float(hv30), 1),
+                    "ivr_proxy":       round(float(ivr_proxy), 1),
+                    "ivr_source":      ivr_source,
+                    "iv_hv_ratio":     iv_hv_ratio,
+                    "vrp":             vrp,
+                    "spread_pct":      round(spread_pct, 1),
+                    "strategy":        "CSP (Cash-Secured Put)",
+                    "csp_setup":       csp_setup,
+                    "div_yield":       div_yield,
+                    "div_freq":        div_freq,
+                    "div_amount":      div_amount,
+                    "rs_grade":        _sym_rs["rs_grade"],
+                    "rs_delta":        _sym_rs["avg_rs_delta"],
+                    "rs_days_held":    _sym_rs["days_held"],
+                    "rs_near_high":    _sym_rs["near_recent_high"],
+                    "rs_red_days":     _sym_rs.get("red_qqq_days", 0),
+                    "_rs_rank":        _rs_rank,
                 })
             except Exception as e:
                 logger.error(f"Tier 2 IV Rank screen failed for {symbol}: {e}")
 
+        # Sort: STRONG demand footprint first, then NEUTRAL, then WEAK
+        flagged.sort(key=lambda x: x.get("_rs_rank", 1))
         return flagged
 
     # ── Earnings Long Strangle Scanner ────────────────────────────────────────
@@ -3836,8 +3947,18 @@ class HighFidelityAnalyticsEngine:
                 "ss_mentions":   ss_scores.get(sym, {}).get("mentions"),
                 "ss_dominance":  ss_scores.get(sym, {}).get("dominance"),
             })
-        # HIGH before NEUTRAL; meme tickers sorted last within each tier
+        # HIGH before NEUTRAL; meme tickers sorted last within each tier.
+        # RS grade is computed post-fetch (inside the results loop) — initial sort by social score only.
         candidates.sort(key=lambda x: (-x["score"], x["is_meme"]))
+
+        # QQQ reference for relative strength (1 credit, fetched once; reused per symbol)
+        _qqq_vals_tp = []
+        try:
+            _qqq_tp = self._execute_query("time_series", {"symbol": "QQQ", "interval": "1day", "outputsize": "55"})
+            if _qqq_tp and "values" in _qqq_tp:
+                _qqq_vals_tp = _qqq_tp["values"]
+        except Exception:
+            pass
 
         results = []
         for c in candidates:
@@ -3857,6 +3978,12 @@ class HighFidelityAnalyticsEngine:
                 vol_today = float(vals[0].get("volume", 0))
                 vol_avg   = sum(float(v.get("volume", 0)) for v in vals[1:6]) / 5.0 if len(vals) >= 6 else None
                 vol_ratio = vol_today / vol_avg if vol_avg else 1.0
+
+                # ── Relative strength vs QQQ (reuses existing 55-bar series — zero extra credits)
+                _rs = self._calculate_relative_strength(vals, _qqq_vals_tp) if _qqq_vals_tp else {
+                    "rs_grade": "NEUTRAL", "avg_rs_delta": 0.0,
+                    "days_held": 0, "near_recent_high": False, "sma10_above_20": False,
+                }
 
                 # ── TA indicators from the 55-bar daily series
                 import pandas as _pd
@@ -3956,27 +4083,32 @@ class HighFidelityAnalyticsEngine:
                     }
 
                 results.append({
-                    "symbol":         sym,
-                    "spot":           spot,
-                    "chg_5d":         chg_5d,
-                    "vol_ratio":      vol_ratio,
-                    "rsi":            rsi,
-                    "sma50":          sma50,
-                    "ema21":          ema21,
-                    "vwap":           vwap,
-                    "ivr":            ivr,
-                    "ivr_tag":        ivr_tag,
-                    "ivr_days":       ivr_days,
-                    "earnings_flag":  earnings_flag,
-                    "earnings_date":  earnings_date,
-                    "insider_signal": insider_signal,
-                    "meter":          c["meter"],
-                    "lean":           c["lean"],
-                    "verdict":        verdict,
-                    "bto_setup":      bto_setup,
-                    "ss_score":       c.get("ss_score"),
-                    "ss_mentions":    c.get("ss_mentions"),
-                    "ss_dominance":   c.get("ss_dominance"),
+                    "symbol":          sym,
+                    "spot":            spot,
+                    "chg_5d":          chg_5d,
+                    "vol_ratio":       vol_ratio,
+                    "rsi":             rsi,
+                    "sma50":           sma50,
+                    "ema21":           ema21,
+                    "vwap":            vwap,
+                    "ivr":             ivr,
+                    "ivr_tag":         ivr_tag,
+                    "ivr_days":        ivr_days,
+                    "earnings_flag":   earnings_flag,
+                    "earnings_date":   earnings_date,
+                    "insider_signal":  insider_signal,
+                    "meter":           c["meter"],
+                    "lean":            c["lean"],
+                    "verdict":         verdict,
+                    "bto_setup":       bto_setup,
+                    "ss_score":        c.get("ss_score"),
+                    "ss_mentions":     c.get("ss_mentions"),
+                    "ss_dominance":    c.get("ss_dominance"),
+                    "rs_grade":        _rs["rs_grade"],
+                    "rs_delta":        _rs["avg_rs_delta"],
+                    "rs_days_held":    _rs["days_held"],
+                    "rs_near_high":    _rs["near_recent_high"],
+                    "rs_sma_stacked":  _rs.get("sma10_above_20", False),
                 })
             except Exception as e:
                 logger.error(f"[Social Scanner] Twelve Data check failed for {sym}: {e}")
