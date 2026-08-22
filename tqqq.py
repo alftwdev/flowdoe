@@ -430,6 +430,39 @@ class TQQQTacticalSniper:
             logger.error(f"TQQQ daily series fetch failed: {e}")
             return None
 
+    def _calc_tqqq_fib(self, tqqq_df, lookback=20) -> dict:
+        """
+        Fibonacci golden pocket zone from TQQQ's recent swing (last `lookback` bars).
+        fib_pct = how far current price has retraced from the window high toward the window low.
+        GOLDEN_POCKET (70.5-88.6%) = structural buy zone → CALL desk gets +6pts.
+        BROKEN (>88.6%) = structure compromised → CALL desk gets -4pts, PUT desk gets +4pts.
+        PREMIUM (<50%) = price near recent high → PUT desk gets +4pts.
+        """
+        _default = {"fib_zone": "MID", "fib_pct": 50.0}
+        try:
+            if tqqq_df is None or tqqq_df.empty or len(tqqq_df) < 5:
+                return _default
+            window = tqqq_df.tail(min(lookback, len(tqqq_df)))
+            swing_high = float(window["high"].max())
+            swing_low  = float(window["low"].min())
+            rng = swing_high - swing_low
+            if rng < 0.01:
+                return _default
+            current  = float(tqqq_df["close"].iloc[-1])
+            fib_pct  = (swing_high - current) / rng * 100.0
+            if fib_pct > 88.6:
+                zone = "BROKEN"
+            elif fib_pct >= 70.5:
+                zone = "GOLDEN_POCKET"
+            elif fib_pct >= 50.0:
+                zone = "MID"
+            else:
+                zone = "PREMIUM"
+            return {"fib_zone": zone, "fib_pct": round(fib_pct, 1)}
+        except Exception as _e:
+            logger.debug(f"[FIB/TQQQ] Calc error: {_e}")
+            return _default
+
     def fetch_vix(self):
         """
         The bare "VIX" symbol 404s on every Twelve Data endpoint at this plan tier (cash index
@@ -751,14 +784,14 @@ class TQQQTacticalSniper:
         structure_confirms = structure is not None and structure["bias"] == expected_bias
 
         if is_live:
-            title = f"TQQQ DIRECTIONAL SNIPER [10–21 DTE] | BTO {setup['contract']} EXECUTION"
+            title = f"TQQQ DIRECTIONAL TREND | BTO {setup['contract']} EXECUTION"
             status_tag = (
                 "🎯🎯 GOLDEN SETUP — STRUCTURE-CONFIRMED LIVE EXECUTION" if structure_confirms
                 else "🎯 GOLDEN SETUP — LIVE EXECUTION SIGNAL"
             )
             color = 0x2ecc71 if setup["contract"] == "CALL" else 0xe74c3c
         else:
-            title = f"TQQQ DIRECTIONAL SNIPER [10–21 DTE] | Setup Under Construction"
+            title = f"TQQQ DIRECTIONAL TREND | Setup Under Construction"
             reason = f" ({setup['downgrade_reason']} — downgraded from live execution)" if setup.get("downgrade_reason") else ""
             status_tag = f"⚠️ SETUP FORMING — Monitor Closely{reason}"
             color = 0xf1c40f
@@ -820,10 +853,14 @@ class TQQQTacticalSniper:
 
         # Embed 1: Market regime/conditions — the "why now" context
         regime_payload = (
-            f"QQQ Proxy | Macro: {macro} | Intraday: {posture}\n"
+            f"QQQ Proxy | Macro: {macro}\n"
             f"┣ QQQ Spot: `${setup['qqq_spot']:,.2f}` | VWAP: `${setup['qqq_vwap']:,.2f}`\n"
-            f"┣ VWAP Z-Score: `{setup['z_score']:+.2f}σ` | Volume Surge Z: `{setup['vol_z']:+.2f}σ`\n"
-            f"┣ ADX (14): `{adx_val:.1f}` {adx_tag} | MACD Hist: {macd_tag}\n"
+            f"┣ DTE: 10–21\n"
+            f"┣ VWAP Z-Score: `{setup['z_score']:+.2f}σ`\n"
+            f"┣ Volume Surge Z: `{setup['vol_z']:+.2f}σ`\n"
+            f"┣ Intraday: {posture}\n"
+            f"┣ ADX (14): `{adx_val:.1f}` {adx_tag}\n"
+            f"┣ MACD Hist: {macd_tag}\n"
             f"┣ VIXY `{setup['vix']:.2f}` (z `{setup['vix_z']:+.2f}σ` {vix_tag}) | Breadth: `{setup['breadth']:.0%}` {breadth_tag}\n"
             f"┗ ATR% (TQQQ daily range): `{setup['atr_pct_tqqq']:.1%}` {atr_tag}"
         )
@@ -831,7 +868,7 @@ class TQQQTacticalSniper:
         # Embed 2: Contract/execution — the "what to do" block
         _sniper_theta_dollar = abs(setup.get("bs_theta", 0.0) * 100)
         execution_payload = (
-            f"▸ **DIRECTIONAL SNIPER · Short-dated · 10–21 DTE** | Theta ~${_sniper_theta_dollar:.2f}/day per contract\n"
+            f"▸ **DIRECTIONAL TREND · Short-dated · 10–21 DTE** | Theta ~${_sniper_theta_dollar:.2f}/day per contract\n"
             f"TQQQ @ `${setup['tqqq_spot']:.2f}`\n"
             f"┣ 🎯 {setup['action']}: {contract_line}\n"
             f"{cost_line}"
@@ -1453,6 +1490,23 @@ class TQQQTacticalSniper:
         except Exception:
             pass  # DB unavailable — scorer continues without this signal
 
+        # ── Fibonacci golden pocket — TQQQ structural location (max +6 / -4) ─────
+        # Is TQQQ at a structurally optimal price level for a LEAP CALL entry?
+        # Golden pocket (70.5-88.6% retrace of recent 20-bar swing) = where buyers defend.
+        # Broken (>88.6%) = structure compromised — conviction required from other signals.
+        # PREMIUM (<50% retrace) = price still near the high — better for PUT desk.
+        _tqqq_fib = ext.get("tqqq_fib", {})
+        _fib_zone = _tqqq_fib.get("fib_zone", "MID")
+        _fib_pct  = _tqqq_fib.get("fib_pct", 50.0)
+        if _fib_zone == "GOLDEN_POCKET":
+            b += 6       # prime location for CALL — structural discount
+            t = max(0, t - 4)  # inversely bad for PUT desk (buyers likely to step in)
+        elif _fib_zone == "BROKEN":
+            b = max(0, b - 4)  # structure gone — dampen CALL confidence
+            t += 4       # extended selloff can persist → small PUT boost
+        elif _fib_zone == "PREMIUM":
+            t += 4       # price near recent high → PUT desk slightly favored
+
         # ── VIXY GATE — distribution suppressor ──────────────────────────────
         # Low VIXY (z < 0) on a red day = orderly selling, not capitulation.
         # Capitulation requires fear. Without fear, the CALL desk should not fire.
@@ -1592,6 +1646,9 @@ class TQQQTacticalSniper:
                 "VIXY_z<0 + bearish_MACD + below_EMA21" if is_distribution else ""
             ),
             "seasonal_scalar": _seasonal_scalar,
+            # Fib location — TQQQ structural context
+            "tqqq_fib_zone": _fib_zone,
+            "tqqq_fib_pct":  _fib_pct,
         }
         # Persist scores to DB for cross-script reads (market_analysis.py morning brief)
         db.update_state("tqqq_bottom_score", bottom_score)
@@ -1699,6 +1756,8 @@ class TQQQTacticalSniper:
             "vix9d": sigs.get("vix9d", 0.0),
             "vix3m": sigs.get("vix3m", 0.0),
             "real_vix": cycle.get("signals", {}).get("real_vix") if cycle else None,
+            "tqqq_fib_zone": sigs.get("tqqq_fib_zone", "MID"),
+            "tqqq_fib_pct":  sigs.get("tqqq_fib_pct", 50.0),
         }
 
     def enrich_leap_with_tradier_chain(self, leap_setup):
@@ -1896,12 +1955,22 @@ class TQQQTacticalSniper:
         real_vix_str = f" | VIX: `{real_vix:.1f}` (prev close)" if real_vix else ""
         pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}\n"
         gex_line = f"┣ GEX Environment: {gex_env}{real_vix_str}\n"
+        _lfib_zone = leap_setup.get("tqqq_fib_zone", "MID")
+        _lfib_pct  = leap_setup.get("tqqq_fib_pct", 50.0)
+        _lfib_icon = {"GOLDEN_POCKET": "🟢", "MID": "🟡", "PREMIUM": "🔴", "BROKEN": "⛔"}.get(_lfib_zone, "🟡")
+        _lfib_note = {
+            "GOLDEN_POCKET": "+6pts — structural buy zone",
+            "MID": "neutral location",
+            "PREMIUM": "price near recent high",
+            "BROKEN": "-4pts — structure compromised",
+        }.get(_lfib_zone, "neutral location")
+        fib_line = f"┣ TQQQ Fib Location: {_lfib_icon} `{_lfib_zone.replace('_',' ')}` · `{_lfib_pct:.0f}%` retrace — {_lfib_note}\n"
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
         score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
         regime_payload = (
             f"TQQQ LEAP Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + gex_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + gex_line + fib_line + score_line
         )
 
         # --- Embed 2: Contract setup ---
@@ -2220,6 +2289,8 @@ class TQQQTacticalSniper:
             "vix_term_slope": sigs.get("vix_term_slope", 0.0),
             "vix9d": sigs.get("vix9d", 0.0),
             "vix3m": sigs.get("vix3m", 0.0),
+            "tqqq_fib_zone": sigs.get("tqqq_fib_zone", "MID"),
+            "tqqq_fib_pct":  sigs.get("tqqq_fib_pct", 50.0),
         }
 
     def enrich_leap_put_with_tradier_chain(self, put_setup):
@@ -2426,9 +2497,19 @@ class TQQQTacticalSniper:
         score_line = f"┗ Top Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
         gex_put_line = f"┣ GEX Environment: {gex_env_put}\n"
+        _pfib_zone = put_setup.get("tqqq_fib_zone", "MID")
+        _pfib_pct  = put_setup.get("tqqq_fib_pct", 50.0)
+        _pfib_icon = {"GOLDEN_POCKET": "🔴", "MID": "🟡", "PREMIUM": "🟢", "BROKEN": "🟢"}.get(_pfib_zone, "🟡")
+        _pfib_note = {
+            "GOLDEN_POCKET": "-4pts for PUT desk — price at structural buy zone (buyers likely to defend)",
+            "MID": "neutral location",
+            "PREMIUM": "+4pts for PUT desk — price near recent high, favors reversal",
+            "BROKEN": "+4pts for PUT desk — structure compromised, downside may persist",
+        }.get(_pfib_zone, "neutral location")
+        fib_put_line = f"┣ TQQQ Fib Location: {_pfib_icon} `{_pfib_zone.replace('_',' ')}` · `{_pfib_pct:.0f}%` retrace — {_pfib_note}\n"
         context_payload = (
             f"QQQ LEAP PUT Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line2 + gex_put_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line2 + gex_put_line + fib_put_line + score_line
         )
 
         # Contract setup
@@ -2816,6 +2897,8 @@ class TQQQTacticalSniper:
         # Cycle position score — shared by both CALL and PUT desks.
         # RSI, 52w high/low, CNN F&G fetched once and reused for both directions.
         ext_metrics = self.fetch_qqq_extended_metrics()
+        # Fib golden pocket — inject TQQQ's structural location into the scorer at zero extra API cost.
+        ext_metrics["tqqq_fib"] = self._calc_tqqq_fib(tqqq_daily)
         cycle = self.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
         logger.debug(f"Cycle score — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
 
@@ -3000,6 +3083,7 @@ if __name__ == "__main__":
         if daily and intraday:
             daily["adx_macd"] = sniper.fetch_adx_macd()
             ext_metrics = sniper.fetch_qqq_extended_metrics()
+            ext_metrics["tqqq_fib"] = sniper._calc_tqqq_fib(tqqq_daily)
             cycle = sniper.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
             logger.info(f"Cycle scores — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
             leap_setup = sniper.evaluate_leap_entry(daily, intraday, vix_price, vix_z, breadth, tqqq_daily, cycle)
@@ -3018,11 +3102,13 @@ if __name__ == "__main__":
         sniper = TQQQTacticalSniper()
         daily = sniper.fetch_daily_baseline()
         intraday = sniper.fetch_intraday_metrics()
+        tqqq_daily = sniper.fetch_tqqq_daily_series()
         vix_price, vix_z = sniper.fetch_vix()
         breadth = sniper.fetch_breadth()
         if daily and intraday:
             daily["adx_macd"] = sniper.fetch_adx_macd()
             ext_metrics = sniper.fetch_qqq_extended_metrics()
+            ext_metrics["tqqq_fib"] = sniper._calc_tqqq_fib(tqqq_daily)
             cycle = sniper.calculate_cycle_score(daily, vix_z, breadth, ext_metrics)
             logger.info(f"Cycle scores — bottom: {cycle['bottom_score']}, top: {cycle['top_score']}")
             put_setup = sniper.evaluate_leap_put_entry(daily, intraday, vix_price, vix_z, breadth, cycle)

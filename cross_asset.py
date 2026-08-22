@@ -495,7 +495,6 @@ def build_board_payload(board, session_label, vix_regime=None, econ_alert=None, 
 
     rows_text = "\n".join(index_rows + commodity_rows)
     return (
-        f"⚡ FUTURES BOARD | {session_label}\n"
         f"{rows_text}\n"
         f"{vix_line}"
         f"{divergence_line}"

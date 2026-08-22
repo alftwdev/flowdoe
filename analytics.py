@@ -854,6 +854,38 @@ class HighFidelityAnalyticsEngine:
         "SPY", "QQQ", "IWM", "GLD", "XLE",
     ]
 
+    def _calculate_fib_zone(self, vals: list) -> dict:
+        """
+        Fibonacci golden pocket zone from recent price swing.
+        vals: list of OHLCV dicts, index 0 = most recent bar (Twelve Data order).
+        Zones: GOLDEN_POCKET (70.5-88.6% retrace) = structural buy zone for CSP
+               MID (50-70.5%) = neutral | PREMIUM (<50%) = price near high | BROKEN (>88.6%) = avoid
+        """
+        _default = {"fib_zone": "MID", "fib_pct": 50.0}
+        try:
+            n = len(vals)
+            if n < 5:
+                return _default
+            swing_high = max(float(v.get("high", v["close"])) for v in vals)
+            swing_low  = min(float(v.get("low",  v["close"])) for v in vals)
+            rng = swing_high - swing_low
+            if rng < 0.01:
+                return _default
+            current  = float(vals[0]["close"])
+            fib_pct  = (swing_high - current) / rng * 100.0
+            if fib_pct > 88.6:
+                zone = "BROKEN"
+            elif fib_pct >= 70.5:
+                zone = "GOLDEN_POCKET"
+            elif fib_pct >= 50.0:
+                zone = "MID"
+            else:
+                zone = "PREMIUM"
+            return {"fib_zone": zone, "fib_pct": round(fib_pct, 1)}
+        except Exception as _e:
+            logger.debug(f"[FIB] Calc error: {_e}")
+            return _default
+
     def _calculate_relative_strength(self, ticker_vals: list, qqq_vals: list) -> dict:
         """
         SMB Capital 'hidden relative strength' scorer.
@@ -979,16 +1011,18 @@ class HighFidelityAnalyticsEngine:
                 if spot == 0.0:
                     continue
 
-                # Relative strength vs QQQ (15-bar daily series, 1 credit)
-                _sym_rs = {"rs_grade": "NEUTRAL", "avg_rs_delta": 0.0,
-                           "days_held": 0, "near_recent_high": False}
+                # Relative strength + Fib zone (same 15-bar daily series, 1 credit total)
+                _sym_rs  = {"rs_grade": "NEUTRAL", "avg_rs_delta": 0.0,
+                            "days_held": 0, "near_recent_high": False}
+                _sym_fib = {"fib_zone": "MID", "fib_pct": 50.0}
                 if _qqq_vals_ivr:
                     try:
                         _sym_ts = self._execute_query(
                             "time_series", {"symbol": symbol, "interval": "1day", "outputsize": "15"}
                         )
                         if _sym_ts and "values" in _sym_ts:
-                            _sym_rs = self._calculate_relative_strength(_sym_ts["values"], _qqq_vals_ivr)
+                            _sym_rs  = self._calculate_relative_strength(_sym_ts["values"], _qqq_vals_ivr)
+                            _sym_fib = self._calculate_fib_zone(_sym_ts["values"])
                     except Exception:
                         pass
 
@@ -1140,6 +1174,8 @@ class HighFidelityAnalyticsEngine:
                     "rs_near_high":    _sym_rs["near_recent_high"],
                     "rs_red_days":     _sym_rs.get("red_qqq_days", 0),
                     "_rs_rank":        _rs_rank,
+                    "fib_zone":        _sym_fib["fib_zone"],
+                    "fib_pct":         _sym_fib["fib_pct"],
                 })
             except Exception as e:
                 logger.error(f"Tier 2 IV Rank screen failed for {symbol}: {e}")
@@ -3253,9 +3289,44 @@ class HighFidelityAnalyticsEngine:
                     f"\n💡 **HIGHEST-YIELD CC ETF THIS WEEK**\n"
                     f"┣ Ticker: `{etf_spot['symbol']}` | {etf_spot.get('family', '')} | {etf_spot.get('freq', '')} pay\n"
                     f"┣ Annualized Yield: `{etf_spot.get('ann_yield', 0):.1f}%` | Spot: `${etf_spot.get('spot', 0):.2f}`\n"
-                    f"┣ AUM: `{etf_spot.get('aum', 'N/A')}` | Next Est. Pay: `{etf_spot.get('next_ex_date', '—')}`\n"
-                    f"┗ These ETFs sell covered calls on tech/crypto/blue-chip baskets — you own the ETF and collect the premium income monthly.\n"
+                    f"┗ AUM: `{etf_spot.get('aum', 'N/A')}` | Next Est. Pay: `{etf_spot.get('next_ex_date', '—')}` (est.)\n"
                 )
+        except Exception:
+            pass
+
+        # ── ECOSYSTEM PULSE (DB reads — zero API calls) ───────────────────
+        # Shows live ecosystem posture: TQQQ cycle deck + CLM/CRF watchdog.
+        # These are the signals no other Discord server runs — surface them here.
+        pulse_block = ""
+        try:
+            _pulse_lines = []
+            # TQQQ 3× Cycle Deck
+            _b = self.db.get_state("tqqq_bottom_score")
+            _t = self.db.get_state("tqqq_top_score")
+            if _b is not None and _t is not None:
+                _bi, _ti = int(_b), int(_t)
+                if _bi >= 55:
+                    _deck = f"🔴 CALL DESK ACTIVE ({_bi}/100) — live entry flagged"
+                elif _ti >= 55:
+                    _deck = f"🔴 PUT DESK ACTIVE ({_ti}/100) — live entry flagged"
+                else:
+                    _deck = f"⚪ Monitoring — bottom `{_bi}` / top `{_ti}` of 100 (threshold: 55)"
+                _pulse_lines.append(f"┣ TQQQ 3× Cycle Desk: {_deck}")
+            # CLM/CRF premium z-score (the EDGAR N-2 watchdog layer)
+            _zc = self.db.get_state("clm_last_z_premium")
+            _zr = self.db.get_state("crf_last_z_premium")
+            if _zc is not None and _zr is not None:
+                _zci, _zri = float(_zc), float(_zr)
+                _max_z = max(abs(_zci), abs(_zri))
+                _prem_icon = "🟢" if _max_z < 1.5 else ("🟡" if _max_z < 2.0 else "🔴")
+                _prem_label = "safe zone" if _max_z < 1.5 else ("elevated — monitoring" if _max_z < 2.0 else "danger zone — alerting")
+                _pulse_lines.append(
+                    f"┣ CLM/CRF Watchdog: {_prem_icon} Premium z-score CLM `{_zci:+.2f}σ` · CRF `{_zri:+.2f}σ` — {_prem_label}"
+                )
+            if _pulse_lines:
+                # Convert last ┣ to ┗
+                _pulse_lines[-1] = _pulse_lines[-1].replace("┣", "┗", 1)
+                pulse_block = "\n🔭 **ECOSYSTEM PULSE**\n" + "\n".join(_pulse_lines) + "\n"
         except Exception:
             pass
 
@@ -3268,8 +3339,7 @@ class HighFidelityAnalyticsEngine:
             + "\n".join(sector_lines)
             + f"\n\n"
             f"{income_block}"
-            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"┗ Want the full morning report, TQQQ sniper entries, and live wheel trades? The complete system runs before, during, and after the market open — every session."
+            f"{pulse_block}"
         )
         return payload
 

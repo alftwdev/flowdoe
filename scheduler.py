@@ -703,11 +703,23 @@ def main():
                                 f"┣ RS vs QQQ: {_rs_icon} `{f.get('rs_grade','?')}` | "
                                 f"Avg outperformance: `{_rs_delta:+.1f}%` on `{_rs_days}/{_rs_red}` red-QQQ days{_rs_near}\n"
                             )
+                            # Fib golden pocket — CSP entry location quality
+                            _fib_zone = f.get("fib_zone", "MID")
+                            _fib_pct  = f.get("fib_pct", 50.0)
+                            _fib_icon = {"GOLDEN_POCKET": "🟢", "MID": "🟡", "PREMIUM": "🔴", "BROKEN": "⛔"}.get(_fib_zone, "🟡")
+                            _fib_note = {
+                                "GOLDEN_POCKET": "structural buy zone — optimal CSP location",
+                                "MID":           "neutral price range",
+                                "PREMIUM":       "price near recent high — less favorable CSP location",
+                                "BROKEN":        "structure broken — avoid until new swing forms",
+                            }.get(_fib_zone, "neutral price range")
+                            fib_line = f"┣ Fib Location: {_fib_icon} `{_fib_zone.replace('_',' ')}` · `{_fib_pct:.0f}%` retrace — {_fib_note}\n"
                             ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | {ivr_label}: `{f['ivr_proxy']:.0f}%` [{ivr_src}]\n"
                                 f"{iv_context}"
                                 f"{rs_line}"
+                                f"{fib_line}"
                                 f"{setup_line}"
                                 f"{div_line}"
                                 f"{assigned_line}"
@@ -1921,20 +1933,28 @@ def main():
                 try:
                     _crypto_radar = engine.fetch_crypto_community_intel()
                     if _crypto_radar and WEBHOOK_CRYPTO:
+                        _bull_kw = {"bull", "moon", "pump", "breakout", "accumulate", "buy", "bullish", "long", "rise", "surge", "rally", "ath", "support", "hold", "hodl", "green"}
+                        _bear_kw = {"bear", "dump", "crash", "sell", "short", "fall", "drop", "bearish", "resistance", "fud", "red", "liquidat", "rekt", "down"}
                         _cr_lines = []
                         for item in _crypto_radar:
                             sym      = item["ticker"]
                             mentions = item["mentions"]
-                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions")
+                            _titles_text = " ".join(item.get("titles", [])).lower()
+                            _bull_hits = sum(1 for w in _bull_kw if w in _titles_text)
+                            _bear_hits = sum(1 for w in _bear_kw if w in _titles_text)
+                            if _bull_hits > _bear_hits:
+                                _sent_icon, _sent_label = "🟢", "Bullish"
+                            elif _bear_hits > _bull_hits:
+                                _sent_icon, _sent_label = "🔴", "Bearish"
+                            else:
+                                _sent_icon, _sent_label = "🟡", "Neutral"
+                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions · {_sent_icon} {_sent_label}")
                         if _cr_lines:
                             _cr_lines[-1] = _cr_lines[-1].replace("┣", "┗", 1)
-                            _cr_payload = (
-                                "Social Buzz\n\n"
-                                + "\n".join(_cr_lines)
-                            )
+                            _cr_payload = "\n".join(_cr_lines)
                             send_essentials_embed(
                                 WEBHOOK_CRYPTO,
-                                "📡 CRYPTO COMMUNITY RADAR | Reddit",
+                                "CRYPTO SOCIAL BUZZ",
                                 _cr_payload, 0xf39c12
                             )
                             logger.info(f"Crypto community radar dispatched: {len(_crypto_radar)} tokens.")
@@ -2567,9 +2587,7 @@ def main():
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         + "\n\n".join(_embed_lines)
                         + f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"⚡ Best rate: `{_best['rate_pct']:.2f}%` → saves `${_savings_100k:,.0f}/yr` per $100k vs margin\n"
-                        f"📋 Section 1256 — SPX European-style. Log positions: "
-                        f"`python scheduler.py --mode box_position --action open ...`"
+                        f"⚡ Best rate: `{_best['rate_pct']:.2f}%` → saves `${_savings_100k:,.0f}/yr` per $100k vs margin"
                     )
 
                     _color = COLOR_GREEN if _savings_100k >= 2500 else (COLOR_YELLOW if _savings_100k >= 1000 else COLOR_RED)
