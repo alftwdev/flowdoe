@@ -1080,55 +1080,9 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"┗ Wheel params: {wheel_directive}\n"
     )
 
-    # ── SENTISENSE CONFLUENCE BLOCK ───────────────────────────────────────────
     # Congressional trades removed from morning brief (user preference Aug 2026).
     # Data still available via SentiSense API — can be surfaced on demand.
     ss_section = ""
-    if False:  # disabled — congressional trades removed from morning brief
-        import sentisense_client as ss
-
-        # Market Mood via CNN Fear & Greed (tqqq.py writes fg_last_known_score daily)
-        _fg_raw = db.get_state("fg_last_known_score")
-        if _fg_raw is not None:
-            _fg_val = float(_fg_raw)
-            if _fg_val <= 25:
-                _fg_label, _fg_emoji = "Extreme Fear", "🔴"
-            elif _fg_val <= 40:
-                _fg_label, _fg_emoji = "Fear", "🟠"
-            elif _fg_val >= 75:
-                _fg_label, _fg_emoji = "Extreme Greed", "🟢"
-            elif _fg_val >= 60:
-                _fg_label, _fg_emoji = "Greed", "🟡"
-            else:
-                _fg_label, _fg_emoji = "Neutral", "⚪"
-            mood_line = f"┣ CNN F&G: {_fg_emoji} `{_fg_val:.0f}` · {_fg_label}\n"
-        else:
-            mood_line = ""
-
-        # Congressional trades — recent disclosures only (30-day filter prevents stale entries)
-        from datetime import date as _ct_date, timedelta as _ct_td
-        _cutoff = (_ct_date.today() - _ct_td(days=30)).isoformat()
-        trades = ss.get_congressional_trades(db, limit=8)   # fetch more, filter down
-        trades = [t for t in (trades or []) if (t.get("date") or "") >= _cutoff][:4]
-        trade_lines = ""
-        if trades:
-            trade_lines = "┣ Congressional trades (STOCK Act — last 30d):\n"
-            for t in trades:
-                party_tag = f"({t['party']}-{t['state']})" if t.get("party") and t.get("state") else ""
-                trade_lines += (
-                    f"  ┣ {t['politician']} {party_tag}: "
-                    f"{t['action']} **{t['ticker']}** {t['amount']} ({t['date']})\n"
-                )
-
-        if mood_line or trade_lines:
-            ss_section = (
-                "\n**MARKET INTELLIGENCE (SentiSense)**\n"
-                + mood_line
-                + trade_lines
-                + "┗ Source: SentiSense API — sentiment + STOCK Act filings\n"
-            )
-    except Exception as e:
-        logger.warning(f"Morning: SentiSense section failed: {e}")
 
     description = market_structure_section + macro_section + equity_section + signals_section + ss_section + directives_section
     title = f"MORNING BRIEF — {now_label}"

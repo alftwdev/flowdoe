@@ -752,7 +752,7 @@ def build_income_intel(engine, tradier, ticker: str) -> tuple:
             tc = db.get_state(f"{ticker.lower()}_dist_tax_char") or {}
             if isinstance(tc, dict) and "roc_pct" in tc:
                 ann_d  = _ANN_DIST[ticker]
-                nav    = float(db.get_state(f"{ticker.lower()}_last_nav") or (6.45 if ticker == "CLM" else 6.18))
+                nav    = float(db.get_state(f"{ticker.lower()}_last_nav") or (6.73 if ticker == "CLM" else 6.18))
                 hl_y   = ann_d / nav * 100
                 marg   = float(os.getenv("MARGINAL_TAX_RATE", "22")) / 100
                 at_y   = hl_y * (tc["roc_pct"]/100 * 1.0 + tc["qdi_pct"]/100 * 0.85 + tc["ord_pct"]/100 * (1 - marg))

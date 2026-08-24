@@ -63,7 +63,6 @@ WEBHOOK_DIVIDEND       = os.getenv("WEBHOOK_DIVIDEND_CCETFS")
 WEBHOOK_FUTURES        = os.getenv("WEBHOOK_FUTURES_TRADING")
 WEBHOOK_CRYPTO         = os.getenv("WEBHOOK_CRYPTO")
 WEBHOOK_FED            = os.getenv("WEBHOOK_FED")
-WEBHOOK_FOREX          = os.getenv("WEBHOOK_FOREX")  # retained in .env; channel deprecated but key preserved
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 

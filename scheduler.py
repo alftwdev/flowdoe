@@ -2246,7 +2246,7 @@ def main():
                     # After-tax effective yield: ROC deferred, QDI at 15%, ord at marginal rate
                     # Uses fallback NAV to compute headline yield denominator
                     _nav = float(engine.db.get_state(f"{_tc_sym.lower()}_last_nav") or
-                                 (6.45 if _tc_sym == "CLM" else 6.18))
+                                 (6.73 if _tc_sym == "CLM" else 6.18))
                     _headline_yield = _ann_dist / _nav * 100
                     _after_tax_yield = _headline_yield * (
                         _roc * 1.0        # ROC: not taxed now (deferred)

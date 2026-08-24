@@ -75,8 +75,10 @@ SCHEDULE = [
     (18, 45, "cross_asset_pm",     "cross_asset",  [],                            True),  # 08:45 HST (mid-session)
     # ── Market Analysis & Macro ──────────────────────────────────────────────────
     (12, 50, "morning",            "scheduler",    ["--mode", "morning"],         True),
-    # gex removed — calculate_gex_profile() returns 0.0 at this Twelve Data tier;
-    # output is always UNKNOWN/suppressed and wastes a subprocess launch.
+    # gex SCHEDULED MODE removed — the standalone cron dispatch was removed because
+    # calculate_gex_profile() returns 0.0 at this Twelve Data tier (no per-strike OI).
+    # GEX calculations remain active in monitor.py, cross_asset.py, and analytics.py
+    # for internal signal use. Re-enable this mode once Tradier OI is confirmed stable.
     # ORB scan: first read at 9:50 ET = 14:50 UTC (15-min window closes at 9:45 ET)
     (14, 50, "orb_scan",          "scheduler",    ["--mode", "orb_scan"],        True),
     (13, 28, "macro_am",           "scheduler",    ["--mode", "macro"],           True),
