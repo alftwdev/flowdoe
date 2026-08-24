@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Aug 11 2026 (research backtest sweep — 6 strategy hardening improvements + #market-analysis refactor)*
+*Last updated: Aug 23 2026 (active RO — Path C intra-RO entry zone added to monitor.py; CLM NAV fallback corrected to 6.73 per Aug 14 N-2 EDGAR filing)*
 
 ---
 
@@ -54,8 +54,8 @@ CRF_ANNUAL_DIST = 1.3824   # $0.1152/month × 12
 CLM_FAIR_VALUE  = 7.51
 CRF_FAIR_VALUE  = 7.28
 
-# NAV fallbacks (updated Jul 23 2026 — refresh whenever CEFConnect NAV changes >0.10)
-CLM_NAV_FALLBACK = 6.45
+# NAV fallbacks (CLM updated Aug 16 2026 per N-2 EDGAR filing Aug 14; refresh whenever CEFConnect NAV changes >0.10)
+CLM_NAV_FALLBACK = 6.73   # was 6.45 — corrected Aug 16 2026 per N-2 EDGAR filing Aug 14
 CRF_NAV_FALLBACK = 6.18   # was 6.30 — corrected Jul 23 2026 based on implied NAV math
 
 # Margin rate (E*TRADE)
