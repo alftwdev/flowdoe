@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Aug 23 2026 (active RO — Path C intra-RO entry zone added to monitor.py; CLM NAV fallback corrected to 6.73 per Aug 14 N-2 EDGAR filing)*
+*Last updated: Aug 23 2026 — weekly maintenance protocol added (§0-F); active RO ongoing; Path C intra-RO entry zone live; CLM NAV 6.73; CRF at $7.175 (below FV $7.28 — accumulate zone)*
 
 ---
 
@@ -499,6 +499,301 @@ Channel routing (locked — never change):
 3. Confirm OCC margin requirement for your account type (usually just the net debit)
 4. Run `python scheduler.py --mode box_spread_scan` to verify Tradier chain pulls correctly
 5. Practice with paper: verify the 4 legs at mid-prices sum to the expected credit
+
+---
+
+## 0-F. Weekly Maintenance Protocol (Weekend Audit)
+
+This section is the institutional-grade maintenance playbook. Run it every weekend — ideally Saturday after close. It catches signal drift, stale data, DB rot, and script regressions before they affect Monday's trades.
+
+### The Paste-Ready Weekend Prompt
+
+Copy and paste this at the start of every weekend Claude Code session:
+
+```
+Weekend maintenance sweep. Work through each checkpoint in order and report findings + recommended actions.
+
+1. DB HEALTH — Run python db_tools.py first (daily maintenance + prune). Then check these critical keys:
+   vixy_price_realtime · clm/crf_last_price · clm/crf_last_nav · clm/crf_last_z_premium
+   market_analysis_bias (flag if date > 2 days ago) · tqqq_bottom_score · tqqq_top_score
+   hy_spread_cached · vix_126d_history · fred_yield_spread · vix_term_slope · tqqq_breadth_cache
+   box_spread_best_rate · iv_daily row count · signal_ledger PENDING count
+   dark_pool_session_hist_CLM/CRF · ro_dodge_active_CLM/CRF · ro_n2_detected_CLM/CRF
+   Flag any key that is None when it should have a value. Flag market_analysis_bias if stale.
+
+2. STRATEGY STATUS — CLM/CRF prices vs fair value floors ($7.51 / $7.28). Active RO? Path A/B/C
+   re-entry signals fired? Carry spread ≥ 5% (Tier 2 blended yield − 7.25% margin rate)?
+   Open wheel positions: DTE countdown, any earnings within 21 days? LEAP desk: was VIXY elevated
+   this week? Did any CALL/PUT signal fire?
+
+3. SCRIPT HEALTH — Verify all 5 PA always-on tasks are healthy:
+   market_scheduler.py · monitor.py · market_analysis.py · tqqq.py · stream.py
+   Check that market_analysis_bias is fresh. Check stream.py is writing vixy_price_realtime.
+   Check iv_daily has new rows from this week's 21:30 UTC store_daily_iv cron.
+
+4. SIGNAL AUDIT — Review signal_ledger: any PENDING predictions overdue for grading?
+   Review #cornerstone for ELEVATED/CRITICAL events this week. Any dark pool flags fire?
+   Any premium compression alerts? Any SEC EDGAR N-2 or SC 13D/G detections?
+
+5. DATA FRESHNESS — fred_macro_snapshot within 7 days? hy_spread_cached populated?
+   cef_premium_log has this week's entries? box_spread_best_rate populated?
+   vix_126d_history accumulating (critical for Kelly regime detection)?
+
+6. CRYPTO + FUTURES CHECK — vix_term_slope direction (backwardation = risk-off).
+   tqqq_vix_backwardation_active: set or clear? tqqq_breadth_cache: above or below 50%?
+   BTC fear/greed direction. Any smart money L/S divergence this week?
+
+7. OPEN SOURCE SWEEP — any new arXiv quant-finance preprints relevant to our signals
+   (vol forecasting, CEF premium dynamics, PCR predictive power)? CBOE VIX term structure
+   updated? Alternative.me F&G API returning cleanly? SEC EDGAR N-2 search for CLM (CIK
+   0000814083) and CRF (CIK 0000033934) for any new filings this week?
+
+8. CLAUDE.md SYNC — any new constants, script changes, or learned behaviors from this
+   week that are NOT yet reflected in CLAUDE.md? Any stale entries to remove?
+   Update 'Last updated' line if anything changes.
+
+Report a concise punch list: ✅ healthy / ⚠️ degraded / ❌ broken for each area. Then list
+recommended actions in priority order (critical first).
+```
+
+---
+
+### Institutional-Grade Maintenance Checklist (Full Detail)
+
+#### A. DB Health — The Trading Journal
+
+The SQLite DB is the system's trading journal and cross-script state bus. Treat it like a
+production database: any None value in a critical key means a script died or a feed is down.
+
+**Critical key checklist (run every weekend):**
+```python
+python3 -c "
+from database import EcosystemDatabase
+import json, sqlite3
+db = EcosystemDatabase()
+
+keys = [
+    'vixy_price_realtime',        # stream.py heartbeat — None = stream.py dead
+    'clm_last_price', 'crf_last_price',
+    'clm_last_nav', 'crf_last_nav',
+    'clm_last_z_premium', 'crf_last_z_premium',
+    'market_analysis_bias',        # stale if date > 2 days = market_analysis.py dead
+    'tqqq_bottom_score', 'tqqq_top_score',
+    'hy_spread_cached',            # None = FRED unreachable (falls back to last cached)
+    'vix_126d_history',            # None = Kelly sizer using defaults — investigate
+    'fred_yield_spread',
+    'vix_term_slope',              # computed by tqqq.py
+    'tqqq_breadth_cache',
+    'box_spread_best_rate',
+    'ro_dodge_active_CLM', 'ro_dodge_active_CRF',
+    'dark_pool_session_hist_CLM', 'dark_pool_session_hist_CRF',
+]
+for k in keys:
+    v = db.get_state(k)
+    ok = v is not None and v != '' and v != 'None'
+    tag = '✅' if ok else '❌'
+    display = str(v)[:70] if v else 'None'
+    print(f'{tag}  {k}: {display}')
+
+# market_analysis_bias staleness
+bias = db.get_state('market_analysis_bias')
+if bias:
+    b = json.loads(bias) if isinstance(bias, str) else bias
+    print(f'    bias date: {b.get(\"date\")} label: {b.get(\"label\")} score: {b.get(\"score\")}')
+
+# IV accumulation count
+conn = sqlite3.connect(db.db_path)
+c = conn.cursor()
+c.execute('SELECT COUNT(*) FROM iv_daily'); print(f'iv_daily rows: {c.fetchone()[0]}')
+c.execute(\"SELECT COUNT(*) FROM signal_ledger WHERE outcome='PENDING'\"); print(f'PENDING signals: {c.fetchone()[0]}')
+c.execute('SELECT COUNT(*) FROM cef_premium_log'); print(f'cef_premium_log rows: {c.fetchone()[0]}')
+conn.close()
+"
+```
+
+**What each None means:**
+| Key | None means | Fix |
+|-----|-----------|-----|
+| `vixy_price_realtime` | stream.py dead | Restart stream.py on PA |
+| `market_analysis_bias` stale | market_analysis.py dead | Restart on PA |
+| `hy_spread_cached` | FRED unreachable | Will self-heal; check FRED_API_KEY |
+| `vix_126d_history` | tqqq.py hasn't written yet | Run tqqq.py manually once |
+| `tqqq_bottom_score` | tqqq.py dead or low signal | Normal if market calm |
+| `box_spread_best_rate` | Tradier API issue or market closed | Ignore on weekend |
+
+**DB maintenance commands:**
+```bash
+python db_tools.py                 # daily maintenance + prune (safe to run anytime)
+python db_tools.py --purge-stale   # one-time: drop dead tables, grade overdue PENDING
+python db_tools.py --seed-premiums # one-time: rebuild CLM/CRF z-score baseline
+python db_tools.py --rescue        # emergency: DB corruption recovery
+```
+
+**signal_ledger grading rule:**
+`clm_floor` PENDING signals grade as WIN if price stayed ≥ fair value by target_date, LOSS if not.
+`db_tools.py --purge-stale` auto-grades any PENDING signal where target_date has passed.
+Run it whenever PENDING count > 3.
+
+#### B. Script Health — Process Verification
+
+```bash
+# On PA — check all 5 always-on tasks are alive
+ps aux | grep -E "monitor|market_scheduler|market_analysis|tqqq|stream" | grep -v grep
+
+# Check PA logs for silent errors (last 50 lines per script)
+tail -50 ~/scripts/logs/market_analysis.log
+tail -50 ~/scripts/logs/monitor.log
+tail -50 ~/scripts/logs/tqqq.log
+```
+
+**Freshness gates:**
+- `market_analysis_bias` date must be within 2 days (fires daily at 13:10 UTC)
+- `vixy_price_realtime` must be non-None during market hours (stream.py writes on tick)
+- `iv_daily` must have new rows this week (cron at 21:30 UTC weekdays)
+- `cef_premium_log` must have this week's date (monitor.py writes on pulse)
+
+#### C. Signal & Strategy Audit
+
+**Weekly signal review:**
+1. Any ELEVATED or CRITICAL events in #cornerstone this week?
+2. Did dark_pool_session_hist_{ticker} ever hit [1,1,x] pattern (2-of-3 trigger)?
+3. Did any premium compression alert fire (≤ -3% intra-session)?
+4. Did SEC EDGAR watcher catch any new N-2 or SC 13D/G filings?
+5. Were any TQQQ LEAP CALL or PUT entries triggered? Were they in the 2-hour cooldown?
+6. Did the intraday VIX resolution bonus fire (VIXY/VXZ crossing back below 1.0)?
+
+**CLM/CRF position math (run each week):**
+```
+Fair value check:
+  CLM: annual_dist / 0.19 = $1.4268 / 0.19 = $7.51 (accumulate at or below)
+  CRF: annual_dist / 0.19 = $1.3824 / 0.19 = $7.28 (accumulate at or below)
+
+Active RO check:
+  ro_dodge_active_CLM/CRF set? → RO in progress; Paths A/B/C active
+  If set + price ≤ NAV ($6.73 CLM / $6.18 CRF) → Path C Tier 1 (NAV entry) should have fired
+  If set + price ≤ FV ($7.51/$7.28) → Path C Tier 2 (FV entry) should have fired
+  If set + 30+ days since N-2 → Path A active (premium collapse + price off 60D high)
+  If set + 45+ days since N-2 → Path B active (yield floor re-entry)
+```
+
+#### D. Open Source Data Feeds — Staying Current
+
+These are free, institutionally-tracked data sources to verify against our internal signals:
+
+**Price & Volatility:**
+- **CBOE VIX term structure** (free daily download): `cboe.com/us/options/market_statistics/daily/` — VIX9D, VIX3M, VIX6M, VIX1Y. Cross-check `vix_term_slope` in DB.
+- **CBOE P/C ratios** (daily): Same CBOE page — equity and index P/C. Cross-check our SPY P/C z-score.
+- **FRED VIXCLS** — actual VIX (already integrated): `fred.stlouisfed.org/series/VIXCLS`
+- **Alternative.me F&G API** (zero auth): `api.alternative.me/fng/` — crypto fear & greed. Already integrated but worth checking weekly.
+
+**Macro & Credit:**
+- **FRED dashboard** (integrated): HY spread `BAMLH0A0HYM2`, yield curve `DGS10-DGS2`, Fed Funds `FEDFUNDS`, CPI `CPIAUCSL`, unemployment `UNRATE`. All cached daily.
+- **CME FedWatch tool** (free): `cmegroup.com/markets/interest-rates/cme-fedwatch-tool.html` — probability distribution for next FOMC decision. Good for carry spread context.
+- **Treasury yield curve** (free JSON): `home.treasury.gov/resource-center/data-chart-center/interest-rates/` — daily par yield curve rates.
+
+**CEF & Options Research:**
+- **CEFConnect** (free): `cefconnect.com` — live NAV, premium/discount history for CLM/CRF. Source for z-score calibration. Cross-check `cef_calibrate` mode output.
+- **SEC EDGAR EFTS** (free API): Check for new CLM/CRF filings each week:
+  ```
+  https://efts.sec.gov/LATEST/search-index?q=%22cornerstone+strategic%22&forms=N-2,N-2/A&dateRange=custom&startdt=YYYY-MM-DD
+  ```
+- **EDGAR full-text search** for SC 13D/G (large holder changes):
+  ```
+  https://efts.sec.gov/LATEST/search-index?q=%22CLM%22+%22cornerstone%22&forms=SC+13D,SC+13G&dateRange=custom&startdt=YYYY-MM-DD
+  ```
+- **OpenInsider** (free scraping): `openinsider.com` — Form 4 insider cluster buys. Cross-check `get_insights()` from SentiSense.
+
+**Crypto:**
+- **CoinGlass** (free tier): `coinglass.com/api` — BTC/ETH OI, funding rates, liquidation heatmaps. More granular than Binance FAPI.
+- **Binance FAPI** (already integrated, free): OI `fapi.binance.com/fapi/v1/openInterest`, L/S `fapi.binance.com/futures/data/globalLongShortAccountRatio`.
+- **Glassnode lite** (free signals): `glassnode.com/bitcoin-fundamentals-report` — on-chain weekly digest. MVRV, NUPL, exchange netflow. Cross-check `btc_mvrv_proxy` DB key.
+
+**Quantitative Research (Signal Hardening):**
+- **arXiv quant-finance** (free preprints): `arxiv.org/list/q-fin/recent` — filter for vol forecasting, CEF, options pricing. Run a weekly scan for new papers.
+- **SSRN finance** (free preprints): Search for CEF discount dynamics, covered call ETF yield, VIX term structure predictive power.
+- **QuantPedia** (free tier): `quantpedia.com/strategies/` — validated backtests. Good for checking if any new research validates/invalidates our VRP gate or Kelly approach.
+- **The Journal of Derivatives** (abstracts free): Options pricing, volatility surface research.
+
+**What to do with open source findings:**
+- If a new paper changes a weight or threshold (like the P/C z-score weight cut from 15→8pts in Aug 2026) → update the relevant constant and log in CLAUDE.md.
+- If a new free data endpoint adds a signal we don't have → evaluate against the 3-signal anti-bloat rule (must replace or meaningfully enhance an existing signal, not just add noise).
+- If CBOE VIX term data contradicts `vix_term_slope` in DB → investigate tqqq.py VIXY/VXZ ratio calculation.
+
+#### E. Futures & Crypto Channel Integrity
+
+**Futures (`cross_asset.py` → #futures-trading):**
+- Fires 4× daily: 07:00, 12:35, 14:00, 18:45 UTC (change-gated, not always a new embed)
+- Check: `/ES` and `/NQ` levels populated, yield curve (T10−T2) fresh, IB breakout scanner running
+- DB dependency: `fred_yield_spread` (should be non-None), `gex_profile_SPY` (informational)
+- Cross-check: `vix_term_slope` from tqqq.py matches CBOE VIX term structure direction
+
+**Crypto (`scheduler.py --mode crypto_social` → #crypto):**
+- Fires weekdays at 13:50 UTC
+- Check: Binance FAPI returning real OI + L/S ratios (not zeros — PA egress may block Binance FAPI occasionally)
+- Check: SentiSense `get_market_mood()` returning score (not None)
+- Check: BTC MVRV proxy in DB (`btc_mvrv_proxy`) fresh within 7 days
+- If Binance FAPI returns zeros on PA: check PA network egress rules — Binance `fapi.binance.com` must be reachable
+
+**VIX integrity (`tqqq.py` + `stream.py`):**
+- `stream.py` writes raw VIXY price to `vixy_price_realtime`
+- `tqqq.py` independently fetches VIXY 20-bar series via TD REST and computes z-score
+- `vix_term_slope` = VIXY/VXZ ratio; backwardation (<0) = sustained fear; contango (>0) = calm
+- `tqqq_vix_backwardation_active` in DB: set when ratio > 1.0; cleared when ratio drops back < 1.0
+- Cross-check: `fred_vixcls` from FRED vs VIXY proxy — if they diverge > 20% → investigate
+- `vix_126d_history`: should be accumulating in DB (list of daily VIX values, max 252). If None → tqqq.py never wrote it. Run `python tqqq.py` locally once to seed.
+
+#### F. Code Version & Dependency Hygiene
+
+```bash
+# Confirm PA is running the same version as local main
+git log --oneline -3           # local HEAD
+# On PA: git log --oneline -3 — should match
+
+# Check for outdated packages with known CVEs
+pip list --outdated 2>/dev/null | head -20
+
+# Check import health — any script that fails to import has a silent always-on crash
+python -c "import monitor, market_analysis, scheduler, tqqq, stream, cross_asset, analytics, database" 2>&1
+
+# Syntax check all scripts (catches the class of error that killed market_analysis.py Aug 23)
+python -m py_compile monitor.py market_analysis.py scheduler.py tqqq.py stream.py cross_asset.py analytics.py 2>&1
+```
+
+**Version discipline:**
+- Every change to a constant in CLAUDE.md `0-B` must also be verified in ALL scripts that use it.
+- After any NAV update: check `monitor.py`, `research_bot.py`, `scheduler.py`, `daily_pulse.py` — all four reference CLM/CRF NAV fallbacks.
+- After any distribution reset: check `monitor.py` `check_distribution_yield_floor()` AND `get_ticker_report()` — both paths must use the same constant (the Jul 23 2026 dual-path bug).
+
+#### G. What "Institutional Firms" Do That We Replicate
+
+| Institutional practice | Our equivalent |
+|------------------------|---------------|
+| Daily P&L reconciliation | `daily_pulse.py` SimpleFIN balance vs previous day |
+| Model parameter review | Weekly CLAUDE.md review — constants match EDGAR/CEFConnect reality |
+| Data vendor health check | API credit count, FRED/TD/Tradier response time check |
+| Signal false-positive audit | signal_ledger PENDING grading; alert count vs threshold tuning |
+| Position limits enforcement | 25% combined leverage cap; 30% max wheel margin |
+| Correlation drift monitoring | `check_macro_correlation()` in monitor.py — CLM/CRF vs SPY |
+| Risk model recalibration | `calibrate_cef_premium_zscore()` — weekly CEF z-score mu/sigma update |
+| Research pipeline | arXiv/SSRN/QuantPedia sweep; apply validated findings to signal weights |
+| Disaster recovery drill | Verify `db_tools.py --rescue` can recover; confirm .env backup |
+| Deployment parity check | PA git SHA == local git SHA — no silent divergence |
+| Log triage | PA task logs weekly — find silent exceptions before they become outages |
+
+#### H. Known DB State as of Aug 23 2026 (baseline for future audits)
+
+```
+market_analysis_bias: STALE (2026-07-15) → resolves on market_analysis.py PA restart after SyntaxError fix
+vix_126d_history: None → investigate on PA; tqqq.py must seed this key
+iv_daily: 0 rows locally (may have rows on PA from store_daily_iv cron)
+signal_ledger: 4 PENDING (clm_floor CLM+CRF × 2 dates: Jul 23, Aug 13)
+  → run python db_tools.py --purge-stale to grade any whose target_date has passed
+cef_premium_log: 4 entries (Jul 23 + Aug 13 for CLM and CRF)
+ro_dodge_active_CLM/CRF: 2026-08-14 (active RO, 9 days elapsed as of this writing)
+  → Path C Tier 2 eligible: CRF $7.175 ≤ FV $7.28 → re-entry signal should fire on next monitor tick
+CLM at exactly $7.51 = fair value floor (Path C Tier 2 eligible if price ticks below)
+global_state: 228 rows — healthy
+```
 
 ---
 
@@ -1071,7 +1366,7 @@ WEBHOOK_DIVIDEND_CCETFS=
 WEBHOOK_FUTURES_TRADING=
 WEBHOOK_CRYPTO=
 WEBHOOK_FED=
-WEBHOOK_FOREX=               # key retained, channel deprecated
+WEBHOOK_FOREX=               # .env key retained; channel deprecated; removed from monitor.py Aug 23 2026
 WEBHOOK_INCOME=              # used by mlpi_entry mode
 
 # API Keys
@@ -1220,25 +1515,27 @@ At Year 10: flip CLM/CRF DRIP to cash → ~$9,800/month gross portfolio income.
 - [x] Research journal entries — 7 informational findings stored in DB as `research_journal_2026-08-11_*` keys (MLPI validation, CEF discount env, PCR index weaker, VIX backwardation rarity, RO oversubscribe note, CEF half-life, wheel backtest IVR essential) (✅ Aug 11)
 
 ### Weekly Audit Cadence (ongoing discipline)
-Capital is deployed and compounding. Each week, check for signals that slipped through:
-1. **Did any monitor.py signals fire?** — Review #cornerstone for any ELEVATED/CRITICAL events
-2. **Carry spread still ≥ 5%?** — Personal scorecard (Sunday Pushover) surfaces this
-3. **Open wheel positions clean?** — DTE countdown, any earnings within 21 days?
-4. **LEAP scorer calibrated?** — Did any CALL/PUT signals fire? Was VIXY elevated?
-5. **CLM/CRF at or below fair value?** — CLM $7.51 | CRF $7.28; accumulate if at or below
-6. **Is October approaching?** — NAV lock month; review premium and position size
+→ Full protocol and paste-ready weekend prompt: **see §0-F**
 
-### Deployment Checklist (pending on PA — Aug 2026)
+Quick reference — the 6 mandatory checks:
+1. **monitor.py signals** — Review #cornerstone for ELEVATED/CRITICAL events this week
+2. **Carry spread ≥ 5%?** — Sunday Pushover (personal_scorecard) surfaces this automatically
+3. **Open wheel positions** — DTE countdown, earnings within 21 days?
+4. **LEAP scorer** — Any CALL/PUT signal fire? Was VIXY z ≥ +1.5σ? VIX resolution bonus fire?
+5. **CLM/CRF vs fair value** — CLM ≤ $7.51 / CRF ≤ $7.28 = accumulate zone (both active Aug 23 2026)
+6. **October approaching?** — NAV lock month; heighten all CLM/CRF sensitivity; watch institutional exit detector
+
+### Deployment Checklist (current — Aug 2026)
 ```bash
-cd ~/flowdoe_dev && git pull origin main
+cd ~/scripts && git pull origin main
 ```
-Then restart in this order:
-1. `market_scheduler.py` — picks up removed `market_intraday` + `macro_pm` entries
-2. `market_analysis.py` — picks up 13:10 UTC timing shift + new morning brief sections
-3. `monitor.py` — picks up dark pool multi-session clustering
-4. `tqqq.py` — picks up VIX resolution bonus + P/C weight reduction
+Restart in this order (after the Aug 23 2026 commit batch):
+1. **`market_analysis.py` first** — critical SyntaxError fix restores morning brief + `market_analysis_bias` DB key
+2. `monitor.py` — Path C intra-RO entry zone now live (active RO: CLM/CRF dodge active since Aug 14)
+3. `market_scheduler.py` — GEX comment clarified; no functional changes
+4. `tqqq.py` — VIX resolution bonus + P/C weight reduction from Aug 11
 
-One-time (if not already done):
+One-time (if not already done on PA):
 ```bash
 python db_tools.py --seed-premiums   # CLM/CRF z-score mu/sigma
 ```
