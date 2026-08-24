@@ -592,6 +592,54 @@ def main():
             except Exception as e:
                 logger.error(f"Social-first CC ETF radar failed: {e}")
 
+            # ── SEGMENT 3: DIVIDEND HUNT | Ex-Div Radar ───────────────────────
+            # Sources: Nasdaq public calendar API (free, no auth) + Twelve Data
+            # spot price for yield calculation. Scans next 7 days; extends to 14
+            # on quiet weeks (< 3 quality results). Filters to quality optionable
+            # universe and flags wheel-eligible tickers for double-income framing.
+            # Daily-deduped — fires once per calendar day, no repeat on re-runs.
+            try:
+                hunt = engine.generate_exdiv_hunt()
+                if hunt:
+                    hunt_lines = []
+                    for i, h in enumerate(hunt):
+                        prefix    = "┗" if i == len(hunt) - 1 else "┣"
+                        wheel_tag = "⚙️ Wheel-eligible" if h["wheel"] else "📈 Div play"
+                        yield_str = f" · `{h['yield_pct']:.1f}%` yield" if h["yield_pct"] else ""
+                        hunt_lines.append(
+                            f"{prefix} {h['urgency']} **{h['symbol']}**"
+                            f"  ex `{h['ex_date']}` ({h['days_away']}d)"
+                            f" · `${h['ann_div']:.2f}` ann{yield_str} · {wheel_tag}"
+                        )
+
+                    # Label: are all results within 7 days, or did we widen to 14?
+                    window_label = (
+                        "Ex-Div This Week"
+                        if all(h["days_away"] <= 7 for h in hunt)
+                        else "Ex-Div Radar (14-Day)"
+                    )
+                    hunt_payload = "\n".join(hunt_lines)
+
+                    _hunt_key = f"dividend_hunt_{datetime.now().strftime('%Y-%m-%d')}"
+                    if not engine.db.get_state(_hunt_key) and WEBHOOK_INCOME:
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            f"🎯 DIVIDEND HUNT | {window_label}",
+                            hunt_payload,
+                            0x27ae60,
+                        )
+                        engine.db.update_state(_hunt_key, True)
+                        logger.info(
+                            f"Dividend Hunt dispatched: {len(hunt)} events "
+                            f"({sum(1 for h in hunt if h['wheel'])} wheel-eligible)."
+                        )
+                    else:
+                        logger.info("Dividend Hunt already dispatched today — skipping.")
+                else:
+                    logger.info("Dividend Hunt: no quality ex-div events in next 14 days.")
+            except Exception as e:
+                logger.error(f"Dividend Hunt segment failed: {e}")
+
         # ── EX-DIV REACTION CHECK — post-close daily (20:35 UTC) ─────────────
         # Checks two things every evening:
         #   Phase 1: if today is an ex-div date for any watched symbol →

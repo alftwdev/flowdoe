@@ -833,6 +833,134 @@ class HighFidelityAnalyticsEngine:
         # Sort by soonest ex-date, then yield descending
         return sorted(results, key=lambda x: (x["days_away"], -x["ann_yield"]))
 
+    def generate_exdiv_hunt(self):
+        """
+        Dividend Hunt — live ex-div calendar from Nasdaq's free public API.
+        Scans next 7 days; extends to 14 on quiet weeks (< 3 quality results).
+        Filters to an expanded optionable universe; flags wheel-eligible tickers.
+        Returns up to 6 results sorted by days-to-ex-div.
+        Zero Twelve Data credits for the calendar fetch; ~1 credit/ticker for
+        spot price (yield calc), cached daily by _fetch_twelve_data_quotes().
+        """
+        WHEEL_UNIVERSE = {
+            "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+            "TSLA", "COIN", "SOFI", "PLTR", "HIMS",
+            "SPY", "QQQ", "IWM", "GLD", "XLE",
+        }
+        # Expanded quality dividend payers with liquid options — beyond wheel universe
+        QUALITY_DIV_UNIVERSE = WHEEL_UNIVERSE | {
+            "VZ", "T", "MO", "PM", "KO", "PEP", "JNJ", "ABT",
+            "CVX", "XOM", "COP", "PSX",
+            "JPM", "BAC", "WFC", "MS", "GS", "C", "USB", "PNC",
+            "HD", "LOW", "WMT", "COST", "TGT",
+            "QCOM", "TXN", "INTC", "CSCO", "IBM",
+            "TMUS", "EBAY", "PYPL",
+            "MCD", "YUM", "DPZ",
+            "CSX", "UNP", "NSC",
+            "AGNC", "NLY", "EXC", "DUK", "SO", "NEE",
+            "EPD", "ET", "MPLX",
+            "BX", "KKR", "APO", "ARES",
+            "LIN", "APD", "EMR",
+        }
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        today = datetime.now()
+
+        def _fetch_window(days):
+            rows = []
+            for i in range(days):
+                d = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+                try:
+                    r = requests.get(
+                        f"https://api.nasdaq.com/api/calendar/dividends?date={d}",
+                        headers=headers, timeout=8
+                    )
+                    batch = r.json().get("data", {}).get("calendar", {}).get("rows", []) or []
+                    for row in batch:
+                        row["_fetch_date"] = d
+                    rows.extend(batch)
+                except Exception as e:
+                    logger.warning(f"Nasdaq div calendar {d}: {e}")
+            return rows
+
+        # Try 7-day window first; widen to 14 if fewer than 3 quality hits
+        raw = []
+        for window in (7, 14):
+            raw = _fetch_window(window)
+            # Filter: in quality universe, annual div > $0.50, exclude preferred / trust shares
+            # Preferred tickers are typically > 4 chars or end in P/N/L/Z/O
+            hits = {}
+            for r in raw:
+                sym = r.get("symbol", "")
+                ann = float(r.get("indicated_Annual_Dividend") or 0)
+                if sym not in QUALITY_DIV_UNIVERSE:
+                    continue
+                if ann < 0.50:
+                    continue
+                if len(sym) > 5 or sym[-1] in ("P", "N", "L", "Z", "O", "M"):
+                    continue
+                # Deduplicate: keep earliest ex-date per symbol
+                ex_str = r.get("dividend_Ex_Date", "")
+                if sym not in hits or ex_str < hits[sym].get("dividend_Ex_Date", ""):
+                    r["_ann_div"] = ann
+                    r["_wheel"]   = sym in WHEEL_UNIVERSE
+                    hits[sym] = r
+            if len(hits) >= 3 or window == 14:
+                break
+
+        if not hits:
+            return []
+
+        # Fetch spot prices in one batch call for yield calculation
+        syms = list(hits.keys())
+        quotes = self._fetch_twelve_data_quotes(syms)
+
+        results = []
+        for sym, r in hits.items():
+            ex_str = r.get("dividend_Ex_Date", "")
+            try:
+                ex_dt     = datetime.strptime(ex_str, "%m/%d/%Y")
+                days_away = (ex_dt - today).days
+                ex_fmt    = ex_dt.strftime("%b %d")
+            except Exception:
+                continue
+
+            spot = float((quotes.get(sym) or {}).get("close") or 0)
+            ann  = r["_ann_div"]
+            rate = float(r.get("dividend_Rate") or 0)
+
+            yield_pct = round(ann / spot * 100, 1) if spot > 0 else None
+
+            # Yield floor: 1.5% minimum to filter noise (e.g. 0.3% mega-cap token divs).
+            # Wheel-eligible tickers bypass this floor — the options premium is the
+            # primary income driver regardless of the dividend yield percentage.
+            if yield_pct is not None and yield_pct < 1.5 and not r["_wheel"]:
+                continue
+
+            if   days_away <= 2: urgency = "🔥"
+            elif days_away <= 5: urgency = "⚡"
+            elif days_away <= 9: urgency = "📅"
+            else:                urgency = "🔍"
+
+            results.append({
+                "symbol":    sym,
+                "ex_date":   ex_fmt,
+                "days_away": days_away,
+                "ann_div":   ann,
+                "rate":      rate,
+                "spot":      spot,
+                "yield_pct": yield_pct,
+                "wheel":     r["_wheel"],
+                "urgency":   urgency,
+                "pay_date":  r.get("payment_Date", ""),
+            })
+
+        return sorted(results, key=lambda x: x["days_away"])[:6]
+
     # ── Wheel Strategy Universe ───────────────────────────────────────────────
     # Methodology: SMB Capital / Options with Ryan / Andy Tanner / Invest with Henry
     # Core criteria: liquid options, quality underlying, survives assignment,
