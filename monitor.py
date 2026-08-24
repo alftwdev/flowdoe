@@ -1127,6 +1127,92 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
         return False
 
 
+def detect_intra_ro_entry_zone(session, ticker: str, current_price: float, current_premium: float) -> bool:
+    """
+    Third re-entry path — fires DURING the active RO subscription window (< 30 days since N-2)
+    when the market price hits a structural support tier.
+
+    Why this exists: Path A requires ≥30d + premium collapse + 60D price drop.
+    Path B requires ≥45d + price ≤ fair value. Both intentionally wait for the RO to close.
+    But if the price drops to fair value or NAV DURING the window, open-market buyers get
+    the same (or better) price as RO participants without the paperwork — and DRIP efficiency
+    is identical. This path alerts the operator to start building the position in tranches,
+    with explicit sizing discipline (never full size before RO completion is confirmed).
+
+    Two tiers, separate DB keys, fires once per tier per RO cycle:
+    Tier 1 — price ≤ NAV: below intrinsic value, maximum DRIP efficiency
+    Tier 2 — price ≤ fair value floor (annual_dist / 0.19): income buyer structural support
+
+    Alert color: amber (0xf39c12) — NOT green. Green is reserved for post-RO completion.
+    """
+    try:
+        n2_key    = f"cornerstone_n2_detected_{ticker}"
+        dodge_key = f"ro_dodge_active_{ticker}"
+        prev_n2   = db.get_state(n2_key, "")
+        dodging   = db.get_state(dodge_key, "")
+
+        if not prev_n2 or not dodging:
+            return False   # not in an active dodge cycle
+
+        try:
+            _n2_date  = datetime.strptime(prev_n2, "%Y-%m-%d").date()
+            _age_days = (datetime.utcnow().date() - _n2_date).days
+        except Exception:
+            _age_days = 999
+
+        # Only fire during the active subscription window — post-30d is Path A / Path B
+        if _age_days >= 30:
+            return False
+
+        annual_div   = 1.4268 if ticker == "CLM" else 1.3824
+        nav_fallback = 6.73   if ticker == "CLM" else 6.18
+        fair_value   = round(annual_div / 0.19, 2)
+        implied_yield = round(annual_div / current_price * 100, 1) if current_price > 0 else 0.0
+
+        # ── Tier 1: at or below NAV ───────────────────────────────────────────────────
+        _t1_key = f"cornerstone_intra_ro_nav_entry_{ticker}"
+        if current_price <= nav_fallback and not db.get_state(_t1_key, ""):
+            db.update_state(_t1_key, datetime.now().strftime("%Y-%m-%d"))
+            t1_msg = (
+                f"**{ticker} — 🟡 INTRA-RO: PRICE AT/BELOW NAV**\n"
+                f"┣ Price: `${current_price:.2f}` ≤ NAV `${nav_fallback:.2f}` — below intrinsic value\n"
+                f"┣ Yield @ market: `{implied_yield:.1f}%` | N-2 age: `{_age_days}d` (RO window open)\n"
+                f"┣ Insight: shares are issued AT NAV — market price can't stay below NAV long\n"
+                f"┣ Sizing: enter 1/3 target NOW · build remainder after GlobeNewswire completion\n"
+                f"┣ ⚠️ RO NOT yet closed — dilution still settling. Do NOT full-size yet.\n"
+                f"┗ Paths A + B re-entry scoring continues in parallel"
+            )
+            if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+                send_essentials_embed(WEBHOOK_CORNERSTONE, f"🟡 {ticker} — Intra-RO: At/Below NAV", t1_msg, 0xf39c12)
+            logger.info(f"[Intra-RO Entry T1] {ticker} — price ${current_price:.2f} ≤ NAV ${nav_fallback:.2f}")
+            return True
+
+        # ── Tier 2: at or below fair value floor (19% yield) ─────────────────────────
+        _t2_key = f"cornerstone_intra_ro_fv_entry_{ticker}"
+        if current_price <= fair_value and not db.get_state(_t2_key, ""):
+            db.update_state(_t2_key, datetime.now().strftime("%Y-%m-%d"))
+            t2_msg = (
+                f"**{ticker} — 🟡 INTRA-RO: FAIR VALUE FLOOR REACHED**\n"
+                f"┣ Price: `${current_price:.2f}` ≤ Fair Value `${fair_value:.2f}` (19% yield floor)\n"
+                f"┣ Yield @ market: `{implied_yield:.1f}%` — income buyer structural support active\n"
+                f"┣ N-2 age: `{_age_days}d` — subscription window likely still open\n"
+                f"┣ Insight: income buyers absorb supply at this level — strong price floor\n"
+                f"┣ Sizing: starter position (1/4–1/3 target) — do NOT full-size before RO closes\n"
+                f"┣ ⚠️ RO completion not confirmed — more supply possible short-term\n"
+                f"┗ Watch: GlobeNewswire 'Fund Announces Completion' → Path A/B green signal fires"
+            )
+            if HAS_ESSENTIALS and WEBHOOK_CORNERSTONE:
+                send_essentials_embed(WEBHOOK_CORNERSTONE, f"🟡 {ticker} — Intra-RO: Fair Value Floor", t2_msg, 0xf39c12)
+            logger.info(f"[Intra-RO Entry T2] {ticker} — price ${current_price:.2f} ≤ FV ${fair_value:.2f}")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"[Intra-RO Entry Detector Error] {ticker}: {e}")
+        return False
+
+
 def check_yield_floor_reentry(ticker: str, current_price: float, current_premium: float) -> bool:
     """
     Second re-entry path: fires when price falls to or below the distribution yield floor
@@ -2174,12 +2260,18 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
             db.update_state(n2_key, "")
             db.update_state(f"ro_dodge_active_{ticker}", "")
             db.update_state(f"cornerstone_n2_initial_alerted_{ticker}", "")  # reset for next cycle
+            db.update_state(f"cornerstone_intra_ro_nav_entry_{ticker}", "")  # reset Path C tier 1
+            db.update_state(f"cornerstone_intra_ro_fv_entry_{ticker}",  "")  # reset Path C tier 2
             logger.info(f"[N-2 Cycle] {ticker} — re-entry confirmed, cycle closed.")
         # else: preserve n2_key until re-entry fires
 
-    # ── Re-entry detectors (both run every tick, fire once per RO cycle via DB dedup)
+    # ── Re-entry detectors (all three run every tick, fire once per tier via DB dedup)
+    # Path A: post-RO premium collapse + price off 60D high (≥30d gate)
+    # Path B: yield floor at or below fair value (≥45d gate)
+    # Path C: intra-RO entry — fires DURING active window (<30d) at fair value or NAV
     detect_ro_completion_dip(session, ticker, price, premium)
     check_yield_floor_reentry(ticker, price, premium)
+    detect_intra_ro_entry_zone(session, ticker, price, premium)
 
     # ── NEW: 30% premium RO Watch gate (Todd Akin threshold — RO "usually" announced here)
     # Debounced: fires once when premium crosses 30%, resets when it drops back below 25%.
