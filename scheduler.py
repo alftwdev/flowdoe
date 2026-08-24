@@ -604,10 +604,10 @@ def main():
                     hunt_lines = []
                     for i, h in enumerate(hunt):
                         prefix    = "┗" if i == len(hunt) - 1 else "┣"
-                        wheel_tag = "⚙️ Wheel-eligible" if h["wheel"] else "📈 Div play"
+                        wheel_tag = "Wheel" if h["wheel"] else "Div"
                         yield_str = f" · `{h['yield_pct']:.1f}%` yield" if h["yield_pct"] else ""
                         hunt_lines.append(
-                            f"{prefix} {h['urgency']} **{h['symbol']}**"
+                            f"{prefix} **{h['symbol']}**"
                             f"  ex `{h['ex_date']}` ({h['days_away']}d)"
                             f" · `${h['ann_div']:.2f}` ann{yield_str} · {wheel_tag}"
                         )
@@ -624,7 +624,7 @@ def main():
                     if not engine.db.get_state(_hunt_key) and WEBHOOK_INCOME:
                         send_essentials_embed(
                             WEBHOOK_INCOME,
-                            f"🎯 DIVIDEND HUNT | {window_label}",
+                            f"DIVIDEND HUNT | {window_label}",
                             hunt_payload,
                             0x27ae60,
                         )

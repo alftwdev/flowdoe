@@ -941,10 +941,7 @@ class HighFidelityAnalyticsEngine:
             if yield_pct is not None and yield_pct < 1.5 and not r["_wheel"]:
                 continue
 
-            if   days_away <= 2: urgency = "🔥"
-            elif days_away <= 5: urgency = "⚡"
-            elif days_away <= 9: urgency = "📅"
-            else:                urgency = "🔍"
+            urgency = ""  # days_away count in the embed line is sufficient
 
             results.append({
                 "symbol":    sym,
