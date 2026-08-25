@@ -520,7 +520,7 @@ def check_sec_edgar(session, ticker):
                                             f"This contains the actual subscription price, record date, "
                                             f"subscription window, and max shares offered.\n\n"
                                             f"Check EDGAR now for exact terms — the estimated sub price "
-                                            f"({'NAV x1.12' if ticker == 'CLM' else 'NAV x1.04'}) "
+                                            f"({'NAV x1.04'}) "
                                             f"will be confirmed or corrected by this filing.\n\n"
                                             f"EDGAR: {_edgar_url}"
                                         ),
@@ -1108,7 +1108,7 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
         _zone_low  = round(_nav_dip * 0.99, 2)
         _zone_high = round(_nav_dip * 1.015, 2)
         _implied_yield = round(_annual_div_dip / current_price * 100, 1) if current_price > 0 else 0
-        _ro_sub = round(_nav_dip * 1.12, 2) if ticker == "CLM" else round(_nav_dip * 1.04, 2)
+        _ro_sub = round(_nav_dip * 1.04, 2)  # 2026 confirmed: 104% NAV for both CLM and CRF
         dip_msg = (
             f"**{ticker} — 🟢 POST-RO DIP: REBUY ZONE CONFIRMED**\n"
             f"┣ Price: `${current_price:.2f}` ({pct_below_high:.1f}% below 60D high) | Yield: `{_implied_yield:.1f}%`\n"
@@ -1346,7 +1346,7 @@ def calculate_reentry_score(
 
     fair_value = round(annual_div / 0.19, 2)   # income buyer floor (19% yield support threshold)
     # RO subscription price (SEC-confirmed formulae — open-market entry at/below beats participants)
-    _ro_sub_px = round(_nav * 1.12, 2) if ticker == "CLM" else round(_nav * 1.04, 2)
+    _ro_sub_px = round(_nav * 1.04, 2)  # 2026 confirmed: 104% NAV only for both CLM and CRF
     # Re-entry zone: NAV ± narrow band (max DRIP efficiency — shares issued at NAV)
     zone_low  = round(_nav * 0.99, 2)
     zone_high = round(_nav * 1.015, 2)
@@ -1537,16 +1537,13 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
         return "\n".join(lines)
 
     # ── Full breakdown version for Pushover / direct alert ───────────────────
-    # RO subscription price formula (empirically confirmed from SEC filings):
-    #   CLM 2025: max(112% × NAV, 80% × market price) — typically 112% NAV wins
-    #   CRF 2025/2026: 104% × NAV at expiration
+    # RO subscription price formula (2026 confirmed: 104% NAV only — no market price floor):
+    #   CLM/CRF 2026: 104% × NAV at expiration (most aggressive formula ever — no market floor)
+    #   Prior cycles: max(107–112% NAV, 65–90% market price). Formula can change each RO.
     # Open-market buyers who wait until price ≤ sub price beat RO participants:
     # no lock-up period, margin-eligible, no subscription paperwork.
     _nav_for_sub = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
-    if ticker == "CLM":
-        _ro_sub_px = round(_nav_for_sub * 1.12, 2)  # CLM: 112% of NAV
-    else:
-        _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # CRF: 104% of NAV
+    _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # 2026: 104% NAV for both CLM and CRF
 
     _annual_div_full = 1.458 if ticker == "CLM" else 1.4112
     _nav_yield_full  = round(_annual_div_full / _nav_for_sub * 100, 1) if _nav_for_sub > 0 else 0.0
