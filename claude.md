@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Aug 23 2026 — weekly maintenance protocol added (§0-F); active RO ongoing; Path C intra-RO entry zone live; CLM NAV 6.73; CRF at $7.175 (below FV $7.28 — accumulate zone)*
+*Last updated: Aug 24 2026 — distribution constants corrected (press release Aug 17); 2027 preview constants added; 52-week low detector wired; both tickers hit 52w lows today (CLM $6.69 / CRF $6.44); active RO; Oct NAV lock is key catalyst; CLM RO formula corrected to 104% NAV (was 112%)*
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### Step 1 — Pull on PythonAnywhere
 ```bash
-cd ~/flowdoe_dev && git pull origin main
+cd ~/scripts && git pull origin main
 ```
 
 ### Step 2 — Kill always-on tasks (copy-paste block)
@@ -44,35 +44,57 @@ python db_tools.py --seed-premiums   # seeds CLM/CRF z-score mu/sigma (one-time)
 
 ## 0-B. Known Constants — Lock These, Never Guess
 
-### CLM/CRF Distribution (2026 reset — do NOT use pre-reset values)
+### CLM/CRF Distribution (2026 confirmed — corrected Aug 24 2026)
 ```python
-# 2026 annual distributions (set once per year after October NAV lock)
-CLM_ANNUAL_DIST = 1.4268   # $0.1189/month × 12
-CRF_ANNUAL_DIST = 1.3824   # $0.1152/month × 12
+# 2026 annual distributions — CONFIRMED by Aug 17, 2026 Cornerstone press release (Q4 declaration)
+# Previous CLAUDE.md values ($0.1189 CLM / $0.1152 CRF) were WRONG — based on incorrect Oct 2025 NAV assumption.
+CLM_ANNUAL_DIST = 1.458    # $0.1215/month × 12  (was incorrectly 1.4268 / $0.1189/mo)
+CRF_ANNUAL_DIST = 1.4112   # $0.1176/month × 12  (was incorrectly 1.3824 / $0.1152/mo)
 
-# Fair value floor (annual_dist / 0.19 = FV at 19% yield target)
-CLM_FAIR_VALUE  = 7.51
-CRF_FAIR_VALUE  = 7.28
+# Fair value floor (annual_dist / 0.19 = FV at 19% yield target) — CORRECTED Aug 24 2026
+CLM_FAIR_VALUE  = 7.67     # $1.458 / 0.19  (was 7.51 — understated by $0.16)
+CRF_FAIR_VALUE  = 7.43     # $1.4112 / 0.19 (was 7.28 — understated by $0.15)
 
-# NAV fallbacks (CLM updated Aug 16 2026 per N-2 EDGAR filing Aug 14; refresh whenever CEFConnect NAV changes >0.10)
-CLM_NAV_FALLBACK = 6.73   # was 6.45 — corrected Aug 16 2026 per N-2 EDGAR filing Aug 14
-CRF_NAV_FALLBACK = 6.18   # was 6.30 — corrected Jul 23 2026 based on implied NAV math
+# 2027 distribution PREVIEW (Board confirmed 21% continues; actual locked end of October 2026)
+# Example based on July 31, 2026 NAV. Higher Oct NAV → higher 2027 dist; lower Oct NAV → lower.
+# Market is pricing CLM/CRF toward these 2027 example FV levels (both hit 52w lows Aug 24 2026).
+CLM_DIST_2027_EXAMPLE = 1.3236   # $0.1103/month × 12 — if Oct NAV stays near July NAV (~$6.94)
+CRF_DIST_2027_EXAMPLE = 1.2816   # $0.1068/month × 12 — if Oct NAV stays near July NAV (~$6.72)
+CLM_FV_2027_EXAMPLE   = 6.97     # CLM_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
+CRF_FV_2027_EXAMPLE   = 6.74     # CRF_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
+
+# NAV fallbacks (refresh whenever CEFConnect NAV changes >0.10)
+CLM_NAV_FALLBACK = 6.73   # updated Aug 16 2026 per N-2 EDGAR filing Aug 14
+CRF_NAV_FALLBACK = 6.18   # updated Jul 23 2026 based on implied NAV math
 
 # Margin rate (E*TRADE)
 MARGIN_RATE = 7.25
+
+# RO subscription price formula (can change each cycle — verify against N-2 filing)
+# 2026 (CLM + CRF): 104% × NAV only — no market price floor (most aggressive formula ever)
+# Prior cycles CLM: max(107–112% × NAV, 65–90% × market price)
+# Prior cycles CRF: 104% × NAV (consistent)
+# Rule: update monitor.py formula after reading the actual N-2 filing each cycle
+CLM_RO_FORMULA_2026 = 1.04   # 104% of NAV — confirmed from user's RO notes Aug 24 2026
+CRF_RO_FORMULA_2026 = 1.04   # 104% of NAV (unchanged from prior cycles)
 ```
 
 **Rule: Every script that calculates CLM/CRF yield or Div. Yield MUST use these constants.**
-The pre-reset values ($0.1224 CLM / $0.1176 CRF → annuals 1.4688 / 1.4112) are dead.
-Never use 1.4580, 1.4688, 1.4112, or 1.3984 in any new code — those inflate yield and
-misrepresent the distribution reset. If you see those numbers in existing code, fix them.
+Forbidden values (DO NOT USE — all inflate or misrepresent distributions):
+- Pre-2026 CLM: 1.4688 ($0.1224/mo), 1.4580 — dead
+- Old wrong 2026 CLM: 1.4268 ($0.1189/mo) — CORRECTED to 1.458 on Aug 24 2026
+- Old wrong 2026 CRF: 1.3824 ($0.1152/mo) — CORRECTED to 1.4112 on Aug 24 2026
+- 1.3984 — never a valid value
+
+NOTE: 1.4112 ($0.1176/mo × 12) is the CORRECT 2026 CRF annual distribution.
+The prior prohibition "Never use 1.4112" in CLAUDE.md was wrong — it confused the
+correct 2026 CRF rate with the pre-2026 rate. 1.4112 IS the right value for CRF.
 
 ### Bug fixed Jul 23 2026 — monitor.py distribution mismatch
-`get_ticker_report()` line ~1190 was using `1.4580 / 1.4112` (pre-reset) for `y_dist`
-(Div. Yield in embed footer) while `check_distribution_yield_floor()` correctly used
-`1.4268 / 1.3824`. This caused the footer "Div. Yield" to show ~0.8–1.3% higher than
-the floor yield line, creating an internal inconsistency visible in Discord embeds.
-**Fix applied:** both paths now use the same 2026 constants.
+`get_ticker_report()` was using `1.4580 / 1.4112` (pre-reset) for `y_dist`
+(Div. Yield in embed footer) while `check_distribution_yield_floor()` used different values.
+**Fix applied Jul 23:** both paths aligned. **Further corrected Aug 24:** both paths updated
+to confirmed 2026 rates `1.458 / 1.4112` per Aug 17 2026 Cornerstone press release.
 
 ### Bug fixed Jul 23 2026 — "HIGH PREMIUM" label fired on negative z-score
 Status label logic (`send_daily_pulse`) was:
