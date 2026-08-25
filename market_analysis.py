@@ -55,7 +55,7 @@ FIRE_SCHEDULE = [
     (13, 10, "ma_morning",    "morning"),    # 03:10 HST — shifted +70min so scheduler.py morning
                                              # (12:50 UTC) has time to write SPY/QQQ POC/VAH/VAL
                                              # and expected-range DB keys before we read them.
-    (13, 13, "ma_headlines",  "headlines"),  # 03:13 HST — MarketWatch bulletins, 3 min after brief
+    # ma_headlines removed — headlines merged into morning brief as a single summary line
     (17,  0, "ma_intraday",   "intraday"),   # 07:00 HST mid-session
     # ma_eod disabled — scheduler.py --mode eod (20:20 UTC) produces a richer EOD recap
     # (morning call accuracy, signal grading). market_analysis.py EOD duplicated it.
@@ -1046,19 +1046,34 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         if _tax_parts:
             _tax_note = "┣ Tax char (" + str(now_utc.year - 1) + " 1099): " + " | ".join(_tax_parts) + "\n"
 
+    # Top headline summary merged into morning brief (2nd embed removed Aug 2026).
+    # _fetch_market_headlines caches to DB — zero extra API calls.
+    # reentry_line and pre_n2_line removed — they belong in #cornerstone only.
+    # ledger_conf_line removed — too granular for daily; use weekly scorecard.
+    headlines_line = ""
+    try:
+        _hl = _fetch_market_headlines(db)
+        if _hl:
+            _b   = sum(1 for h in _hl if h["sentiment"] == "bullish")
+            _d   = sum(1 for h in _hl if h["sentiment"] == "bearish")
+            _agg = "BULLISH" if _b > _d else ("BEARISH" if _d > _b else "MIXED")
+            _top = " | ".join(h["title"][:55] for h in _hl[:2])
+            headlines_line = f"┣ 📰 Headlines ({_agg}, {_b}B/{_d}D): {_top}\n"
+    except Exception:
+        pass
+
     signals_section = (
         "\n**CROSS-CHANNEL CONFLUENCE**\n"
         f"┣ CLM/CRF: {cef_line}\n"
         f"{edgar_line}"
-        f"{reentry_line}"
-        f"{pre_n2_line}"
+        f"{acc_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
         f"{mood_fwd_line}"
         f"┣ TQQQ: {tqqq_line}\n"
         f"┣ Wheel: {wheel_line}\n"
-        f"{ledger_conf_line}"
         f"{mlpi_entry_line}"
+        f"{headlines_line}"
     )
 
     # ── BIAS + DIRECTIVES ─────────────────────────────────────────────────────
@@ -1190,10 +1205,9 @@ def run():
     logger.info("Market Analysis online. Loop: 60s.")
 
     BUILDERS = {
-        "morning":   _build_morning_report,
-        "headlines": _build_headlines_report,
-        "intraday":  _build_intraday_report,
-        "eod":       _build_eod_report,
+        "morning":  _build_morning_report,
+        "intraday": _build_intraday_report,
+        "eod":      _build_eod_report,
     }
 
     while True:
