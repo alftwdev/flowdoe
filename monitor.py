@@ -110,6 +110,15 @@ CEF_INST_EXIT_SPY_MAX_CHG   = 0.75  # abs(SPY 1d chg) must be < 0.75% to qualify
 DIST_YIELD_TARGET_PCT = 19.0        # 19% = structural support floor yield
 DIST_YIELD_OVERVALUED_GAP = 0.10    # price > fair_value × 1.10 = overvalued at new rate
 
+# 2027 distribution PREVIEW (Board confirmed 21% pct continues; example based on July 31, 2026 NAV)
+# Actual 2027 rate locked end of October 2026. Higher Oct NAV → higher 2027 dist; lower → lower.
+# At July 31 NAV: CLM implied NAV ~$6.94 → $0.1103/mo | CRF implied NAV ~$6.72 → $0.1068/mo
+# Source: Aug 17, 2026 Cornerstone press release.
+CLM_DIST_2027_EXAMPLE = 1.3236   # $0.1103/month × 12 — lower bound estimate
+CRF_DIST_2027_EXAMPLE = 1.2816   # $0.1068/month × 12 — lower bound estimate
+CLM_FV_2027_EXAMPLE   = 6.97     # CLM_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
+CRF_FV_2027_EXAMPLE   = 6.74     # CRF_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
+
 # Dark pool / off-exchange detection thresholds:
 # Price drop significant but public volume BELOW average → suggests off-exchange activity.
 DARK_POOL_PRICE_DROP_PCT   = -1.5   # session price change threshold (%)
@@ -769,7 +778,7 @@ def check_distribution_yield_floor(price: float, ticker: str) -> tuple:
     Zero API calls — uses known distribution constants from get_ticker_report().
     """
     try:
-        annual_div = 1.4268 if ticker == "CLM" else 1.3824   # 2026 reset: $0.1189 × 12 CLM, $0.1152 × 12 CRF
+        annual_div = 1.458 if ticker == "CLM" else 1.4112   # confirmed Aug 17 2026: $0.1215 × 12 CLM, $0.1176 × 12 CRF
         fair_value = round(annual_div / (DIST_YIELD_TARGET_PCT / 100), 2)
         implied_yield = (annual_div / price * 100) if price > 0 else 0.0
 
@@ -1093,7 +1102,7 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
                 f"┣   Boxes roll on their own schedule — redeploy freed margin into this rebuy\n"
             )
 
-        _annual_div_dip = 1.4268 if ticker == "CLM" else 1.3824
+        _annual_div_dip = 1.458 if ticker == "CLM" else 1.4112
         _nav_dip_raw, _, _ = fetch_nav_cefconnect(session, ticker)
         _nav_dip = _nav_dip_raw if _nav_dip_raw and _nav_dip_raw > 0 else (6.73 if ticker == "CLM" else 6.18)
         _zone_low  = round(_nav_dip * 0.99, 2)
@@ -1163,7 +1172,7 @@ def detect_intra_ro_entry_zone(session, ticker: str, current_price: float, curre
         if _age_days >= 30:
             return False
 
-        annual_div   = 1.4268 if ticker == "CLM" else 1.3824
+        annual_div   = 1.458 if ticker == "CLM" else 1.4112
         nav_fallback = 6.73   if ticker == "CLM" else 6.18
         fair_value   = round(annual_div / 0.19, 2)
         implied_yield = round(annual_div / current_price * 100, 1) if current_price > 0 else 0.0
@@ -1238,7 +1247,7 @@ def check_yield_floor_reentry(ticker: str, current_price: float, current_premium
             return False
 
         # Fair value floor: annual_dist / 0.19
-        annual_div = 1.4268 if ticker == "CLM" else 1.3824
+        annual_div = 1.458 if ticker == "CLM" else 1.4112
         fair_value = round(annual_div / 0.19, 2)
         if current_price > fair_value:
             return False
@@ -1331,7 +1340,7 @@ def calculate_reentry_score(
     Post-RO re-entry confluence scorer. Returns score dict with breakdown.
     Only meaningful when ro_dodge_active_{ticker} is set in DB.
     """
-    annual_div = 1.4268 if ticker == "CLM" else 1.3824
+    annual_div = 1.458 if ticker == "CLM" else 1.4112
     nav_fallback = 6.73 if ticker == "CLM" else 6.18  # CLM updated Aug 16 2026 per N-2 EDGAR filing
     _nav = nav if nav > 0 else nav_fallback
 
@@ -1434,6 +1443,21 @@ def calculate_reentry_score(
     else:
         breakdown.append("SPY below SMA200 — bear regime (0)")
 
+    # 52-week low confluence — price near annual low = maximum fear, strongest accumulation signal
+    # DB key populated daily by the 5-min loop via TD statistics endpoint (0 extra credits per tick).
+    try:
+        _52w_low_str = db.get_state(f"{ticker}_52w_low")
+        if _52w_low_str:
+            _52w_low_f = float(_52w_low_str)
+            if _52w_low_f > 0 and price <= _52w_low_f * 1.03:
+                score += 12
+                breakdown.append(f"Price ${price:.2f} at/near 52w low ${_52w_low_f:.2f} — max fear zone (+12)")
+            else:
+                pct_above = round((price / _52w_low_f - 1) * 100, 1) if _52w_low_f > 0 else 0
+                breakdown.append(f"Price ${price:.2f} is {pct_above:.1f}% above 52w low ${_52w_low_f:.2f} (0)")
+    except Exception:
+        pass
+
     # Gate check — score AND hard 45-day prerequisite
     # The 45-day wait ensures the RO subscription period is complete before re-entry.
     # A high score on Day 1 does NOT mean the offering is done — it means the metrics
@@ -1494,7 +1518,7 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
     if short:
         # ── 3-line pulse version — status, zone, countdown only ──────────────
         _nav_pulse = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
-        _annual_div_pulse = 1.4268 if ticker == "CLM" else 1.3824
+        _annual_div_pulse = 1.458 if ticker == "CLM" else 1.4112
         _nav_yield_pulse = round(_annual_div_pulse / _nav_pulse * 100, 1) if _nav_pulse > 0 else 0.0
         lines = [
             f"POST-RO RE-ENTRY TRACKER — {ticker}",
@@ -1524,7 +1548,7 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
     else:
         _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # CRF: 104% of NAV
 
-    _annual_div_full = 1.4268 if ticker == "CLM" else 1.3824
+    _annual_div_full = 1.458 if ticker == "CLM" else 1.4112
     _nav_yield_full  = round(_annual_div_full / _nav_for_sub * 100, 1) if _nav_for_sub > 0 else 0.0
     # z-score provenance line — operator needs to know if this is prior or empirical
     _z_mu    = db.get_state(f"{ticker}_premium_mu",    15.0)
@@ -1540,7 +1564,8 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
         f"┣ {status_line}",
         f"┣ DRIP zone: `${zl:.2f}–${zh:.2f}` (NAV ±1.5% — max DRIP efficiency)",
         f"┣ RO sub price: ~`${_ro_sub_px:.2f}` ({'NAV×1.12' if ticker == 'CLM' else 'NAV×1.04'}) — open-market entry at/below beats RO participants",
-        f"┣ Income buyer floor: `${fv:.2f}` (19% yield) | Yield @ mkt: `{iy:.1f}%` | Yield @ NAV: `{_nav_yield_full:.1f}%`",
+        f"┣ Income buyer floor: `${fv:.2f}` (2026 — 19% yield) | Yield @ mkt: `{iy:.1f}%` | Yield @ NAV: `{_nav_yield_full:.1f}%`",
+        f"┣ 2027 FV example: `${'6.97' if ticker == 'CLM' else '6.74'}` (if Oct NAV ≈ July NAV — actual locked end of Oct 2026)",
         f"┣ Z-score baseline: μ=`{float(_z_mu):.1f}%` σ=`{float(_z_sigma):.1f}%` [{_z_source}]",
         "┣ Confluence breakdown:",
     ]
@@ -2093,11 +2118,28 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     if nav > 0:
         db.update_state(f"{ticker.lower()}_last_nav", round(nav, 4))
 
+    # ── 52-week low cache (1 TD credit/day per ticker — daily TTL guard)
+    _52w_date_key = f"{ticker}_52w_low_date"
+    _today_str    = datetime.now().strftime("%Y-%m-%d")
+    if db.get_state(_52w_date_key, "") != _today_str:
+        try:
+            _stats = session.get(
+                f"https://api.twelvedata.com/statistics?symbol={ticker}&apikey={TD_API_KEY}",
+                timeout=15).json()
+            _52w = _stats.get("statistics", {}).get("52_week", {})
+            _52w_low_val = _52w.get("low")
+            if _52w_low_val:
+                db.update_state(f"{ticker}_52w_low", str(round(float(_52w_low_val), 4)))
+                db.update_state(_52w_date_key, _today_str)
+                logger.info(f"[52w Low] {ticker} 52w low: ${_52w_low_val} (cached for today)")
+        except Exception as _e:
+            logger.debug(f"[52w Low] {ticker} fetch failed: {_e}")
+
     # ── Whale flow (original)
     whale_status, whale_rvol = detect_whale_flow_direction(session, ticker)
 
     # ── Distribution math (original)
-    annual_div = 1.4268 if ticker == "CLM" else 1.3824  # 2026 reset: $0.1189×12 CLM, $0.1152×12 CRF
+    annual_div = 1.458 if ticker == "CLM" else 1.4112  # confirmed Aug 17 2026: $0.1215×12 CLM, $0.1176×12 CRF
     y_dist     = (annual_div / price) * 100 if price > 0 else 0
     y_nav      = (annual_div / nav)   * 100 if nav   > 0 else 0
     leverage_ratio  = 1.0
@@ -2134,7 +2176,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
     # finds the high-conviction signal requires clustering across 2+ consecutive sessions:
     # institutions distributing in size repeatedly over 48–72h, not routine low-volume days.
     # Full +18pt score requires 2 of last 3 sessions flagged; single session gets +8pts only.
-    _monthly_dist = (1.4268 if ticker == "CLM" else 1.3824) / 12   # $0.1189 CLM / $0.1152 CRF
+    _monthly_dist = (1.458 if ticker == "CLM" else 1.4112) / 12   # $0.1215 CLM / $0.1176 CRF (confirmed Aug 17 2026)
     is_dark_pool, price_chg, vol_ratio, dark_pool_desc = detect_dark_pool_activity(session, ticker, monthly_dist=_monthly_dist)
     dark_pool_cluster_count = 0
     if is_dark_pool:
@@ -2664,7 +2706,7 @@ def get_ticker_report(session, ticker, spy_chg_cache: dict):
         if holder_exit:            _signals_fired.append("13f_holder_exit")
 
         # dist_fair_value already computed above via check_distribution_yield_floor()
-        _fv = dist_fair_value if dist_fair_value > 0 else (7.51 if ticker == "CLM" else 7.28)
+        _fv = dist_fair_value if dist_fair_value > 0 else (7.67 if ticker == "CLM" else 7.43)
         if price <= _fv:           _signals_fired.append("at_fair_value_floor")
         if price <= _fv * 0.95:   _signals_fired.append("BELOW_FAIR_VALUE")
 
@@ -3553,7 +3595,7 @@ def run_monitor():
 
                             if not _already_alerted:
                                 # First alert for this RO cycle — clean format, N-2 only
-                                _ann_div   = 1.4268 if _ticker == "CLM" else 1.3824
+                                _ann_div   = 1.458 if _ticker == "CLM" else 1.4112
                                 _nav_fb    = 6.73   if _ticker == "CLM" else 6.18  # Aug 16 2026 N-2 filing NAV
                                 _fv        = round(_ann_div / 0.19, 2)
                                 # Re-entry range: NAV (post-dilution bottom) to FV (income buyer floor)

@@ -2283,7 +2283,7 @@ def main():
                 # CLM/CRF 1099-DIV tax character (seeded once/year via db_tools --seed-tax-character)
                 _marginal = float(os.getenv("MARGINAL_TAX_RATE", "22")) / 100
                 _tax_lines = []
-                for _tc_sym, _ann_dist in (("CLM", 1.4268), ("CRF", 1.3824)):
+                for _tc_sym, _ann_dist in (("CLM", 1.458), ("CRF", 1.4112)):
                     _tc = engine.db.get_state(f"{_tc_sym.lower()}_dist_tax_char") or {}
                     if not isinstance(_tc, dict) or "roc_pct" not in _tc:
                         continue

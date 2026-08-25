@@ -737,7 +737,7 @@ def build_income_intel(engine, tradier, ticker: str) -> tuple:
         bias_line    = _market_bias_line(db)
 
         # CLM/CRF fair-value floor
-        _ANN_DIST = {"CLM": 1.4268, "CRF": 1.3824}
+        _ANN_DIST = {"CLM": 1.458, "CRF": 1.4112}
         fv_line = ""
         if ticker in _ANN_DIST:
             fv = round(_ANN_DIST[ticker] / 0.19, 2)

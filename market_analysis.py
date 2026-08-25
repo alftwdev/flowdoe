@@ -1027,7 +1027,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     if now_utc.month in (1, 2, 3):
         _marginal = float(os.getenv("MARGINAL_TAX_RATE", "22")) / 100
         _tax_parts = []
-        for _ts, _ad in (("clm", 1.4268), ("crf", 1.3824)):
+        for _ts, _ad in (("clm", 1.458), ("crf", 1.4112)):
             _tc = db.get_state(f"{_ts}_dist_tax_char") or {}
             if not isinstance(_tc, dict) or "roc_pct" not in _tc:
                 continue
