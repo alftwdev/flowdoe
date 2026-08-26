@@ -526,6 +526,151 @@ Channel routing (locked — never change):
 
 ---
 
+## 0-G. CLM/CRF RO Historical Patterns (Institutional Memory)
+
+*Updated Aug 25, 2026. Add a new subsection for each completed RO cycle.*
+
+---
+
+### General RO Anatomy (applies to every cycle)
+
+```
+Phase 1 — N-2 Filed:
+  First public signal. monitor.py EDGAR watcher fires CRITICAL.
+  ro_dodge_active set. Execute sell (keep ≥3 shares to preserve DRIP permanently).
+  Sub price is UNKNOWN at this point — it is 104%×NAV at expiration close.
+
+Phase 2 — SEC Review (~20 business days):
+  Market digests the filing. RO arbitrageurs and institutional holders reduce positions.
+  Price typically drifts lower during this window.
+
+Phase 3 — N-2/A Effectiveness:
+  SEC declares registration effective. Pricing window opens.
+  424B3 filing imminent (sets record date + start of 25-day subscription window).
+
+Phase 4 — 424B3 / Record Date:
+  Sub price formula applied to NAV at record date close.
+  Open-market buyers who got in below this price beat RO participants.
+  HISTORICAL PATTERN: Record date has been the cycle low in 2025 (see below).
+
+Phase 5 — 25-Day Subscription Window:
+  Rights trade on exchange. Price tends to RISE toward or above sub price
+  as rights-holders subscribe and new income buyers see the yield opportunity.
+
+Phase 6 — Expiration (~25 days after record date):
+  New shares issued at 104%×NAV at expiration close.
+  Volume spike as rights expire. Post-expiration = RO overhang clears.
+
+Phase 7 — Recovery:
+  Premium mean-reverts toward historical average over the following 4–8 weeks.
+  Resume DRIP at NAV. Re-enter full position if not already done.
+```
+
+**Record date timing heuristic:** ~59 days post-N-2 (based on 2025 data).
+**Expiration timing heuristic:** ~84 days post-N-2 (record date + 25 subscription days).
+
+---
+
+### 2025 RO — Forensic Data
+
+```
+Ticker: CLM (CRF runs identical concurrent cycle)
+Formula: CLM = 112% × NAV | CRF = 104% × NAV (CLM more aggressive in 2025)
+
+N-2 filed:               ~Mar 2025
+Record date:              Apr 21, 2025
+CLM price at record date: ~$6.92  ← CYCLE LOW (bottom was HERE, not at expiration)
+Sub price (112% × ~$5.90 NAV): ~$6.61
+
+Price ROSE during 25-day subscription window:
+  Apr 21 (record date):   ~$6.92 (low)
+  May 15 (ex-div day):    ~$7.10 intraday low
+  May 16 (expiration):    ~$7.32 (higher than record date)
+  Jun 5 (1 month post):   ~$7.88 (full mean reversion underway)
+
+Key lesson: Open-market buyers at $6.92 (record date) beat RO subscribers ($6.61)
+on a short-term basis — the spread was $0.31, and price recovered $0.96 by June 5.
+The 25-day subscription window saw price APPRECIATION, not continuation of selling.
+```
+
+---
+
+### 2026 RO — Live Data (Updated Aug 25, 2026)
+
+```
+Ticker: CLM + CRF (concurrent cycle, both active)
+Formula: 104% × NAV at expiration close (BOTH tickers — most aggressive formula ever;
+         prior CLM cycles used market price floor: max(107–112%×NAV, 65–90%×market))
+
+N-2 filed:               Aug 14, 2026 | CLM $7.35
+Aug 17 capitulation:     8.62M CLM vol (4.6× avg), Cornerstone press release day.
+                         CLM $7.35 → $6.94 in one session (–2027 dist announcement)
+Aug 25 (Day 11):         CLM $6.74 (52w low $6.65 intraday), CRF $6.48 (52w low $6.44)
+NAV as of Aug 21:        CLM $6.31 | CRF $6.12  (from CEFConnect — refreshed Aug 25 2026)
+Current premiums:        CLM 6.81% | CRF 5.56%  (52w avg: 19.60% / 18.46%)
+Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × current NAV; shifts with Oct NAV)
+Estimated record date:   ~Oct 12, 2026  (59 days post-N-2 heuristic)
+Estimated expiration:    ~Nov 6, 2026
+Sept 15 ex-div:          CLM –$0.1215 | CRF –$0.1176 (mechanical drop; CRF falls to sub-price)
+Oct NAV lock:            End of October 2026 — Board sets 2027 distribution rate
+2027 FV estimate:        CLM ~$6.97 | CRF ~$6.76  (21% of Oct NAV ÷ 19% yield target)
+
+WHY 2026 IS FRONT-LOADED (different from 2025):
+  In 2025, CLM traded at ~17% premium when N-2 was filed — the market had room to
+  compress premium gradually toward sub price over the 84-day window.
+  In 2026, the Aug 17 Cornerstone press release revealed the 2027 distribution preview
+  ($0.1103/mo vs $0.1215/mo current). The market repriced to 2027 FV (~$6.97) within
+  3 days of the N-2. By Day 11, CLM is BELOW 2027 FV. The sell-off happened
+  before the record date, not during the subscription window.
+  → The 2025 "record date = bottom" pattern may NOT hold in 2026.
+  → The 2026 bottom may have already occurred (Aug 25 52w lows), or be forming now.
+  → September seasonality + ex-div Sept 15 add additional downward pressure.
+
+Tiered re-entry zones established Aug 25, 2026:
+  Tier 1 (Now, Aug 25–Sept 14):          CLM $6.65–$6.80 | CRF $6.40–$6.55
+  Tier 2 (Post-ex-div, Sept 15–19):      CLM $6.50–$6.65 | CRF $6.25–$6.40
+  Tier 3 (Record date, ~Oct 8–16):       CLM $6.30–$6.55 | CRF $6.00–$6.25
+  Tier 4 (Peak fear, scenario only):     CLM $6.00–$6.30 | CRF $5.75–$6.00
+
+UPDATE THIS BLOCK when the 424B3 is filed (actual record date + sub price),
+when expiration occurs, and when the post-expiration recovery level is known.
+```
+
+---
+
+### Universal RO Re-entry Signal Rules
+
+```python
+# The open-market buyer beats RO participants when:
+open_market_price <= sub_price  # buying below 104%×NAV = definitively cheaper than rights
+
+# Below these levels = premium at/near historical lows — near-certain mean reversion:
+CLM_PREMIUM_LOW_HISTORICAL = 6.08   # 52w low premium (percent) as of Aug 2026
+CRF_PREMIUM_LOW_HISTORICAL = 4.66   # 52w low premium (percent) as of Aug 2026
+
+# If price is near/at 52w low premium AND below 2027 FV → highest-conviction accumulate zone
+# Recovery driver: premium mean-reversion from 6% back toward 19% avg = structural tailwind
+# Independent of the RO outcome — income buyers see >21% yield and return.
+
+# September ex-div window (both tickers, typically Sept 15):
+# Mechanical –$0.12 drop creates 1–3 day accumulation window before income buyers re-enter.
+# CRF post-ex-div typically lands at or below estimated sub price — best open-market entry.
+```
+
+---
+
+### RO Cycle Comparison Table (add rows for each future cycle)
+
+| Cycle | Formula | N-2 Price | Record Date | Low Price | Low Date | Sub Price | Post-Exp 1mo |
+|-------|---------|-----------|-------------|-----------|----------|-----------|--------------|
+| 2025 CLM | 112%×NAV | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
+| 2026 CLM | 104%×NAV | $7.35 | ~Oct 12 est. | $6.65 intra | Aug 25 | ~$6.56 est. | TBD |
+| 2026 CRF | 104%×NAV | ~$7.12 | ~Oct 12 est. | $6.44 intra | Aug 25 | ~$6.37 est. | TBD |
+
+*Update TBD fields after 424B3 filing and post-expiration settlement.*
+
+---
+
 ## 0-F. Weekly Maintenance Protocol (Weekend Audit)
 
 This section is the institutional-grade maintenance playbook. Run it every weekend — ideally Saturday after close. It catches signal drift, stale data, DB rot, and script regressions before they affect Monday's trades.
