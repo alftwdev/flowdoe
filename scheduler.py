@@ -1638,7 +1638,9 @@ def main():
                         ivr_days = p.get("ivr_days", 0)
                         if ivr_days >= 30:
                             ivr_icon = "🔥" if p["ivr"] >= 60 else ("✅" if p["ivr"] >= 35 else "❄️")
-                            ivr_line = f"┣ IVR: {ivr_icon} `{p['ivr']:.0f}` ({p['ivr_tag']}) — {ivr_days}d history\n"
+                            _ivr_gloss = " — premium thin, better for buying options" if p["ivr"] < 15 else (
+                                         " — premium elevated, wheel/CSP edge present" if p["ivr"] >= 60 else "")
+                            ivr_line = f"┣ IVR: {ivr_icon} `{p['ivr']:.0f}` ({p['ivr_tag']}, {ivr_days}d){_ivr_gloss}\n"
                         else:
                             ivr_line = f"┣ IVR: `building` ({ivr_days}/30 days — HV30 proxy in use)\n"
 
@@ -1669,7 +1671,7 @@ def main():
                         _delta = p.get("rs_delta", 0.0)
                         _rs_detail_parts.append(f"Avg Δ{_delta:+.1f}% vs QQQ")
                         if p.get("rs_near_high"):
-                            _rs_detail_parts.append("near recent high")
+                            _rs_detail_parts.append("near 15d high")
                         if p.get("rs_sma_stacked"):
                             _rs_detail_parts.append("MAs stacked")
                         rs_line = f"┣ RS vs QQQ: {_rs_icon2} `{_rs_g}` — {' · '.join(_rs_detail_parts)}\n"
@@ -1688,7 +1690,7 @@ def main():
                         payload += (
                             f"**{p['symbol']}** `${p['spot']:.2f}`  "
                             f"{chg_arrow} `{abs(p['chg_5d']):.1f}%` (5D)\n"
-                            f"┣ Buzz: `{p['meter']}` · {p['lean']}\n"
+                            f"┣ Social buzz: `{p['meter']}` · {p['lean']}\n"
                             f"{ta_line}"
                             f"{rs_line}"
                             f"{ivr_line}"
@@ -1697,10 +1699,7 @@ def main():
                             f"{bto_block}"
                             f"┗ {p['verdict']}\n\n"
                         )
-                    payload += (
-                        "─────────────────────────\n"
-                        "Not financial advice — for informational/educational use only."
-                    )
+                    payload = payload.rstrip("\n")
                     if WEBHOOK_OPTIONS:
                         send_essentials_embed(
                             WEBHOOK_OPTIONS,

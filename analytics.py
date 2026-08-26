@@ -4198,9 +4198,13 @@ class HighFidelityAnalyticsEngine:
                 elif rsi >= 72 and chg_5d >= 15.0:
                     verdict = "Extended — IV crush risk"
                 elif chg_5d >= 5.0 and vol_ratio >= 1.3:
-                    verdict = "Momentum confirmed"
-                elif chg_5d >= 3.0 or vol_ratio >= 1.3:
-                    verdict = "Building momentum"
+                    verdict = "Momentum confirmed ↑"
+                elif chg_5d >= 3.0 or (chg_5d >= 0 and vol_ratio >= 1.3):
+                    verdict = "Building momentum ↑"
+                elif chg_5d <= -5.0 and vol_ratio >= 1.3:
+                    verdict = "Bearish momentum ↓ — put setup or wait for reversal"
+                elif chg_5d <= -3.0:
+                    verdict = "Declining ↓ — watch for support level or put entry"
                 else:
                     verdict = "Watching — no momentum confirmation yet"
 
