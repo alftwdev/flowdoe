@@ -64,8 +64,10 @@ CLM_FV_2027_EXAMPLE   = 6.97     # CLM_DIST_2027_EXAMPLE / 0.19 — market prici
 CRF_FV_2027_EXAMPLE   = 6.74     # CRF_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
 
 # NAV fallbacks (refresh whenever CEFConnect NAV changes >0.10)
-CLM_NAV_FALLBACK = 6.73   # updated Aug 16 2026 per N-2 EDGAR filing Aug 14
-CRF_NAV_FALLBACK = 6.18   # updated Jul 23 2026 based on implied NAV math
+CLM_NAV_FALLBACK = 6.31   # updated Aug 25 2026 per CEFConnect (NAV as of Aug 21 2026)
+                          # was 6.73 (Aug 16, per N-2 filing) — dropped $0.42 as portfolio fell
+CRF_NAV_FALLBACK = 6.12   # updated Aug 25 2026 per CEFConnect (NAV as of Aug 21 2026)
+                          # was 6.18 (Jul 23, implied math) — minor update
 
 # Margin rate (E*TRADE)
 MARGIN_RATE = 7.25
