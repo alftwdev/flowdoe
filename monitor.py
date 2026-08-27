@@ -70,8 +70,8 @@ TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 # ASSET CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 PRIORITY_ASSETS = {
-    "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.73},   # updated Aug 16 2026 — NAV per N-2 EDGAR filing Aug 14
-    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.18}    # updated Jul 23 2026; actual NAV ~$6.18
+    "CLM": {"nav_ticker": "XCLMX", "default_nav": 6.31},   # updated Aug 25 2026 — CEFConnect Aug 21 (was 6.73 per N-2)
+    "CRF": {"nav_ticker": "XCRFX", "default_nav": 6.12}    # updated Aug 25 2026 — CEFConnect Aug 21 (was 6.18)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1104,7 +1104,7 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
 
         _annual_div_dip = 1.458 if ticker == "CLM" else 1.4112
         _nav_dip_raw, _, _ = fetch_nav_cefconnect(session, ticker)
-        _nav_dip = _nav_dip_raw if _nav_dip_raw and _nav_dip_raw > 0 else (6.73 if ticker == "CLM" else 6.18)
+        _nav_dip = _nav_dip_raw if _nav_dip_raw and _nav_dip_raw > 0 else (6.31 if ticker == "CLM" else 6.12)
         _zone_low  = round(_nav_dip * 0.99, 2)
         _zone_high = round(_nav_dip * 1.015, 2)
         _implied_yield = round(_annual_div_dip / current_price * 100, 1) if current_price > 0 else 0
@@ -1173,7 +1173,7 @@ def detect_intra_ro_entry_zone(session, ticker: str, current_price: float, curre
             return False
 
         annual_div   = 1.458 if ticker == "CLM" else 1.4112
-        nav_fallback = 6.73   if ticker == "CLM" else 6.18
+        nav_fallback = 6.31   if ticker == "CLM" else 6.12  # CEFConnect Aug 21 2026
         fair_value   = round(annual_div / 0.19, 2)
         implied_yield = round(annual_div / current_price * 100, 1) if current_price > 0 else 0.0
 
@@ -1341,7 +1341,7 @@ def calculate_reentry_score(
     Only meaningful when ro_dodge_active_{ticker} is set in DB.
     """
     annual_div = 1.458 if ticker == "CLM" else 1.4112
-    nav_fallback = 6.73 if ticker == "CLM" else 6.18  # CLM updated Aug 16 2026 per N-2 EDGAR filing
+    nav_fallback = 6.31 if ticker == "CLM" else 6.12  # CEFConnect Aug 21 2026
     _nav = nav if nav > 0 else nav_fallback
 
     fair_value = round(annual_div / 0.19, 2)   # income buyer floor (19% yield support threshold)
@@ -1517,7 +1517,7 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
 
     if short:
         # ── 3-line pulse version — status, zone, countdown only ──────────────
-        _nav_pulse = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
+        _nav_pulse = r.get("nav_used", 6.31 if ticker == "CLM" else 6.12)
         _annual_div_pulse = 1.458 if ticker == "CLM" else 1.4112
         _nav_yield_pulse = round(_annual_div_pulse / _nav_pulse * 100, 1) if _nav_pulse > 0 else 0.0
         lines = [
@@ -1542,7 +1542,7 @@ def format_reentry_block(ticker: str, r: dict, short: bool = False) -> str:
     #   Prior cycles: max(107–112% NAV, 65–90% market price). Formula can change each RO.
     # Open-market buyers who wait until price ≤ sub price beat RO participants:
     # no lock-up period, margin-eligible, no subscription paperwork.
-    _nav_for_sub = r.get("nav_used", 6.73 if ticker == "CLM" else 6.18)
+    _nav_for_sub = r.get("nav_used", 6.31 if ticker == "CLM" else 6.12)
     _ro_sub_px = round(_nav_for_sub * 1.04, 2)  # 2026: 104% NAV for both CLM and CRF
 
     _annual_div_full = 1.458 if ticker == "CLM" else 1.4112
@@ -3593,7 +3593,7 @@ def run_monitor():
                             if not _already_alerted:
                                 # First alert for this RO cycle — clean format, N-2 only
                                 _ann_div   = 1.458 if _ticker == "CLM" else 1.4112
-                                _nav_fb    = 6.73   if _ticker == "CLM" else 6.18  # Aug 16 2026 N-2 filing NAV
+                                _nav_fb    = 6.31   if _ticker == "CLM" else 6.12  # CEFConnect Aug 21 2026
                                 _fv        = round(_ann_div / 0.19, 2)
                                 # Re-entry range: NAV (post-dilution bottom) to FV (income buyer floor)
                                 _re_lo     = _nav_fb
