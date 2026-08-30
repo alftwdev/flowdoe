@@ -979,6 +979,11 @@ class HighFidelityAnalyticsEngine:
         "SPY", "QQQ", "IWM", "GLD", "XLE",
     ]
 
+    # Income/dividend names that are rangebound by nature — qualify for 0.25–0.32 delta
+    # when IVR ≤ 40. On these stocks, 30δ generates ~2× the premium of 15δ for near-identical
+    # assignment risk (stock rarely gaps >5% without a fundamental catalyst).
+    INCOME_TIER = frozenset({"SCHD", "JEPI", "JEPQ", "O", "ARCC"})
+
     def _calculate_fib_zone(self, vals: list) -> dict:
         """
         Fibonacci golden pocket zone from recent price swing.
@@ -1107,7 +1112,6 @@ class HighFidelityAnalyticsEngine:
         universe = universe or self.WHEEL_UNIVERSE
         flagged = []
         today = datetime.now()
-        DELTA_MIN, DELTA_MAX = 0.20, 0.35
 
         # Build Tradier client once per screener run (not once per symbol)
         _tc_ivr = None
@@ -1200,6 +1204,15 @@ class HighFidelityAnalyticsEngine:
                 if ivr_proxy <= ivr_threshold:
                     continue
 
+                # Two-tier delta selection — calibrated to each stock's volatility profile.
+                # Income/dividend names (IVR ≤ 40): 0.25–0.32 delta captures ~2× premium vs
+                # 15δ for near-identical assignment risk on rangebound stocks. All others
+                # (high-IV growth names, broad ETFs): 0.18–0.28 delta — real buffer warranted.
+                if symbol in self.INCOME_TIER and ivr_proxy <= 40.0:
+                    delta_lo, delta_hi = 0.25, 0.32
+                else:
+                    delta_lo, delta_hi = 0.18, 0.28
+
                 # VRP gate: IV must exceed HV30 by ≥5pp to confirm the volatility risk premium is
                 # structurally active. <5pp means IV is only marginally above realized vol — the premium
                 # edge is too thin to compensate for assignment risk. Source: triple-confirmation
@@ -1247,7 +1260,7 @@ class HighFidelityAnalyticsEngine:
                     near_term.loc[near_term["delta"] == 0, "delta"] = ((spot - near_term["strike"]) / spot).clip(0.01, 0.99)
                 else:
                     near_term["delta"] = ((spot - near_term["strike"]) / spot).clip(0.01, 0.99)
-                puts = near_term[(near_term.get("type", "put") == "put") & (near_term["delta"] >= DELTA_MIN) & (near_term["delta"] <= DELTA_MAX)]
+                puts = near_term[(near_term.get("type", "put") == "put") & (near_term["delta"] >= delta_lo) & (near_term["delta"] <= delta_hi)]
                 if not puts.empty:
                     bid = pd.to_numeric(puts.get("bid", 0), errors="coerce").fillna(0)
                     ask = pd.to_numeric(puts.get("ask", 0), errors="coerce").fillna(0)

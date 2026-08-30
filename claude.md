@@ -1085,7 +1085,12 @@ WHEEL_UNIVERSE = [
 ```
 ```
 STEP 1 — Entry filter: IVR > 35%, (ask-bid)/mid < 10%, no earnings within 45 days
-STEP 2 — Sell CSP: 0.20 delta, 30–45 DTE, premium ≥ 1% of strike
+STEP 2 — Sell CSP: delta calibrated to IV profile, 30–45 DTE, premium ≥ 1% of strike
+          Income/dividend names (SCHD/JEPI/JEPQ/O/ARCC) with IVR ≤ 40%: 0.25–0.32 delta
+            → rangebound stocks; 30δ generates ~2× premium vs 15δ for near-identical risk
+            → assignment at 5-7% discount on a quality dividend name is often a good entry
+          All others (high-IV growth, broad ETFs, IVR > 40%): 0.18–0.28 delta
+            → real movement risk on these names; the extra distance is earned, not cosmetic
 STEP 3 — Manage: Close at 50% profit | Roll at 21 DTE if untested
           Thesis-break exit: at entry, note the next technical resistance above the CSP strike.
           If price closes above that level, exit immediately for ~1/3 max loss — do NOT hold to expiration
