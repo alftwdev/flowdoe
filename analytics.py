@@ -1263,6 +1263,13 @@ class HighFidelityAnalyticsEngine:
                         "oi_high": int(puts["open_interest"].max()),
                         "oi_low": int(puts["open_interest"].min()),
                     }
+                    # R:R metrics — computed from existing fields, zero extra API calls.
+                    # Breakeven = where assignment starts costing money; ann_yield = capital
+                    # efficiency of the collected premium annualized over the DTE window.
+                    csp_setup["breakeven"] = round(csp_setup["strike"] - csp_setup["premium"], 2)
+                    csp_setup["ann_yield"]  = round(
+                        (csp_setup["premium"] / csp_setup["strike"]) * (365.0 / csp_setup["dte"]) * 100, 1
+                    ) if csp_setup["dte"] > 0 and csp_setup["strike"] > 0 else 0.0
 
                 # Real dividend data
                 div_yield, div_freq, div_amount = None, None, None

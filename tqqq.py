@@ -2852,6 +2852,110 @@ class TQQQTacticalSniper:
         except Exception as e:
             logger.warning(f"Chart post to Discord failed: {e}")
 
+    def detect_breakout_retest(self, intraday, daily):
+        """
+        Second chance scalp — breakout-retest pattern on TQQQ 5-min bars.
+        SMB Capital methodology: price breaks consolidation range → pulls back to the
+        breakout level → buyers defend it → clean directional entry with a tight stop.
+
+        Distinct from the LEAP desk (this is 21-45 DTE, directional, intraday structure).
+        Fires an informational setup alert; tape confirmation still required before execution.
+        Cooldown: 4 hours. Only runs when no position is open.
+        """
+        COOLDOWN_HOURS = 4
+        last_ts = db.get_state("tqqq_breakout_retest_ts")
+        if last_ts:
+            try:
+                elapsed_h = (datetime.now() - datetime.fromisoformat(last_ts)).total_seconds() / 3600
+                if elapsed_h < COOLDOWN_HOURS:
+                    logger.debug(f"Breakout-retest cooldown: {elapsed_h:.1f}h / {COOLDOWN_HOURS}h")
+                    return
+            except Exception:
+                pass
+
+        try:
+            params = {"symbol": self.symbol, "interval": "5min", "outputsize": "30", "apikey": TWELVE_DATA_API_KEY}
+            res = requests.get(f"{self.base_url}/time_series", params=params, timeout=12).json()
+            if "values" not in res or len(res["values"]) < 20:
+                return
+            df = pd.DataFrame(res["values"])
+            for col in ("close", "high", "low"):
+                df[col] = df[col].astype(float)
+            df["volume"] = df["volume"].astype(int)
+            df = df.iloc[::-1].reset_index(drop=True)
+        except Exception as e:
+            logger.debug(f"Breakout-retest bar fetch failed: {e}")
+            return
+
+        if len(df) < 20:
+            return
+
+        # Consolidation base: bars[-20:-8] (~60-100 min before current bar)
+        base = df.iloc[-20:-8]
+        range_high = base["high"].max()
+        range_low  = base["low"].min()
+        range_width_pct = (range_high - range_low) / range_high * 100
+        # Require a clean, defined range: 0.25%–2.5% wide
+        if not (0.25 <= range_width_pct <= 2.5):
+            return
+
+        # Breakout: any of bars[-8:-4] closed above range_high (with 0.1% buffer to avoid noise)
+        breakout_bars = df.iloc[-8:-4]
+        if not (breakout_bars["close"] > range_high * 1.001).any():
+            return
+
+        # Retest: bars[-4:-1] pulled back to within 0.5% of range_high (but didn't close below it)
+        retest_bars  = df.iloc[-4:-1]
+        retest_low   = retest_bars["low"].min()
+        retest_close = retest_bars["close"].min()
+        if not (range_high * 0.995 <= retest_low <= range_high * 1.006):
+            return
+        if retest_close < range_high * 0.998:  # retest close broke the level — pattern failed
+            return
+
+        # Current bar holds above breakout level
+        current = df.iloc[-1]
+        tqqq_spot = current["close"]
+        if tqqq_spot <= range_high:
+            return
+
+        # VWAP filter: TQQQ must be above its session VWAP (momentum confirmed)
+        # Using QQQ VWAP as proxy (intraday dict uses QQQ; TQQQ tracks it closely)
+        vwap = intraday.get("vwap", 0.0) if intraday else 0.0
+        if vwap > 0 and tqqq_spot < vwap * 0.995:
+            return
+
+        # Regime filter: don't fire scalp setups deep in a daily bear trend
+        sma200  = daily.get("sma200", 0.0) if daily else 0.0
+        qqq_spt = daily.get("spot", 0.0) if daily else 0.0
+        if sma200 > 0 and qqq_spt < sma200 * 0.96:
+            return
+
+        # Volume health: retest should show lower volume than the breakout bars (orderly pullback)
+        breakout_vol_avg = breakout_bars["volume"].mean()
+        retest_vol_avg   = retest_bars["volume"].mean()
+        vol_note = "✅ Volume contracting on retest (orderly)" if retest_vol_avg < breakout_vol_avg * 1.05 else "⚠️ Retest volume elevated — wait for clear tape"
+
+        move_pct       = (tqqq_spot - range_high) / range_high * 100
+        # Suggest slightly OTM strike: round to nearest $0.50 above 1% OTM
+        suggested_strike = round(tqqq_spot * 1.01 / 0.5) * 0.5
+        stop_level       = round(range_high * 0.997, 2)
+
+        payload = (
+            f"📐 **BREAKOUT-RETEST — TQQQ 5-min**\n"
+            f"┣ Pattern: Consolidation break → retest → buyers defended level\n"
+            f"┣ Range: `${range_low:.2f}`–`${range_high:.2f}` ({range_width_pct:.1f}% wide)\n"
+            f"┣ Level held: `${range_high:.2f}` | TQQQ now: `${tqqq_spot:.2f}` (+{move_pct:.2f}%)\n"
+            f"┣ {vol_note}\n"
+            f"┣ Setup: BTO TQQQ Call | Strike ~`${suggested_strike:.2f}` | 21–45 DTE\n"
+            f"┣ Stop: Close if TQQQ prints below `${stop_level}` (level fails)\n"
+            f"┗ ⚠️ Confirm tape before entering — this is a setup, not a trigger"
+        )
+        if WEBHOOK_TRADE_SIGNALS:
+            send_essentials_embed(WEBHOOK_TRADE_SIGNALS, "TQQQ SNIPER | SECOND CHANCE SETUP", payload, 0x27ae60)
+            db.update_state("tqqq_breakout_retest_ts", datetime.now().isoformat())
+            logger.info(f"Breakout-retest setup dispatched: TQQQ ${tqqq_spot:.2f} held above ${range_high:.2f}")
+
     def execute_sniper_sweep(self):
         if not is_market_hours():
             logger.info("Market closed — TQQQ sniper standing down.")
@@ -3027,6 +3131,11 @@ class TQQQTacticalSniper:
         if setup and setup["action"] != "MONITORING SETUP" and db.get_state("tqqq_open_position"):
             logger.info(f"Position already open — standing down, riding existing trade")
             return
+
+        # Breakout-retest scanner — independent of cycle scorer and LEAP desk.
+        # Only runs when no position is open (avoids conflicting signals).
+        if not db.get_state("tqqq_open_position"):
+            self.detect_breakout_retest(intraday, daily)
 
         if setup:
             # Fire once per distinct setup — dispatch only when direction or action level changes.

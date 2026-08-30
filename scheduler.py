@@ -717,7 +717,7 @@ def main():
                                 setup_line = (
                                     f"┣ Strategy: CSP (Cash-Secured Put)\n"
                                     f"┣ Setup: `STO ${csp['strike']:.1f} Put` | Exp: `{csp['expiration']}` ({csp['dte']} DTE) | Δ `{csp['delta']:.2f}`\n"
-                                    f"┣ Premium: `${csp['premium']*100:.0f}/contract` | Volume: `{csp['volume']:,}` | OI Range `{csp['oi_low']:,}`–`{csp['oi_high']:,}`\n"
+                                    f"┣ Premium: `${csp['premium']*100:.0f}/contract` | Breakeven: `${csp.get('breakeven', round(csp['strike'] - csp['premium'], 2)):.2f}` | Ann. `{csp.get('ann_yield', 0.0):.1f}%` | OI `{csp['oi_low']:,}–{csp['oi_high']:,}`\n"
                                 )
                             div_line = ""
                             assigned_line = ""

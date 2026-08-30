@@ -1089,9 +1089,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         "NEUTRAL":  "Selective entries only. Wait for clearer bias before sizing up.",
     }[bias["label"]]
 
+    session_timing = (
+        "┣ Timing: Avoid 09:30–09:35 ET open (liquidity gap + wide spreads); best window 09:45–15:30 ET\n"
+        if bias["label"] != "BEARISH" else ""
+    )
     directives_section = (
         f"\n**TODAY'S POSTURE: {bias['label']} (Score: {score_sign})**\n"
         f"┣ Bias: {directive_label}\n"
+        f"{session_timing}"
         f"┗ Wheel params: {wheel_directive}\n"
     )
 
