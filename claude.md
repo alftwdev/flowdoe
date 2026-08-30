@@ -1087,7 +1087,11 @@ WHEEL_UNIVERSE = [
 STEP 1 — Entry filter: IVR > 35%, (ask-bid)/mid < 10%, no earnings within 45 days
 STEP 2 — Sell CSP: 0.20 delta, 30–45 DTE, premium ≥ 1% of strike
 STEP 3 — Manage: Close at 50% profit | Roll at 21 DTE if untested
-          If breached: roll down+out for credit, or take assignment → sell CC
+          Thesis-break exit: at entry, note the next technical resistance above the CSP strike.
+          If price closes above that level, exit immediately for ~1/3 max loss — do NOT hold to expiration
+          for max loss. A thesis break (price piercing resistance) signals the setup is invalid.
+          Taking a controlled early loss preserves capital to re-deploy; holding to max loss is a discipline failure.
+          If breached but thesis intact: roll down+out for credit, or take assignment → sell CC
 STEP 4 — CC after assignment: ATM/slight OTM, 21–30 DTE
 STEP 5 — Capital rule: max 30% of available margin in wheel at any time
 ```
