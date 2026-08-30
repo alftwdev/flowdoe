@@ -46,8 +46,9 @@ CREDIT_KEYWORDS = ("visa", "mastercard", "card", "credit", "amex", "platinum", "
 
 # NAV proxy tickers and defaults
 NAV_TICKERS  = {"CLM": "XCLMX", "CRF": "XCRFX"}
-NAV_DEFAULTS = {"CLM": 6.73, "CRF": 6.18}   # CLM updated Aug 16 2026 per N-2 EDGAR filing; CRF corrected Jul 23 2026
+NAV_DEFAULTS = {"CLM": 6.31, "CRF": 6.12}    # CEFConnect Aug 21 2026 — updated Aug 25 2026
 CEF_ANNUAL_DIST = {"CLM": 1.458, "CRF": 1.4112}  # confirmed Aug 17 2026 — CLM $0.1215/mo×12, CRF $0.1176/mo×12
+CEF_FV_2027 = {"CLM": 6.97, "CRF": 6.76}  # 2027 FV example (21% of Jul NAV ÷ 0.19); market is pricing here
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONE-TIME SETUP — Claim SimpleFIN Access URL
@@ -535,83 +536,34 @@ def _portfolio_deltas(current_total, state):
     return " | ".join(parts)
 
 
-def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None, simplefin_stale=False, ro_gate_info=None):  # noqa: ARG001 (regime/market_mood reserved for future use)
-    today     = date.today().strftime("%b %d, %Y")
-    lines     = []
+def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_status=None, market_mood=None, simplefin_stale=False, ro_gate_info=None):  # noqa: ARG001
+    today = date.today().strftime("%b %d, %Y")
+    lines = []
 
-    if simplefin_stale:
-        cached_date = state.get("simplefin_cache", {}).get("date", "unknown")
-        lines.append(f"⚠️ SimpleFIN offline — showing cached data from {cached_date}")
-        lines.append("")
-
-    # ── Section 1: Cash Reserves (liquid checking/savings only)
-    total_liquid = sum(a["balance"] for a in liquid)
-    prev_liquid  = state.get("total_liquid")
-    lines.append("CASH RESERVES")
-    for a in liquid:
-        lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
-    lines.append(f"┗ Total: ${total_liquid:,.2f}{_delta(total_liquid, prev_liquid)}")
-
-    # ── Section 2: Credit / Liabilities (sorted most-negative first, skip zero-balance)
-    active_credit = [a for a in credit if round(a["balance"], 2) != 0.0]
-    total_owed = sum(a["balance"] for a in active_credit)
-    lines.append("")
-    lines.append("CREDIT / LIABILITIES")
-    if active_credit:
-        for a in active_credit:
-            bal_str = f"$-{abs(a['balance']):,.2f}" if a["balance"] <= 0 else f"${a['balance']:,.2f}"
-            lines.append(f"┣ {_clean_name(a['org'], a['name'])}: {bal_str}")
-        lines.append(f"┗ Total Owed: $-{abs(total_owed):,.2f}")
-    else:
-        lines.append("┗ No credit balances")
-
-    # ── Section 3: Brokerage (skip zero-balance accounts)
-    active_brokers  = [a for a in brokerage if a["balance"] != 0]
-    total_brokerage = sum(a["balance"] for a in active_brokers if a["balance"] > 0)
-    port_deltas     = _portfolio_deltas(total_brokerage, state)
-    lines.append("")
-    lines.append("BROKERAGE")
-    for a in active_brokers:
-        lines.append(f"┣ {_clean_name(a['org'], a['name'])}: ${a['balance']:,.2f}")
-    lines.append(f"┣ Total Portfolio: ${total_brokerage:,.2f}")
-    lines.append(f"┗ {port_deltas}")
-
-    # ── Section 4: Net Worth Snapshot
-    net_worth = total_liquid + total_owed + total_brokerage
-
-    # ── Section 6: Buying Power Reality Check (computed before NET WORTH so CPI is available)
-    bp = fetch_buying_power_snapshot(total_liquid, total_brokerage, total_owed)
-    cpi_yoy = bp.get("cpi_yoy") or 3.5
-
-    lines.append("")
-    lines.append("NET WORTH SNAPSHOT")
-    lines.append(f"┣ Liquid:    ${total_liquid:,.2f}")
-    lines.append(f"┣ Owed:      ${total_owed:,.2f}")
-    lines.append(f"┣ Portfolio: ${total_brokerage:,.2f}")
-    lines.append(f"┣ Net Worth: ${net_worth:,.2f}{_delta(net_worth, state.get('net_worth'))}")
-    # Real (inflation-adjusted) net worth — answers "what is my money actually worth?"
-    real_nw = round(net_worth / (1 + cpi_yoy / 100), 2)
-    lines.append(f"┗ Real NW (CPI-adj): ${real_nw:,.2f} — ${net_worth - real_nw:,.0f} lost to {cpi_yoy:.1f}% inflation/yr")
-
-    # ── Section 5: CLM / CRF Cornerstone — bite-size snippet (price + re-entry range + gate note)
-    lines.append("")
+    # ── CORNERSTONE: CLM / CRF — price, premium, sub price, recovery target, gate
     lines.append("CORNERSTONE (CLM / CRF)")
     tickers_list = list(ro_status.keys()) if ro_status else ["CLM", "CRF"]
     for ticker in tickers_list:
-        edgar_str  = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
-        snap       = cef.get(ticker, {}) if cef else {}
-        price      = snap.get("price", 0.0)
-        nav        = snap.get("nav", 0.0) or NAV_DEFAULTS.get(ticker, 0.0)
+        edgar_str   = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
+        snap        = cef.get(ticker, {}) if cef else {}
+        price       = snap.get("price", 0.0)
+        nav         = snap.get("nav", 0.0) or NAV_DEFAULTS.get(ticker, 0.0)
         annual_dist = CEF_ANNUAL_DIST.get(ticker, 0.0)
-        fair_value  = round(annual_dist / 0.19, 2) if annual_dist else 0.0
-        reentry_lo  = round(nav * 0.99, 2)   # DRIP floor: slight NAV discount
+        fv_2027     = CEF_FV_2027.get(ticker, 0.0)
+        sub_price   = round(nav * 1.04, 2)  # 104% of NAV — 2026 RO formula
         gate        = (ro_gate_info or {}).get(ticker, {})
 
         lines.append(f"{ticker}: {edgar_str}")
-        if price > 0:
-            lines.append(f"┣ Current price: ${price:.2f}")
-        if reentry_lo > 0 and fair_value > 0:
-            lines.append(f"┣ Re-entry range: ${reentry_lo:.2f} – ${fair_value:.2f}")
+        if price > 0 and nav > 0:
+            premium_pct = round((price / nav - 1) * 100, 1)
+            lines.append(f"┣ Price: ${price:.2f}  |  NAV: ${nav:.2f}  |  Premium: {premium_pct:+.1f}%")
+        elif price > 0:
+            lines.append(f"┣ Price: ${price:.2f}")
+        if sub_price > 0:
+            beat_str = "✓ beating RO" if price > 0 and price <= sub_price else "above sub price"
+            lines.append(f"┣ Sub price: ~${sub_price:.2f}  ({beat_str})")
+        if fv_2027 > 0:
+            lines.append(f"┣ Recovery target: ~${fv_2027:.2f}  (2027 FV — where market is pricing)")
 
         if gate:
             path_a_open = gate.get("path_a_open", False)
@@ -619,30 +571,36 @@ def format_pulse_message(liquid, credit, brokerage, cef, regime, state, ro_statu
             path_a_date = gate.get("path_a_date", "")
             path_b_date = gate.get("path_b_date", "")
             if path_b_open:
-                lines.append(f"┗ Note: Path B OPEN — yield floor re-entry active ({path_b_date}+)")
+                lines.append(f"┗ Path B OPEN — yield floor re-entry active ({path_b_date}+)")
             elif path_a_open:
-                lines.append(f"┗ Note: Path A OPEN — monitor for entry signal ({path_a_date}+)")
+                lines.append(f"┗ Path A OPEN — monitor for entry signal ({path_a_date}+)")
             else:
-                lines.append(f"┗ Note: {path_a_date} — Path A gate opens (30d from N-2)")
-        elif fair_value > 0:
-            lines.append(f"┗ Re-entry: accumulate at or below ${fair_value:.2f}")
-        lines.append("")  # blank line between tickers
-
-    if bp.get("cpi_yoy") is not None:
+                lines.append(f"┗ Path A gate: {path_a_date}  (30d from N-2)")
+        elif fv_2027 > 0:
+            lines.append(f"┗ Accumulate at or below ${fv_2027:.2f}")
         lines.append("")
-        lines.append("BUYING POWER (Real $)")
-        lines.append(f"┣ CPI (YoY): {bp['cpi_yoy']:.1f}% — live from FRED")
-        lines.append(f"┣ Cash erosion: -${bp['cash_erosion_monthly']:.0f}/mo | -${bp['cash_erosion_annual']:.0f}/yr on ${total_liquid:,.0f} idle")
-        lines.append(f"┣ Idle cash halves in: {bp['years_to_half']:.0f} yrs at current CPI (Rule of 72)")
-        lines.append(f"┣ Portfolio real yield: {bp['real_portfolio_yield']:+.1f}% (19% blended − {bp['cpi_yoy']:.1f}% CPI)")
-        lines.append(f"┣ Margin real cost: {bp['margin_real_cost']:+.2f}% (7.25% rate − {bp['cpi_yoy']:.1f}% CPI)")
-        lines.append(f"┗ {bp['deploy_urgency']}")
 
-    # ── Section 8: Net Monthly Income (Profit First formula)
-    # Carry spread and margin interest are tracked in monitor.py (cornerstone channel).
-    # Removed from daily_pulse to reduce Pushover notification fatigue.
+    # ── DEPLOY vs IDLE — CPI opportunity cost (balance-agnostic, per $1k)
+    bp = fetch_buying_power_snapshot(0.0, 0.0, 0.0)
+    if bp.get("cpi_yoy") is not None:
+        cpi = bp["cpi_yoy"]
+        clm_snap = (cef or {}).get("CLM", {})
+        clm_price = clm_snap.get("price", 0.0)
+        clm_dist = CEF_ANNUAL_DIST.get("CLM", 1.458)
+        clm_yield = round(clm_dist / clm_price * 100, 1) if clm_price > 0 else 22.0
+        idle_loss_1k = round(1000 * cpi / 100 / 12, 2)   # purchasing power lost per $1k/mo
+        clm_income_1k = round(1000 * clm_dist / clm_price / 12, 2) if clm_price > 0 else round(1000 * 0.22 / 12, 2)
+        advantage = round(clm_yield - cpi, 1)
 
-    title   = f"💼 Daily Pulse — {today}"
+        lines.append("DEPLOY vs IDLE")
+        lines.append(f"┣ CPI (YoY): {cpi:.1f}% — live from FRED")
+        lines.append(f"┣ Idle cash: −${idle_loss_1k:.2f}/mo per $1k (inflation drag)")
+        lines.append(f"┣ CLM at ${clm_price:.2f}: {clm_yield:.1f}% yield → +${clm_income_1k:.2f}/mo per $1k")
+        lines.append(f"┣ Advantage: +{advantage:.1f}pp vs idle  ({clm_yield:.1f}% − {cpi:.1f}% CPI)")
+        lines.append(f"┣ Portfolio real yield: {bp['real_portfolio_yield']:+.1f}% (19% blended − {cpi:.1f}% CPI)")
+        lines.append(f"┗ Margin real cost: {bp['margin_real_cost']:+.2f}% (7.25% rate − {cpi:.1f}% CPI) — positive carry")
+
+    title   = f"⚡ Evening Pulse — {today}"
     message = "\n".join(lines)
     return title, message, 0
 
@@ -687,58 +645,20 @@ def run_daily_pulse(force=False, debug=False):
         logger.info("Already sent today — use --force to override")
         return
 
-    liquid, credit, brokerage = fetch_simplefin_accounts(debug=debug)
+    # SimpleFIN cancelled — pass empty lists; format_pulse_message no longer uses them.
+    # To re-enable: restore fetch_simplefin_accounts() call and state saving below.
+    liquid, credit, brokerage = [], [], []
 
-    # Cache fallback: if SimpleFIN fetch failed (empty), load last-known-good from state.
-    simplefin_stale = False
-    if not liquid and not credit and not brokerage:
-        cached = state.get("simplefin_cache")
-        if cached:
-            liquid    = cached.get("liquid", [])
-            credit    = cached.get("credit", [])
-            brokerage = cached.get("brokerage", [])
-            simplefin_stale = True
-            logger.warning(f"SimpleFIN fetch failed — using cached data from {cached.get('date', 'unknown')}")
-        else:
-            logger.warning("SimpleFIN fetch failed and no cache available — balances will show $0")
-
-    ro_status   = fetch_ro_status()
+    ro_status    = fetch_ro_status()
     ro_gate_info = fetch_ro_gate_info()
-    cef_data    = fetch_cef_snapshot()
+    cef_data     = fetch_cef_snapshot()
 
     title, message, _ = format_pulse_message(liquid, credit, brokerage, cef_data, None, state, ro_status,
-                                             ro_gate_info=ro_gate_info, simplefin_stale=simplefin_stale)
+                                             ro_gate_info=ro_gate_info)
     success = push_to_pushover(title, message, priority=0)
 
     if success:
-        total_liquid    = sum(a["balance"] for a in liquid)
-        active_brokers  = [a for a in brokerage if a["balance"] != 0]
-        total_brokerage = sum(a["balance"] for a in active_brokers if a["balance"] > 0)
-        net_worth       = total_liquid + sum(a["balance"] for a in credit) + total_brokerage
-
-        # Store dated snapshot for brokerage delta history (1D/3M/6M/1Y)
-        snapshots = state.get("snapshots", {})
-        snapshots[today_str] = total_brokerage
-        # Prune snapshots older than 400 days to keep state file lean
-        cutoff = (date.today() - __import__("datetime").timedelta(days=400)).isoformat()
-        snapshots = {k: v for k, v in snapshots.items() if k >= cutoff}
-
-        state_update = {
-            "last_run_date":   today_str,
-            "total_liquid":    total_liquid,
-            "total_brokerage": total_brokerage,
-            "net_worth":       net_worth,
-            "snapshots":       snapshots,
-        }
-        # Only overwrite SimpleFIN cache when we got fresh data (not stale fallback)
-        if not simplefin_stale and (liquid or credit or brokerage):
-            state_update["simplefin_cache"] = {
-                "date":      today_str,
-                "liquid":    liquid,
-                "credit":    credit,
-                "brokerage": brokerage,
-            }
-        state.update(state_update)
+        state["last_run_date"] = today_str
         save_state(state)
 
 
