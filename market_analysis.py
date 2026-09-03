@@ -606,18 +606,29 @@ def _build_headlines_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDa
 # ── Report Builders ───────────────────────────────────────────────────────────
 
 def _wheel_idle_str(db: EcosystemDatabase) -> str:
-    """Returns top-IVR opportunity when no wheel positions are open."""
+    """Top 3 IVR candidates + earnings caution flags when no wheel positions are open."""
+    parts = []
+    earnings_warns = []
     try:
         today_str = datetime.now().strftime("%Y-%m-%d")
         ws = db.get_state("wheel_candidates_snapshot")
-        if ws and isinstance(ws, dict) and ws.get("date") == today_str and ws.get("high_count", 0) > 0:
-            tops = ws.get("top_candidates", [])[:2]
-            if tops:
-                top_str = " | ".join(f"`{t['sym']}` IVR {t.get('ivr', 0):.0f}%" for t in tops)
-                return f"Idle — top IVR: {top_str}"
+        if ws and isinstance(ws, dict) and ws.get("date") == today_str:
+            tops = ws.get("top_candidates", [])[:3]
+            for t in tops:
+                sym = t.get("sym", "")
+                ivr = t.get("ivr", 0)
+                dte_warn = t.get("earnings_dte")  # set by generate_tier2_iv_rank_alerts
+                if dte_warn is not None and int(dte_warn) <= 21:
+                    earnings_warns.append(f"⚠️ {sym} earn {int(dte_warn)}d")
+                else:
+                    parts.append(f"`{sym}` {ivr:.0f}%")
     except Exception:
         pass
-    return "Idle — run wheel_signals for setups"
+    if not parts and not earnings_warns:
+        return "No screener data — run wheel_signals"
+    ivr_str = " · ".join(parts) if parts else "—"
+    warn_str = " | " + " ".join(earnings_warns) if earnings_warns else ""
+    return f"IVR: {ivr_str}{warn_str}"
 
 
 def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemDatabase) -> tuple:
@@ -676,14 +687,28 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         _gex_state  = db.get_state("SPY_session") or ""   # "RTH" / "OVERNIGHT" / ""
         if _spy_poc and _spy_up and _spy_lo:
             _breadth_str = f" | Breadth: `{float(_breadth):.0%}`" if _breadth else ""
+            _qqq_line = (
+                f"┗ QQQ range: `${float(_qqq_lo):,.2f}` – `${float(_qqq_up):,.2f}`{_breadth_str}\n"
+                if _qqq_up else ""
+            )
             market_structure_section = (
                 "\n**OVERNIGHT MARKET STRUCTURE**\n"
                 f"┣ SPY: POC `${float(_spy_poc):,.2f}` | VAH `${float(_spy_vah):,.2f}` | VAL `${float(_spy_val):,.2f}`\n"
-                f"┣ SPY range: `${float(_spy_lo):,.2f}` – `${float(_spy_up):,.2f}`"
-                + (f" | QQQ range: `${float(_qqq_lo):,.2f}` – `${float(_qqq_up):,.2f}`" if _qqq_up else "")
-                + f"{_breadth_str}\n"
-                f"┗ Break above VAH = bullish continuation · Break below VAL = bearish extension\n"
+                f"{'┣' if _qqq_up else '┗'} SPY range: `${float(_spy_lo):,.2f}` – `${float(_spy_up):,.2f}`\n"
+                + _qqq_line
             )
+            # Log VAH/VAL break levels to DB daily — removed from embed (too operational)
+            try:
+                db.update_state(
+                    f"market_structure_break_levels_{datetime.now().strftime('%Y-%m-%d')}",
+                    {
+                        "spy_vah": float(_spy_vah), "spy_val": float(_spy_val),
+                        "spy_poc": float(_spy_poc),
+                        "note": "Break above VAH = bullish continuation · Break below VAL = bearish extension",
+                    }
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Morning: market structure DB read failed: {e}")
 
@@ -749,45 +774,39 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     )
 
     # ── CROSS-CHANNEL SIGNALS ─────────────────────────────────────────────────
+    # CLM/CRF: single-line summary. Full detail always in #cornerstone — never duplicated here.
     try:
-        clm_z     = float(db.get_state("clm_last_z_premium") or 0.0)
-        crf_z     = float(db.get_state("crf_last_z_premium") or 0.0)
-        clm_ro    = db.get_state("clm_last_ro_tier") or "LOW"
-        crf_ro    = db.get_state("crf_last_ro_tier") or "LOW"
-        clm_prem  = float(db.get_state("clm_last_premium") or 0.0)
-        crf_prem  = float(db.get_state("crf_last_premium") or 0.0)
-        clm_score = int(db.get_state("clm_last_ro_score") or 0)
-        crf_score = int(db.get_state("crf_last_ro_score") or 0)
-        # When N-2 is active, append note so negative z-score isn't misread as "safe"
-        _clm_n2 = db.get_state("ro_dodge_active_CLM", "")
-        _crf_n2 = db.get_state("ro_dodge_active_CRF", "")
-        _clm_z_label = f"`{clm_z:+.1f}σ` (N-2: z irrelevant)" if _clm_n2 else f"`{clm_z:+.1f}σ`"
-        _crf_z_label = f"`{crf_z:+.1f}σ` (N-2: z irrelevant)" if _crf_n2 else f"`{crf_z:+.1f}σ`"
-        cef_line = (
-            f"CLM z:{_clm_z_label} prem:`{clm_prem:.1f}%` RO:`{clm_score}/100` ({clm_ro}) | "
-            f"CRF z:{_crf_z_label} prem:`{crf_prem:.1f}%` RO:`{crf_score}/100` ({crf_ro})"
-        )
+        _clm_ro_active = db.get_state("ro_dodge_active_CLM") or ""
+        _crf_ro_active = db.get_state("ro_dodge_active_CRF") or ""
+        if _clm_ro_active or _crf_ro_active:
+            cef_line = "🚨 RO active — re-entry zones tracked (see #cornerstone)"
+        else:
+            clm_z    = float(db.get_state("clm_last_z_premium") or 0.0)
+            crf_z    = float(db.get_state("crf_last_z_premium") or 0.0)
+            clm_prem = float(db.get_state("clm_last_premium") or 0.0)
+            crf_prem = float(db.get_state("crf_last_premium") or 0.0)
+            clm_ro   = db.get_state("clm_last_ro_tier") or "LOW"
+            _status  = f"RO tier: {clm_ro}" if clm_ro != "LOW" else "premium normal"
+            cef_line = (
+                f"CLM `{clm_z:+.1f}σ`/`{clm_prem:.1f}%` · CRF `{crf_z:+.1f}σ`/`{crf_prem:.1f}%` — {_status}"
+            )
     except Exception:
-        cef_line = "CLM/CRF: data pending monitor.py pulse"
+        cef_line = "data pending monitor.py pulse"
 
     try:
         bottom_score = int(db.get_state("tqqq_bottom_score") or 0)
         top_score    = int(db.get_state("tqqq_top_score") or 0)
-        if bottom_score >= 55:
-            call_locked = f"🟢 CALL OPEN ({bottom_score}/100) — fear confirmed, LEAP entry eligible"
-        elif bottom_score >= 40:
-            call_locked = f"🔒 CALL ({bottom_score}/100) — approaching threshold, watch for fear spike"
-        else:
-            call_locked = f"🔒 CALL ({bottom_score}/100) — no fear signal, market calm"
-        if top_score >= 55:
-            put_locked = f"🔴 PUT OPEN ({top_score}/100) — extension confirmed, LEAP put eligible"
-        elif top_score >= 40:
-            put_locked = f"🔒 PUT ({top_score}/100) — building, watch overbought levels"
-        else:
-            put_locked = f"🔒 PUT ({top_score}/100) — not extended"
-        tqqq_line = f"{call_locked} | {put_locked}"
+        _c_icon = "🟢" if bottom_score >= 55 else ("🔆" if bottom_score >= 40 else "🔒")
+        _p_icon = "🔴" if top_score    >= 55 else ("🔆" if top_score    >= 40 else "🔒")
+        _status = (
+            "CALL OPEN — fear confirmed" if bottom_score >= 55 else
+            "PUT OPEN — extension confirmed" if top_score >= 55 else
+            "approaching" if (bottom_score >= 40 or top_score >= 40) else
+            "idle"
+        )
+        tqqq_line = f"{_c_icon} C:{bottom_score} · {_p_icon} P:{top_score} — {_status}"
     except Exception:
-        tqqq_line = "TQQQ: awaiting cycle update"
+        tqqq_line = "awaiting cycle update"
 
     try:
         open_pos     = db.get_open_wheel_positions()
@@ -1065,8 +1084,6 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     signals_section = (
         "\n**CROSS-CHANNEL CONFLUENCE**\n"
         f"┣ CLM/CRF: {cef_line}\n"
-        f"{edgar_line}"
-        f"{acc_line}"
         f"{exdiv_line}"
         f"{_tax_note}"
         f"{mood_fwd_line}"
@@ -1104,7 +1121,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     # Data still available via SentiSense API — can be surfaced on demand.
     ss_section = ""
 
-    description = market_structure_section + macro_section + equity_section + signals_section + ss_section + directives_section
+    description = "——————————————\n" + market_structure_section + macro_section + equity_section + signals_section + ss_section + directives_section
     title = f"MORNING BRIEF — {now_label}"
     return title, description, bias["color"]
 
