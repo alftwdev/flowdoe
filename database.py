@@ -168,6 +168,96 @@ class EcosystemDatabase:
                 """)
                 conn.commit()
 
+                # RO Cycle Ledger — one row per ticker per RO cycle.
+                # Seeded via: python db_tools.py --seed-ro-history
+                # Updated by monitor.py as the cycle progresses.
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ro_cycle_log (
+                        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker                  TEXT NOT NULL,
+                        cycle_year              INTEGER NOT NULL,
+                        status                  TEXT NOT NULL DEFAULT 'ACTIVE',
+                        formula                 TEXT,
+                        n2_filed_date           TEXT,
+                        n2_price                REAL,
+                        n2_nav                  REAL,
+                        n2_premium_pct          REAL,
+                        n2_avg_vol_ratio        REAL,
+                        pre_n2_warning_date     TEXT,
+                        pre_n2_warning_type     TEXT,
+                        n2a_effective_date      TEXT,
+                        record_date_est         TEXT,
+                        record_date_actual      TEXT,
+                        expiration_date_est     TEXT,
+                        expiration_date_actual  TEXT,
+                        exdiv_date              TEXT,
+                        exdiv_drop              REAL,
+                        sub_price_estimated     REAL,
+                        sub_price_actual        REAL,
+                        cycle_low_price         REAL,
+                        cycle_low_date          TEXT,
+                        cycle_low_days_from_n2  INTEGER,
+                        price_at_record_date    REAL,
+                        nav_at_record_date      REAL,
+                        premium_at_record_date  REAL,
+                        post_exp_1mo_price      REAL,
+                        recovery_from_low_pct   REAL,
+                        tier1_low               REAL,
+                        tier1_high              REAL,
+                        tier1_start_date        TEXT,
+                        tier1_end_date          TEXT,
+                        tier2_low               REAL,
+                        tier2_high              REAL,
+                        tier2_start_date        TEXT,
+                        tier2_end_date          TEXT,
+                        tier3_low               REAL,
+                        tier3_high              REAL,
+                        tier3_start_date        TEXT,
+                        tier3_end_date          TEXT,
+                        tier4_low               REAL,
+                        tier4_high              REAL,
+                        actual_sell_price       REAL,
+                        actual_sell_date        TEXT,
+                        actual_reentry_price    REAL,
+                        actual_reentry_date     TEXT,
+                        reentry_path            TEXT,
+                        bottom_at_record_date   INTEGER DEFAULT 0,
+                        lessons_json            TEXT,
+                        created_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+                        updated_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(ticker, cycle_year)
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ro_cycle_ticker ON ro_cycle_log(ticker, cycle_year)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ro_cycle_status ON ro_cycle_log(status)")
+
+                # RO Cycle Events — timestamped observations within each cycle.
+                # Event types: PRE_WARNING, N2_FILED, CAPITULATION, DARK_POOL, VOL_SPIKE,
+                #   PRICE_LOW, PREMIUM_COMPRESSION, EXDIV, N2A_EFFECTIVE, RECORD_DATE,
+                #   EXPIRATION, REENTRY_SIGNAL, REENTRY_EXECUTED, RECOVERY_CHECKPOINT, OBSERVATION
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ro_cycle_events (
+                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ro_cycle_id     INTEGER REFERENCES ro_cycle_log(id),
+                        ticker          TEXT NOT NULL,
+                        cycle_year      INTEGER NOT NULL,
+                        event_date      TEXT NOT NULL,
+                        event_type      TEXT NOT NULL,
+                        price           REAL,
+                        nav             REAL,
+                        premium_pct     REAL,
+                        volume          REAL,
+                        volume_ratio    REAL,
+                        spy_change_pct  REAL,
+                        description     TEXT,
+                        signal_source   TEXT,
+                        created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ro_events_ticker ON ro_cycle_events(ticker, cycle_year, event_date)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_ro_events_type ON ro_cycle_events(event_type)")
+                conn.commit()
+
                 # Graceful column migrations — try each; OperationalError means already exists.
                 for col_sql in [
                     # Lot-engine (session 1)
@@ -914,6 +1004,148 @@ class EcosystemDatabase:
         except Exception as e:
             logger.error(f"store_cef_premium failed for {ticker}: {e}")
             return False
+
+    # ── RO Cycle Ledger ───────────────────────────────────────────────────────
+
+    def get_ro_cycle(self, ticker: str, cycle_year: int) -> dict:
+        """Return the ro_cycle_log row for ticker/year as a dict, or {} if not found."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM ro_cycle_log WHERE ticker = ? AND cycle_year = ?",
+                    (ticker.upper(), cycle_year),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return {}
+                cols = [d[0] for d in cursor.description]
+                return dict(zip(cols, row))
+        except Exception as e:
+            logger.error(f"get_ro_cycle failed: {e}")
+            return {}
+
+    def update_ro_cycle(self, ticker: str, cycle_year: int, **kwargs) -> bool:
+        """
+        Partial-update an existing ro_cycle_log row. Called by monitor.py as a cycle
+        progresses (record date confirmed, actual sell price, reentry executed, etc.).
+        Creates the row with minimal fields if it doesn't exist yet.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                kwargs["updated_at"] = datetime.now().isoformat()
+                cols = ", ".join(f"{k} = ?" for k in kwargs)
+                vals = list(kwargs.values()) + [ticker.upper(), cycle_year]
+                updated = cursor.execute(
+                    f"UPDATE ro_cycle_log SET {cols} WHERE ticker = ? AND cycle_year = ?",
+                    vals,
+                ).rowcount
+                if updated == 0:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO ro_cycle_log (ticker, cycle_year, updated_at) VALUES (?, ?, ?)",
+                        (ticker.upper(), cycle_year, kwargs["updated_at"]),
+                    )
+                    cursor.execute(
+                        f"UPDATE ro_cycle_log SET {cols} WHERE ticker = ? AND cycle_year = ?",
+                        vals,
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"update_ro_cycle failed: {e}")
+            return False
+
+    def log_ro_event(self, ticker: str, cycle_year: int, event_date: str,
+                     event_type: str, price: float = None, nav: float = None,
+                     premium_pct: float = None, volume: float = None,
+                     volume_ratio: float = None, spy_change_pct: float = None,
+                     description: str = None, signal_source: str = None) -> bool:
+        """
+        Append a timestamped event to ro_cycle_events. Called by monitor.py when
+        dark pool fires, N-2 detected, price hits a tier zone, reentry executed, etc.
+        Duplicate date+type combos per ticker/year are silently ignored.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM ro_cycle_log WHERE ticker = ? AND cycle_year = ?",
+                    (ticker.upper(), cycle_year),
+                )
+                row = cursor.fetchone()
+                cycle_id = row[0] if row else None
+                cursor.execute("""
+                    INSERT OR IGNORE INTO ro_cycle_events
+                        (ro_cycle_id, ticker, cycle_year, event_date, event_type,
+                         price, nav, premium_pct, volume, volume_ratio, spy_change_pct,
+                         description, signal_source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (cycle_id, ticker.upper(), cycle_year, event_date, event_type,
+                      price, nav, premium_pct, volume, volume_ratio, spy_change_pct,
+                      description, signal_source))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"log_ro_event failed: {e}")
+            return False
+
+    def get_ro_events(self, ticker: str, cycle_year: int, event_type: str = None) -> list:
+        """Return ro_cycle_events for a ticker/year, optionally filtered by event_type."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if event_type:
+                    cursor.execute(
+                        "SELECT * FROM ro_cycle_events WHERE ticker = ? AND cycle_year = ? "
+                        "AND event_type = ? ORDER BY event_date",
+                        (ticker.upper(), cycle_year, event_type),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM ro_cycle_events WHERE ticker = ? AND cycle_year = ? "
+                        "ORDER BY event_date",
+                        (ticker.upper(), cycle_year),
+                    )
+                cols = [d[0] for d in cursor.description]
+                return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"get_ro_events failed: {e}")
+            return []
+
+    def get_ro_tactical_benchmarks(self) -> dict:
+        """
+        Compute cross-cycle tactical benchmarks from completed RO cycles.
+        Returns stats useful for planning future RO dodges and re-entries:
+        avg days N2→low, avg recovery %, whether low was at record date, etc.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT ticker, cycle_year, cycle_low_days_from_n2, recovery_from_low_pct, "
+                    "bottom_at_record_date, n2_premium_pct, premium_at_record_date "
+                    "FROM ro_cycle_log WHERE status = 'COMPLETE'"
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    return {}
+                days_to_low  = [r[2] for r in rows if r[2] is not None]
+                recoveries   = [r[3] for r in rows if r[3] is not None]
+                bottom_at_rd = [r[4] for r in rows if r[4] is not None]
+                n2_premia    = [r[5] for r in rows if r[5] is not None]
+                rd_premia    = [r[6] for r in rows if r[6] is not None]
+                return {
+                    "cycles_complete":           len(rows),
+                    "avg_days_n2_to_low":        round(sum(days_to_low) / len(days_to_low), 1) if days_to_low else None,
+                    "avg_recovery_from_low_pct": round(sum(recoveries) / len(recoveries), 1) if recoveries else None,
+                    "pct_bottom_at_record_date": round(sum(bottom_at_rd) / len(bottom_at_rd) * 100, 0) if bottom_at_rd else None,
+                    "avg_n2_premium_pct":        round(sum(n2_premia) / len(n2_premia), 1) if n2_premia else None,
+                    "avg_record_date_premium":   round(sum(rd_premia) / len(rd_premia), 1) if rd_premia else None,
+                }
+        except Exception as e:
+            logger.error(f"get_ro_tactical_benchmarks failed: {e}")
+            return {}
 
     def get_cef_premium_history(self, ticker: str, days: int = 252) -> list:
         """

@@ -1065,6 +1065,26 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         if _tax_parts:
             _tax_note = "┣ Tax char (" + str(now_utc.year - 1) + " 1099): " + " | ".join(_tax_parts) + "\n"
 
+    # SPY GEX regime — reads from DB key written by analytics.py calculate_gex_profile() (zero API calls)
+    gex_line = ""
+    try:
+        _gex_raw = db.get_state("gex_profile_SPY")
+        if _gex_raw and isinstance(_gex_raw, dict):
+            _gex_d = _gex_raw.get("data", {})
+            _gex_ms = _gex_d.get("market_state", "UNKNOWN")
+            _gex_flip = float(_gex_d.get("flip_strike", 0.0))
+            _gex_cw = float(_gex_d.get("call_wall", 0.0))
+            _gex_pw = float(_gex_d.get("put_wall", 0.0))
+            _gex_total = _gex_d.get("gex_total", 0.0)
+            if _gex_ms not in ("UNKNOWN", "ERROR BOUNDS"):
+                _flip_part = f"Flip `${_gex_flip:.0f}`" if _gex_flip > 0 else ""
+                _wall_part = (f" | Call Wall `${_gex_cw:.0f}` | Put Wall `${_gex_pw:.0f}`"
+                              if _gex_cw > 0 and _gex_pw > 0 else "")
+                _total_part = f" | Net `{_gex_total:+.1f}B`" if _gex_total != 0.0 else ""
+                gex_line = f"{_gex_ms} | {_flip_part}{_wall_part}{_total_part}\n"
+    except Exception:
+        pass
+
     # Top headline summary merged into morning brief (2nd embed removed Aug 2026).
     # _fetch_market_headlines caches to DB — zero extra API calls.
     # reentry_line and pre_n2_line removed — they belong in #cornerstone only.
@@ -1088,7 +1108,8 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         f"{_tax_note}"
         f"{mood_fwd_line}"
         f"┣ TQQQ: {tqqq_line}\n"
-        f"┣ Wheel: {wheel_line}\n"
+        + (f"┣ SPY GEX: {gex_line}" if gex_line else "")
+        + f"┣ Wheel: {wheel_line}\n"
         f"{mlpi_entry_line}"
         f"{headlines_line}"
     )

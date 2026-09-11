@@ -267,6 +267,8 @@ class TradierClient:
             exps = self.get_expirations(symbol)
 
             net_gamma_by_strike: dict = {}
+            total_call_oi = 0.0
+            total_put_oi = 0.0
 
             for exp_str in sorted(exps)[:4]:  # nearest 4 expirations dominate GEX
                 try:
@@ -280,11 +282,18 @@ class TradierClient:
                         if not (spot * 0.90 <= strike <= spot * 1.10):
                             continue
                         oi = float(c.get("open_interest") or 0)
+                        if oi == 0:
+                            continue
+                        opt_type = c.get("option_type")
+                        if opt_type == "call":
+                            total_call_oi += oi
+                        else:
+                            total_put_oi += oi
                         gamma = float((c.get("greeks") or {}).get("gamma") or 0)
-                        if oi == 0 or gamma == 0:
+                        if gamma == 0:
                             continue
                         exposure = oi * gamma * spot * 100
-                        if c.get("option_type") == "call":
+                        if opt_type == "call":
                             net_gamma_by_strike[strike] = net_gamma_by_strike.get(strike, 0) + exposure
                         else:
                             net_gamma_by_strike[strike] = net_gamma_by_strike.get(strike, 0) - exposure
@@ -299,23 +308,12 @@ class TradierClient:
             flip_strike = min(net_gamma_by_strike, key=lambda k: abs(net_gamma_by_strike[k]))
             market_state = "🟢 POSITIVE GAMMA" if spot > flip_strike else "🔴 NEGATIVE GAMMA"
 
-            # Put/Call OI ratio across all exps in window
-            total_call_oi = 0.0
-            total_put_oi = 0.0
-            for exp_str in sorted(exps)[:4]:
-                try:
-                    chain = self.get_options_chain(symbol, exp_str, greeks=False)
-                    for c in chain:
-                        strike = float(c.get("strike", 0))
-                        if not (spot * 0.90 <= strike <= spot * 1.10):
-                            continue
-                        oi = float(c.get("open_interest") or 0)
-                        if c.get("option_type") == "call":
-                            total_call_oi += oi
-                        else:
-                            total_put_oi += oi
-                except Exception:
-                    continue
+            # Key GEX levels: call wall (highest positive GEX), put wall (most negative GEX), price magnet
+            _pos = {k: v for k, v in net_gamma_by_strike.items() if v > 0}
+            call_wall = max(_pos, key=_pos.get) if _pos else flip_strike
+            _neg = {k: v for k, v in net_gamma_by_strike.items() if v < 0}
+            put_wall = min(_neg, key=_neg.get) if _neg else flip_strike
+            abs_gamma_strike = max(net_gamma_by_strike, key=lambda k: abs(net_gamma_by_strike[k]))
 
             pc_oi_ratio = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else 1.0
             if pc_oi_ratio > 1.15:
@@ -340,6 +338,9 @@ class TradierClient:
                 "gex_total": round(gex_total / 1e9, 2),  # in billions
                 "pc_oi_ratio": pc_oi_ratio,
                 "pc_tag": pc_tag,
+                "call_wall": call_wall,
+                "put_wall": put_wall,
+                "abs_gamma_strike": abs_gamma_strike,
             }
 
         return self._cached(cache_key, ttl, _fetch)
@@ -743,4 +744,7 @@ def _gex_empty(symbol):
         "gex_total": 0.0,
         "pc_oi_ratio": 1.0,
         "pc_tag": "N/A",
+        "call_wall": 0.0,
+        "put_wall": 0.0,
+        "abs_gamma_strike": 0.0,
     }

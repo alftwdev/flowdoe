@@ -1132,6 +1132,19 @@ class HighFidelityAnalyticsEngine:
         except Exception:
             pass
 
+        # SPY GEX profile — read once, used to annotate all wheel candidates (zero extra API calls)
+        _spy_gex = {}
+        try:
+            import time as _gex_time
+            _gex_raw = self.db.get_state("gex_profile_SPY")
+            if _gex_raw and isinstance(_gex_raw, dict):
+                _spy_gex = _gex_raw.get("data", {})
+        except Exception:
+            pass
+        _gex_regime = _spy_gex.get("market_state", "UNKNOWN")
+        _spy_put_wall = float(_spy_gex.get("put_wall", 0.0))
+        _spy_flip = float(_spy_gex.get("flip_strike", 0.0))
+
         for symbol in universe:
             try:
                 hv30 = self.calculate_historical_volatility(symbol, lookback=30)
@@ -1298,6 +1311,8 @@ class HighFidelityAnalyticsEngine:
 
                 iv_hv_ratio = round(float(atm_iv) / float(hv30), 2) if hv30 > 0 else None
                 _rs_rank = {"STRONG": 0, "NEUTRAL": 1, "WEAK": 2}.get(_sym_rs["rs_grade"], 1)
+                _csp_strike = float(csp_setup["strike"]) if csp_setup else spot
+                _csp_above_pw = (_spy_put_wall > 0) and (_csp_strike > _spy_put_wall)
                 flagged.append({
                     "symbol":          symbol,
                     "spot":            spot,
@@ -1321,6 +1336,8 @@ class HighFidelityAnalyticsEngine:
                     "_rs_rank":        _rs_rank,
                     "fib_zone":        _sym_fib["fib_zone"],
                     "fib_pct":         _sym_fib["fib_pct"],
+                    "gex_regime":      _gex_regime,
+                    "csp_above_put_wall": _csp_above_pw,
                 })
             except Exception as e:
                 logger.error(f"Tier 2 IV Rank screen failed for {symbol}: {e}")
@@ -2686,7 +2703,7 @@ class HighFidelityAnalyticsEngine:
         chain = self._execute_query("options/chain", {"symbol": symbol})
         spot_data = self._execute_query("price", {"symbol": symbol})
         if not chain or "data" not in chain or not spot_data:
-            return {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN", "pc_oi_ratio": 1.0, "pc_tag": "N/A"}
+            return {"flip_strike": 0.0, "current_spot": 0.0, "market_state": "UNKNOWN", "pc_oi_ratio": 1.0, "pc_tag": "N/A", "call_wall": 0.0, "put_wall": 0.0, "abs_gamma_strike": 0.0}
         try:
             spot = float(spot_data.get("price", 0.0))
             df = pd.DataFrame(chain["data"])
@@ -2707,9 +2724,10 @@ class HighFidelityAnalyticsEngine:
             return {
                 "flip_strike": flip_strike, "current_spot": spot, "market_state": market_state,
                 "pc_oi_ratio": pc_oi_ratio, "pc_tag": pc_tag,
+                "call_wall": 0.0, "put_wall": 0.0, "abs_gamma_strike": 0.0,  # TD fallback — no gamma data
             }
         except Exception:
-            return {"flip_strike": spot, "current_spot": spot, "market_state": "ERROR BOUNDS", "pc_oi_ratio": 1.0, "pc_tag": "N/A"}
+            return {"flip_strike": spot, "current_spot": spot, "market_state": "ERROR BOUNDS", "pc_oi_ratio": 1.0, "pc_tag": "N/A", "call_wall": 0.0, "put_wall": 0.0, "abs_gamma_strike": 0.0}
 
     # =====================================================================
     # UNIFIED MACRO BRIEFING — Market Analysis as the ecosystem's hub.
@@ -5956,4 +5974,127 @@ class HighFidelityAnalyticsEngine:
         except Exception as e:
             logger.error(f"[NVDA/BTC Corr] Failed: {e}")
             return {}
+
+    def generate_earnings_iv_trap_scanner(self) -> list:
+        """
+        For each wheel-universe symbol with earnings within 21 days, compare the
+        ATM straddle cost (= market's implied earnings move) to the HV30-derived
+        expected daily move. A high multiple means the market is charging far more
+        for the event than the stock's realized volatility history justifies.
+
+        IV inflation multiple = straddle_implied_move_pct / hv30_expected_daily_pct
+          ≥ 1.5 → IV TRAP: premium is overpriced vs realized vol; option buyers overpaying,
+                            AND short sellers face elevated assignment/whipsaw risk.
+          < 1.5 → FAIR: straddle priced in line with historical realized move.
+
+        Returns list of dicts sorted by multiple descending (worst traps first).
+        Zero extra API calls for symbols already scanned in MODULE 5 (Tradier caches
+        earnings proximity results for 1 hour via _cached()).
+        """
+        import math as _math
+        from datetime import datetime as _dt
+
+        WHEEL_UNIVERSE = [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD",
+            "MRVL", "ANET", "CRM", "WDAY", "NOW", "NKE", "CLX", "TROW",
+            "TSLA", "COIN", "SOFI", "PLTR", "HIMS", "UBER", "PENG",
+            "MARA", "CLSK", "BE",
+            "SCHD", "JEPI", "JEPQ", "O", "ARCC",
+            "SPY", "QQQ", "IWM", "GLD", "XLE",
+        ]
+
+        results = []
+        try:
+            from tradier_client import TradierClient
+            tc = TradierClient()
+            if not tc.api_key:
+                return results
+
+            earn_map = tc.get_earnings_proximity(WHEEL_UNIVERSE, days_ahead=21)
+            flagged = [
+                (sym, d) for sym, d in earn_map.items()
+                if d.get("flag") in ("FORCE_CLOSE", "REVIEW")
+            ]
+            if not flagged:
+                return results
+
+            for symbol, earn_info in flagged:
+                try:
+                    days_to   = earn_info.get("days_to_earnings", 99)
+                    earn_date = earn_info.get("date", "?")
+                    earn_flag = earn_info.get("flag", "REVIEW")
+
+                    spot = tc.get_spot(symbol)
+                    if spot <= 0:
+                        continue
+
+                    hv30 = self.calculate_historical_volatility(symbol, lookback=30)
+                    if not hv30 or hv30 <= 0:
+                        continue
+
+                    expected_daily_pct = (hv30 / _math.sqrt(252)) * 100
+
+                    # Find the nearest expiration that straddles the earnings date
+                    exps = tc.get_expirations(symbol)
+                    target_exp = None
+                    for exp_str in sorted(exps):
+                        dte = (_dt.strptime(exp_str, "%Y-%m-%d").date()
+                               - _dt.utcnow().date()).days
+                        if dte >= days_to:
+                            target_exp = exp_str
+                            break
+                    if not target_exp:
+                        continue
+
+                    chain = tc.get_options_chain(symbol, target_exp, greeks=False)
+                    if not chain:
+                        continue
+
+                    calls = [c for c in chain if c.get("option_type") == "call"]
+                    puts  = [c for c in chain if c.get("option_type") == "put"]
+
+                    def _mid(opt):
+                        bid = float(opt.get("bid") or 0)
+                        ask = float(opt.get("ask") or 0)
+                        return (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
+
+                    atm_call = min(calls, key=lambda c: abs(float(c.get("strike", 0)) - spot), default=None)
+                    atm_put  = min(puts,  key=lambda p: abs(float(p.get("strike", 0)) - spot), default=None)
+
+                    if not atm_call or not atm_put:
+                        continue
+
+                    call_mid = _mid(atm_call)
+                    put_mid  = _mid(atm_put)
+                    if call_mid <= 0 or put_mid <= 0:
+                        continue
+
+                    straddle_cost     = call_mid + put_mid
+                    implied_move_pct  = (straddle_cost / spot) * 100
+                    multiple          = implied_move_pct / expected_daily_pct
+                    iv_trap           = multiple >= 1.5
+
+                    results.append({
+                        "symbol":           symbol,
+                        "spot":             round(spot, 2),
+                        "earnings_date":    earn_date,
+                        "days_to_earnings": days_to,
+                        "earnings_flag":    earn_flag,
+                        "exp_used":         target_exp,
+                        "straddle_cost":    round(straddle_cost, 2),
+                        "implied_move_pct": round(implied_move_pct, 2),
+                        "hv30":             round(hv30, 1),
+                        "expected_daily_pct": round(expected_daily_pct, 2),
+                        "multiple":         round(multiple, 2),
+                        "iv_trap":          iv_trap,
+                    })
+                except Exception as _e:
+                    logger.warning(f"[IVTrap] {symbol} scan failed: {_e}")
+                    continue
+
+            results.sort(key=lambda x: x["multiple"], reverse=True)
+        except Exception as e:
+            logger.error(f"generate_earnings_iv_trap_scanner failed: {e}")
+
+        return results
 

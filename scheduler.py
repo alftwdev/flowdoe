@@ -762,12 +762,24 @@ def main():
                                 "BROKEN":        "structure broken — avoid until new swing forms",
                             }.get(_fib_zone, "neutral price range")
                             fib_line = f"┣ Fib Location: {_fib_icon} `{_fib_zone.replace('_',' ')}` · `{_fib_pct:.0f}%` retrace — {_fib_note}\n"
+                            # GEX context line — SPY gamma regime + put wall guard
+                            _gex_regime = f.get("gex_regime", "UNKNOWN")
+                            _above_pw = f.get("csp_above_put_wall", True)
+                            if "NEGATIVE" in _gex_regime:
+                                _gex_regime_str = "🔴 NEG GAMMA (vol amplified)"
+                            elif "POSITIVE" in _gex_regime:
+                                _gex_regime_str = "🟢 POS GAMMA (vol suppressed)"
+                            else:
+                                _gex_regime_str = "⚪ GEX N/A"
+                            _pw_check = "✅ above put wall" if _above_pw else "⚠️ BELOW put wall — assignment risk ↑"
+                            gex_line = f"┣ SPY GEX: {_gex_regime_str} | CSP Strike: {_pw_check}\n" if _gex_regime != "UNKNOWN" else ""
                             ivr_payload += (
                                 f"**{f['symbol']}** | Spot: `${f['spot']:.2f}`\n"
                                 f"┣ IV: `{f['iv']:.1f}%` | HV30: `{f['hv30']:.1f}%` | {ivr_label}: `{f['ivr_proxy']:.0f}%` [{ivr_src}]\n"
                                 f"{iv_context}"
                                 f"{rs_line}"
                                 f"{fib_line}"
+                                f"{gex_line}"
                                 f"{setup_line}"
                                 f"{div_line}"
                                 f"{assigned_line}"
@@ -1462,6 +1474,58 @@ def main():
                     logger.info("Income community radar: no tickers with ≥2 income-context mentions this scan.")
             except Exception as e:
                 logger.error(f"Community radar module failed: {e}")
+
+            # ── MODULE 9: EARNINGS IV TRAP SCANNER ────────────────────────────
+            # Flags wheel-universe names where the ATM straddle implies a move
+            # larger than the stock's HV30 can justify (multiple ≥ 1.5×).
+            # Signal: option buyers are overpaying; sellers face elevated risk.
+            # Neither side has clear edge — stay out of premium on these names.
+            # Cadence: cached via Tradier _cached() so no extra earnings API call
+            # beyond MODULE 5 (runs within the same wheel_signals invocation).
+            try:
+                iv_traps = engine.generate_earnings_iv_trap_scanner()
+                if iv_traps:
+                    trap_lines = []
+                    fair_lines = []
+                    for t in iv_traps:
+                        _urgency = "🔴" if t["earnings_flag"] == "FORCE_CLOSE" else "🟡"
+                        _trap_icon = "⚠️ IV TRAP" if t["iv_trap"] else "✅ FAIR"
+                        _line = (
+                            f"┣ {_urgency} **{t['symbol']}** | Spot `${t['spot']:.2f}` | "
+                            f"Earn: `{t['earnings_date']}` ({t['days_to_earnings']}d)\n"
+                            f"    Straddle `${t['straddle_cost']:.2f}` → implied `{t['implied_move_pct']:.1f}%` "
+                            f"vs HV30 daily `{t['expected_daily_pct']:.1f}%` — "
+                            f"`{t['multiple']:.1f}×` {_trap_icon}"
+                        )
+                        if t["iv_trap"]:
+                            trap_lines.append(_line)
+                        else:
+                            fair_lines.append(_line)
+
+                    iv_trap_payload = "ATM straddle implied move vs HV30 expected move around earnings.\n\n"
+                    if trap_lines:
+                        iv_trap_payload += "**⚠️ IV TRAP — premium overpriced (multiple ≥ 1.5×)**\n"
+                        iv_trap_payload += "\n".join(trap_lines) + "\n\n"
+                    if fair_lines:
+                        iv_trap_payload += "**✅ FAIR — straddle in line with realized vol**\n"
+                        iv_trap_payload += "\n".join(fair_lines) + "\n\n"
+                    iv_trap_payload += "┗ Rule: if straddle multiple ≥ 1.5× — avoid selling premium (elevated whipsaw risk) AND avoid buying (overpaying for the event)."
+
+                    if WEBHOOK_INCOME:
+                        _trap_color = 0xe74c3c if any(t["iv_trap"] for t in iv_traps) else 0x2ecc71
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            "🎯 EARNINGS IV CHECK | Straddle vs Realized Vol",
+                            iv_trap_payload, _trap_color,
+                        )
+                        logger.info(
+                            f"Earnings IV trap scanner: {sum(1 for t in iv_traps if t['iv_trap'])} traps, "
+                            f"{sum(1 for t in iv_traps if not t['iv_trap'])} fair."
+                        )
+                else:
+                    logger.info("Earnings IV trap scanner: no wheel symbols with earnings within 21 days.")
+            except Exception as e:
+                logger.error(f"Earnings IV trap scanner failed: {e}")
 
         elif args.mode == "wheel_position":
             if args.action == "open":
@@ -2476,7 +2540,50 @@ def main():
                 except Exception:
                     pass
 
-                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}{put_cadence_note}{_milestone_block}"
+                # ── Call of the Week (FinTwit-ready summary → forward to X manually) ──
+                _cotw_block = ""
+                try:
+                    _wins = [
+                        s for s in engine.db.get_scorecard_window(days_back=7)
+                        if s.get("outcome") == "WIN"
+                    ]
+                    _mtd_w, _mtd_t = engine.db.get_mtd_accuracy()
+                    if _wins:
+                        # Best win = highest score_contribution; fall back to first
+                        _best = max(_wins, key=lambda s: s.get("score_contribution") or 0)
+                        _sig_type = (_best.get("signal_type") or "signal").replace("_", " ").upper()
+                        _ticker    = _best.get("ticker") or ""
+                        _direction = _best.get("predicted_direction") or ""
+                        _ep        = _best.get("entry_price")
+                        _xp        = _best.get("exit_price")
+                        _pred_date = _best.get("prediction_date") or ""
+                        _notes     = _best.get("notes") or ""
+                        _ep_str    = f" Entry `${_ep:.2f}`" if _ep else ""
+                        _xp_str    = f" → Outcome `${_xp:.2f}`" if _xp else ""
+                        _mtd_str   = f"{_mtd_w}/{_mtd_t} ({_mtd_w/_mtd_t:.0%})" if _mtd_t > 0 else "N/A"
+                        _cotw_block = (
+                            f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📌 CALL OF THE WEEK — {_pred_date}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Signal:    {_sig_type}{(' | ' + _ticker) if _ticker else ''}\n"
+                            f"Direction: {_direction}\n"
+                            f"Result:    {_ep_str}{_xp_str} ✅ WIN\n"
+                            + (f"Note:      {_notes}\n" if _notes else "")
+                            + f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"MTD accuracy: {_mtd_str}"
+                        )
+                    elif _mtd_t > 0:
+                        _mtd_str = f"{_mtd_w}/{_mtd_t} ({_mtd_w/_mtd_t:.0%})"
+                        _cotw_block = (
+                            f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📌 CALL OF THE WEEK — no graded WIN this week\n"
+                            f"MTD accuracy: {_mtd_str}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                except Exception as _cwe:
+                    logger.warning(f"Call of the week block failed: {_cwe}")
+
+                msg = f"{strat1}\n\n{strat2}\n\n{strat3}\n\n{strat4}{alert_note}{put_cadence_note}{_milestone_block}{_cotw_block}"
 
                 _p_tok = os.getenv("PUSHOVER_API_TOKEN")
                 _p_usr = os.getenv("PUSHOVER_USER_KEY")
@@ -2552,12 +2659,12 @@ def main():
                 logger.error(f"orb_scan mode failed: {e}")
 
         elif args.mode == "box_spread_scan":
-            # ── BOX SPREAD RATE SCANNER → #options-wheel ──────────────────────
-            # Fetches live SPX options chain via Tradier, calculates implied
-            # annualised rate for 100pt and 50pt short boxes at the expiration
-            # nearest to 365 DTE. Compares to FRED 1Y treasury (DGS1, cached)
-            # and the 7.25% E*TRADE margin benchmark.
-            # Caches best_rate to DB ("box_spread_best_rate") for personal_scorecard.
+            # ── BOX SPREAD RATE SCANNER — DB only (Discord dispatch disabled) ─
+            # Strategy deferred until portfolio ~$100k. Discord embed suppressed
+            # to reduce notification fatigue. Rate data still cached to DB key
+            # "box_spread_best_rate" for personal_scorecard + future use.
+            # Cron continues to run so rate data stays fresh in background.
+            # Re-enable Discord by restoring the webhook post block below.
             # API budget: 1 Tradier SPX chain call. No TD credits consumed.
             try:
                 from tradier_client import TradierClient
@@ -2637,16 +2744,20 @@ def main():
                         f"⚡ Best rate: `{_best['rate_pct']:.2f}%` → saves `${_savings_100k:,.0f}/yr` per $100k vs margin"
                     )
 
-                    _color = COLOR_GREEN if _savings_100k >= 2500 else (COLOR_YELLOW if _savings_100k >= 1000 else COLOR_RED)
-                    _wh = os.getenv("WEBHOOK_TRADE_SIGNALS")
-                    if _wh:
-                        requests.post(_wh, json={"embeds": [{
-                            "title": "📦 Box Spread Rate Scanner — SPX",
-                            "description": _desc,
-                            "color": _color,
-                            "footer": {"text": "Borrow at implied rate. Not a trade recommendation. Confirm E*TRADE options level 3 + combo order before executing."},
-                        }]}, timeout=10)
-                        logger.info(f"Box spread scan published — best rate: {_best['rate_pct']:.2f}%")
+                    # Discord dispatch disabled — strategy deferred, reduces notification fatigue.
+                    # Restore by uncommenting the block below when box spread execution is active.
+                    # _color = COLOR_GREEN if _savings_100k >= 2500 else (COLOR_YELLOW if _savings_100k >= 1000 else COLOR_RED)
+                    # _wh = os.getenv("WEBHOOK_TRADE_SIGNALS")
+                    # if _wh:
+                    #     requests.post(_wh, json={"embeds": [{
+                    #         "title": "📦 Box Spread Rate Scanner — SPX",
+                    #         "description": _desc,
+                    #         "color": _color,
+                    #         "footer": {"text": "Borrow at implied rate. Not a trade recommendation. Confirm E*TRADE options level 3 + combo order before executing."},
+                    #     }]}, timeout=10)
+                    #     logger.info(f"Box spread scan published — best rate: {_best['rate_pct']:.2f}%")
+
+                    logger.info(f"Box spread scan cached (no Discord) — best rate: {_best['rate_pct']:.2f}%  savings vs margin: ${_savings_100k:,.0f}/yr per $100k")
 
                     # Cache best rate in DB for personal_scorecard and cross-script read
                     engine.db.update_state("box_spread_best_rate", {

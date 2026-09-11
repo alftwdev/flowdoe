@@ -1590,7 +1590,7 @@ SENTISENSE_API_KEY=          # SentiSense — sentiment, trackers, congressional
 | Yield Curve | FRED DGS10−DGS2 ✅ | — |
 | Crypto OI + L/S | Binance FAPI free ✅ | — |
 
-**GEX note:** `calculate_gex_profile()` disabled (returns 0.0 at Twelve Data tier). Re-enable once Tradier OI is wired — gamma flip is an early warning for CLM/CRF premium compression events.
+**GEX note:** `calculate_gex_profile()` is live. Tradier path (real gamma-weighted GEX) runs first; falls back to Twelve Data OI-only flip-strike when Tradier greeks are unavailable (off-hours or chain anomaly). GEX is displayed in the morning brief (`gex_line`, market_analysis.py ~line 1111) and per-symbol in wheel_signals. When `gex_profile_SPY` market_state is "UNKNOWN", Tradier greeks were unavailable — check that the account has options chain access and that the fetch ran during market hours.
 
 ---
 
@@ -1724,7 +1724,9 @@ PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scor
 
 ### Data Infrastructure
 - [x] **IVR tracker usable baseline** — reached Aug 11 2026 (~30 days of daily IV stored). Full 52-week rank after 252 trading days (~Apr 2027). `vix_126d_history` also accumulating for Kelly regime detection.
-- [ ] **GEX re-enable** — wire `calculate_gex_profile()` back in once Tradier OI is confirmed stable; gamma flip = early CEF premium compression warning
+- [x] **GEX live** — `calculate_gex_profile()` active; shown in morning brief + per-symbol in wheel_signals. Tradier greeks path gives full gamma-weighted GEX; Twelve Data fallback gives OI-only flip strike. Displays when market_state != "UNKNOWN".
+- [x] **Earnings IV Trap Scanner** (Sep 2026) — `generate_earnings_iv_trap_scanner()` in analytics.py. MODULE 9 in `--mode wheel_signals`. Flags wheel names where ATM straddle implied move ≥ 1.5× HV30 expected daily move. Both sides warned: sellers face elevated whipsaw, buyers overpaying for the event. Dispatches to WEBHOOK_INCOME.
+- [x] **Call of the Week block** (Sep 2026) — appended to `--mode personal_scorecard` Pushover. Pulls best WIN signal from signal_ledger (past 7 days), formats as clean text card. Pushover-only — forward manually to X/#fintwit when ready to post.
 
 ### Scripts Still to Build
 - [ ] `crypto.py` — dedicated BTC/ETH channel script (currently served by scheduler.py `--mode crypto_social`)

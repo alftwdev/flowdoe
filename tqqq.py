@@ -1207,6 +1207,8 @@ class TQQQTacticalSniper:
             "vix_term_slope": 0.0,      # VIX9D - VIX3M: negative = contango (calm), positive = backwardation (fear)
             "vix9d": 0.0, "vix3m": 0.0,
             "real_vix": None,           # FRED VIXCLS — actual CBOE VIX daily close
+            "ndx_5y_rolling_cagr": None,  # QQQ 5Y price CAGR — extended bull regime detector
+            "extended_bull_flag": False,  # True when 5Y CAGR > 22% — raises LEAP threshold 55→65
         }
 
         try:
@@ -1221,18 +1223,30 @@ class TQQQTacticalSniper:
             logger.warning(f"RSI fetch failed: {e}")
 
         try:
+            # 1260 bars ≈ 5 trading years — same 1 API credit, cached daily.
+            # First 252 bars → 52w high/low. Full window → 5Y CAGR.
             r = requests.get(
                 f"{self.base_url}/time_series",
                 params={"symbol": self.proxy_symbol, "interval": "1day",
-                        "outputsize": "252", "apikey": TWELVE_DATA_API_KEY},
-                timeout=12
+                        "outputsize": "1260", "apikey": TWELVE_DATA_API_KEY},
+                timeout=15
             ).json()
             closes = [float(v["close"]) for v in r.get("values", [])]
             if closes:
-                result["high_52w"] = max(closes)
-                result["low_52w"] = min(closes)
+                result["high_52w"] = max(closes[:252])
+                result["low_52w"] = min(closes[:252])
+                # 5Y rolling CAGR: closes[0]=most recent, closes[-1]=oldest available
+                if len(closes) >= 252:
+                    years = len(closes) / 252.0
+                    cagr = (closes[0] / closes[-1]) ** (1.0 / years) - 1.0
+                    cagr_pct = round(cagr * 100, 2)
+                    bull_flag = cagr > 0.22  # >22% annualized = extended bull regime
+                    result["ndx_5y_rolling_cagr"] = cagr_pct
+                    result["extended_bull_flag"] = bull_flag
+                    db.update_state("ndx_5y_rolling_cagr", cagr_pct)
+                    db.update_state("tqqq_extended_bull_flag", bull_flag)
         except Exception as e:
-            logger.warning(f"52w high/low fetch failed: {e}")
+            logger.warning(f"52w high/low + 5Y CAGR fetch failed: {e}")
 
         try:
             _fg_resp = requests.get(
@@ -1490,6 +1504,23 @@ class TQQQTacticalSniper:
         except Exception:
             pass  # DB unavailable — scorer continues without this signal
 
+        # GEX regime cross-signal (max +6 / -5) — analytics.py writes gex_profile_SPY hourly.
+        # Negative GEX → dealers short gamma → moves amplified → CALL bounce stronger if bottom holds.
+        # Positive GEX → dealers long gamma → vol suppressed → smaller expected moves, dampen CALL.
+        try:
+            _gex_raw = db.get_state("gex_profile_SPY")
+            if _gex_raw and isinstance(_gex_raw, dict):
+                _gex_d = _gex_raw.get("data", {})
+                _gex_ms = _gex_d.get("market_state", "UNKNOWN")
+                if "NEGATIVE" in _gex_ms:
+                    b += 6   # dealers amplify — capitulation bounces are sharper
+                    t = max(0, t - 5)  # neg gamma at a top is unusual; reduce complacency read
+                elif "POSITIVE" in _gex_ms:
+                    b = max(0, b - 5)  # suppressed vol = smaller expected CALL payout
+                    t += 5   # positive gamma + extended market = complacency confirmed
+        except Exception:
+            pass  # GEX unavailable — scorer continues without this signal
+
         # ── Fibonacci golden pocket — TQQQ structural location (max +6 / -4) ─────
         # Is TQQQ at a structurally optimal price level for a LEAP CALL entry?
         # Golden pocket (70.5-88.6% retrace of recent 20-bar swing) = where buyers defend.
@@ -1658,6 +1689,23 @@ class TQQQTacticalSniper:
         if _vts != 0.0:
             db.update_state("vix_term_slope", round(_vts, 2))
 
+        # Background DB signals from TQQQ backtest research — zero new API calls, zero new notifications.
+        # Read by dispatch_leap_signal() at signal time to add justification lines to the CALL embed.
+        # (1) Financing drag: cost of holding 2× leverage = 2*(fed_funds*1.0134 + 0.48%)/yr
+        _drag = round(2 * (RISK_FREE_RATE * 1.0134 + 0.0048) * 100, 2)
+        db.update_state("tqqq_financing_drag_pct", _drag)
+        # (2) Extended bull flag — written by fetch_qqq_extended_metrics(); echo from ext dict
+        #     so it's always in sync with the current run's data, not a stale DB read from yesterday.
+        if ext is not None:
+            _bull_flag = ext.get("extended_bull_flag", False)
+            db.update_state("tqqq_extended_bull_flag", _bull_flag)
+        # (3) Call tier: which instrument to use based on score (QQQ = moderate, TQQQ = high conviction)
+        _call_tier = (
+            "TQQQ" if bottom_score >= LEAP_SIGNAL_THRESHOLD
+            else ("QQQ" if bottom_score >= LEAP_ELEVATED_THRESHOLD else "NONE")
+        )
+        db.update_state("tqqq_call_tier", _call_tier)
+
         return {"bottom_score": bottom_score, "top_score": top_score, "signals": signals}
 
     # =========================================================================
@@ -1685,8 +1733,16 @@ class TQQQTacticalSniper:
         # Cycle score gate — bottom_score must show at least moderate oversold conditions.
         # A pure red day on no fear (score < threshold) is distribution, not capitulation.
         bottom_score = cycle.get("bottom_score", 0) if cycle else 0
-        if bottom_score < CYCLE_BOTTOM_THRESHOLD:
-            logger.debug(f"LEAP CALL: bottom_score {bottom_score} < {CYCLE_BOTTOM_THRESHOLD} — skip (not oversold enough)")
+        # Extended bull regime guard: when 5Y QQQ CAGR > 22%, financing drag erodes 3× leverage
+        # returns materially. Require LEAP_SIGNAL_THRESHOLD (65) instead of base 55 — only
+        # high-conviction fear entries justify TQQQ calls when the regime is already stretched.
+        _extended_bull = db.get_state("tqqq_extended_bull_flag")
+        effective_threshold = LEAP_SIGNAL_THRESHOLD if _extended_bull else CYCLE_BOTTOM_THRESHOLD
+        if bottom_score < effective_threshold:
+            logger.debug(
+                f"LEAP CALL: bottom_score {bottom_score} < {effective_threshold}"
+                f"{' (extended bull regime — threshold raised)' if _extended_bull else ''} — skip"
+            )
             return None
 
         # VIXY hard gate: CALL desk requires genuine fear, not just a red day.
@@ -1943,18 +1999,40 @@ class TQQQTacticalSniper:
         vix3m_v = leap_setup.get("vix3m", 0.0)
         term_label = ("BACKWARDATION ⚠️ — sustained fear" if vts > 1.5 else
                       "flat" if abs(vts) < 0.5 else "contango — calm structure")
-        # GEX environment proxy via VIX term structure (GEX data not available at this tier)
-        gex_env = (
-            "NEG GAMMA — dealers amplify moves (CALL edge ↑)" if vts > 1.5 else
-            "POS GAMMA — dealers suppress moves (confirm fear before entry)" if vts < -1.5 else
-            "NEUTRAL GAMMA"
-        )
+        # Real GEX regime from DB (analytics.py writes gex_profile_SPY hourly via Tradier chain)
+        _real_gex_ms = "UNKNOWN"
+        _gex_flip = 0.0
+        _gex_call_wall = 0.0
+        _gex_put_wall = 0.0
+        try:
+            _gex_raw = db.get_state("gex_profile_SPY")
+            if _gex_raw and isinstance(_gex_raw, dict):
+                _gex_d = _gex_raw.get("data", {})
+                _real_gex_ms = _gex_d.get("market_state", "UNKNOWN")
+                _gex_flip = float(_gex_d.get("flip_strike", 0.0))
+                _gex_call_wall = float(_gex_d.get("call_wall", 0.0))
+                _gex_put_wall = float(_gex_d.get("put_wall", 0.0))
+        except Exception:
+            pass
+        if "NEGATIVE" in _real_gex_ms:
+            _gex_env = "🔴 NEG GAMMA — dealers amplify moves (CALL edge ↑)"
+        elif "POSITIVE" in _real_gex_ms:
+            _gex_env = "🟢 POS GAMMA — dealers suppress moves (confirm fear before entry)"
+        elif vts > 1.5:  # fallback to VIX proxy when DB is empty
+            _gex_env = "NEG GAMMA (VIX proxy — awaiting Tradier data)"
+        elif vts < -1.5:
+            _gex_env = "POS GAMMA (VIX proxy — awaiting Tradier data)"
+        else:
+            _gex_env = "NEUTRAL GAMMA"
+        _flip_str = f" | Flip: `${_gex_flip:.0f}`" if _gex_flip > 0 else ""
+        _wall_str = (f" | Call Wall: `${_gex_call_wall:.0f}` | Put Wall: `${_gex_put_wall:.0f}`"
+                     if _gex_call_wall > 0 and _gex_put_wall > 0 else "")
         pc_label = f"z `{pc_z_v:+.1f}σ` vs 30D mean — {'SPIKE ⚠️ fear surge' if pc_z_v >= 1.2 else 'elevated' if pc_z_v >= 0.5 else 'normal'}"
         rsi_line = f"┣ RSI14: `{leap_setup.get('rsi14', 50):.1f}` | F&G: `{leap_setup.get('fear_greed', 50):.0f}/100` | Drawdown: `{leap_setup.get('drawdown_from_high_pct', 0):.1f}%` from 52w high\n"
         real_vix = leap_setup.get("real_vix")
         real_vix_str = f" | VIX: `{real_vix:.1f}` (prev close)" if real_vix else ""
         pc_line = f"┣ SPY P/C: `{pc:.2f}` ({pc_label}) | VIX Term: VIXY `{vix9d_v:.2f}` / VXZ `{vix3m_v:.2f}` = `{vts:+.2f}` {term_label}\n"
-        gex_line = f"┣ GEX Environment: {gex_env}{real_vix_str}\n"
+        gex_line = f"┣ SPY GEX: {_gex_env}{_flip_str}{_wall_str}{real_vix_str}\n"
         _lfib_zone = leap_setup.get("tqqq_fib_zone", "MID")
         _lfib_pct  = leap_setup.get("tqqq_fib_pct", 50.0)
         _lfib_icon = {"GOLDEN_POCKET": "🟢", "MID": "🟡", "PREMIUM": "🔴", "BROKEN": "⛔"}.get(_lfib_zone, "🟡")
@@ -1968,9 +2046,38 @@ class TQQQTacticalSniper:
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
         score_line = f"┗ Bottom Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
+        # Background DB context lines — silent reads, no new API calls.
+        # Written by calculate_cycle_score() / fetch_qqq_extended_metrics() each run.
+        _bg_lines = ""
+        try:
+            _drag = db.get_state("tqqq_financing_drag_pct")
+            _bull_flag = db.get_state("tqqq_extended_bull_flag")
+            _ndx_cagr = db.get_state("ndx_5y_rolling_cagr")
+            _call_tier = db.get_state("tqqq_call_tier") or "TQQQ"
+            if _drag is not None:
+                _drag = float(_drag)
+                _bg_lines += (
+                    f"┣ TQQQ carry drag: ~{_drag:.1f}%/yr "
+                    f"(2× leverage at {RISK_FREE_RATE*100:.2f}% fed funds — needs >{_drag:.0f}%/yr underlying to beat 1×)\n"
+                )
+            if _bull_flag and _ndx_cagr is not None:
+                _bg_lines += (
+                    f"┣ ⚠️ Extended bull regime: 5Y QQQ CAGR `{float(_ndx_cagr):.1f}%` → "
+                    f"threshold raised to {LEAP_SIGNAL_THRESHOLD} (high-conviction entries only)\n"
+                )
+            if _call_tier in ("QQQ", "TQQQ"):
+                _tier_note = (
+                    "QQQ deep ITM calls (score 55–64, moderate conviction)"
+                    if _call_tier == "QQQ" else
+                    "TQQQ deep ITM calls (score ≥65, high conviction)"
+                )
+                _bg_lines += f"┣ Instrument: {_tier_note}\n"
+        except Exception:
+            pass
+
         regime_payload = (
             f"TQQQ LEAP Entry Window — {header_tag}\n"
-            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + gex_line + fib_line + score_line
+            + intraday_line + ema_line + macro_line + fear_line + macd_line + breadth_line + rsi_line + pc_line + gex_line + fib_line + _bg_lines + score_line
         )
 
         # --- Embed 2: Contract setup ---
@@ -2487,16 +2594,38 @@ class TQQQTacticalSniper:
         pc_line2 = f"┣ SPY P/C: `{pc2:.2f}` ({pc_label2}) | VIX Term: VIXY `{vix9d_v2:.2f}` / VXZ `{vix3m_v2:.2f}` = `{vts2:+.2f}` {term_label2}\n"
 
         score_bar = "█" * (score // 10) + "░" * (10 - score // 10)
-        # GEX environment proxy for PUT desk (deep contango = positive gamma = move suppression)
+        # Real GEX regime for PUT desk — same DB key as CALL desk (read once per dispatch)
         vts2 = put_setup.get("vix_term_slope", 0.0)
-        gex_env_put = (
-            "POS GAMMA — dealers suppress moves (top may extend further, use 2-tranche entry)" if vts2 < -1.5 else
-            "NEG GAMMA — moves amplified (correction risk elevated, PUT edge ↑)" if vts2 > 1.5 else
-            "NEUTRAL GAMMA"
-        )
+        _put_gex_ms = "UNKNOWN"
+        _put_gex_flip = 0.0
+        _put_call_wall = 0.0
+        _put_put_wall = 0.0
+        try:
+            _put_gex_raw = db.get_state("gex_profile_SPY")
+            if _put_gex_raw and isinstance(_put_gex_raw, dict):
+                _put_gex_d = _put_gex_raw.get("data", {})
+                _put_gex_ms = _put_gex_d.get("market_state", "UNKNOWN")
+                _put_gex_flip = float(_put_gex_d.get("flip_strike", 0.0))
+                _put_call_wall = float(_put_gex_d.get("call_wall", 0.0))
+                _put_put_wall = float(_put_gex_d.get("put_wall", 0.0))
+        except Exception:
+            pass
+        if "POSITIVE" in _put_gex_ms:
+            _gex_env_put = "🟢 POS GAMMA — dealers suppress moves (top may extend, use 2-tranche entry)"
+        elif "NEGATIVE" in _put_gex_ms:
+            _gex_env_put = "🔴 NEG GAMMA — moves amplified (correction risk elevated, PUT edge ↑)"
+        elif vts2 < -1.5:
+            _gex_env_put = "POS GAMMA (VIX proxy — awaiting Tradier data)"
+        elif vts2 > 1.5:
+            _gex_env_put = "NEG GAMMA (VIX proxy — awaiting Tradier data)"
+        else:
+            _gex_env_put = "NEUTRAL GAMMA"
+        _put_flip_str = f" | Flip: `${_put_gex_flip:.0f}`" if _put_gex_flip > 0 else ""
+        _put_wall_str = (f" | Call Wall: `${_put_call_wall:.0f}` | Put Wall: `${_put_put_wall:.0f}`"
+                         if _put_call_wall > 0 and _put_put_wall > 0 else "")
         score_line = f"┗ Top Score: `{score}/100` [{score_bar}] ▸ **{tier_name}** — {action_label}"
 
-        gex_put_line = f"┣ GEX Environment: {gex_env_put}\n"
+        gex_put_line = f"┣ SPY GEX: {_gex_env_put}{_put_flip_str}{_put_wall_str}\n"
         _pfib_zone = put_setup.get("tqqq_fib_zone", "MID")
         _pfib_pct  = put_setup.get("tqqq_fib_pct", 50.0)
         _pfib_icon = {"GOLDEN_POCKET": "🔴", "MID": "🟡", "PREMIUM": "🟢", "BROKEN": "🟢"}.get(_pfib_zone, "🟡")
