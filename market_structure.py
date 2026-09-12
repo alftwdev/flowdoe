@@ -210,7 +210,7 @@ def analyze_market_structure(df, atr_series=None):
     nearby equal-highs/lows pool is flagged as context (likely next target, not yet a trigger).
     """
     if df is None or len(df) < 25:
-        return {"setup": "INSUFFICIENT_DATA", "bias": "NEUTRAL", "detail": "Not enough bars for structure analysis."}
+        return {"setup": "AWAITING DATA", "bias": "NEUTRAL", "detail": "Accumulating bars — structure available once 25+ bars are loaded."}
 
     atr_series = atr_series if atr_series is not None else calculate_atr_series(df)
     sweep = detect_liquidity_sweep(df)

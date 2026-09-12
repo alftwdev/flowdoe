@@ -724,11 +724,11 @@ def run_intraday_futures_update():
             try:
                 chart_bytes = generate_market_profile_chart(label, active_df, profile, vwap, posture.split('|')[0].strip())
                 send_essentials_embed_with_chart(
-                    WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, chart_bytes, color=_mp_color
+                    WEBHOOK_FUTURES, f"FUTURES FLOWSTATE | {label}", payload, chart_bytes, color=_mp_color
                 )
             except Exception as e:
                 logger.error(f"Chart generation failed, falling back to text-only dispatch: {e}")
-                send_essentials_embed(WEBHOOK_FUTURES, f"ALGORITHMIC MARKET PROFILE TERMINAL | {label}", payload, _mp_color)
+                send_essentials_embed(WEBHOOK_FUTURES, f"FUTURES FLOWSTATE | {label}", payload, _mp_color)
             logger.info(f"Dispatched {status_tag} Futures Pulse for {label}")
 
         # Cross-sector correlation: ES trading outside its OVERNIGHT value area heading into/around
