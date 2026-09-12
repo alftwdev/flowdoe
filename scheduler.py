@@ -1970,11 +1970,6 @@ def main():
                     logger.debug(f"Staking yield block failed: {_se}")
 
                 payload += staking_block
-                payload += (
-                    "─────────────────────────\n"
-                    "Sources: Alternative.me · Reddit r/Cryptocurrency · Binance FAPI · CoinGecko · Twelve Data · DeFiLlama\n"
-                    "Not financial advice — for informational/educational use only."
-                )
 
                 # ── Income channel staking snippet → #dividend-ccetfs ─────────
                 # Short "passive yield comparison" block — no CLM/CRF data here.
@@ -2129,11 +2124,7 @@ def main():
                                 sign = "+" if item["chg"] >= 0 else ""
                                 pat_payload += f"┣ `{item['symbol']}` ${item['price']:.2f} {sign}{item['chg']:.1f}% — {item['pattern']}\n"
                         pat_payload = pat_payload.rstrip("┣ \n") + "\n\n"
-                    pat_payload += (
-                        "─────────────────────────\n"
-                        "Source: Finviz TA Screener · >500K avg daily volume filter\n"
-                        "Not financial advice — for informational/educational use only."
-                    )
+                    pat_payload = pat_payload.rstrip("\n")
                     if WEBHOOK_FUTURES:
                         _pat_color = COLOR_GREEN if len(bullish) > len(bearish) else (COLOR_RED if len(bearish) > len(bullish) else COLOR_YELLOW)
                         send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | S&P Pattern Scan", pat_payload, _pat_color)

@@ -177,7 +177,7 @@ def send_essentials_embed_with_chart(webhook_url, title, description, chart_byte
             "description": secured_description,
             "color": color,
             "image": {"url": "attachment://chart.png"},
-            "footer": {"text": f"Not financial advice — for informational/educational use only. · {trace_code}"}
+            "footer": {"text": "Not financial advice — for informational/educational use only."}
         }]
     }
 
