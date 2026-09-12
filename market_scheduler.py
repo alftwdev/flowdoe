@@ -93,8 +93,8 @@ SCHEDULE = [
     # market_intraday removed — market_analysis.py always-on handles intraday pulse at 17:00 UTC.
     # spx_income removed — not part of active strategy.
     (14, 30, "strangle_scan",      "scheduler",    ["--mode", "strangle_scan"],   True),  # 04:30 HST — after US cash open
-    (18,  5, "income",             "scheduler",    ["--mode", "income"],          True),
-    (18, 15, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),
+    (18, 12, "income",             "scheduler",    ["--mode", "income"],          True),  # shifted 18:05→18:12 — avoids 429 collision with monitor loop's 18:04 tick
+    (18, 22, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),  # shifted 18:15→18:22 — stays between monitor ticks
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),
     (20, 20, "eod",                "scheduler",    ["--mode", "eod"],             True),  # was 20:16 — 6 min gap avoids concurrent TD burst
     # macro_pm removed — Credit/Treasury data was already in morning brief and duplicated at EOD.

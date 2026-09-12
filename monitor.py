@@ -1034,10 +1034,13 @@ def detect_ro_completion_dip(session, ticker, current_price, current_premium) ->
         except Exception:
             _age_days = 0
         if _age_days < 30:
-            logger.info(
-                f"[RO Completion Dip] {ticker} — conditions met but suppressed: "
-                f"only {_age_days}d since N-2 (need 30d minimum — RO has not had time to complete)"
-            )
+            _suppress_key = f"ro_dip_suppress_logged_{ticker}_{datetime.utcnow().date()}"
+            if not db.get_state(_suppress_key):
+                logger.info(
+                    f"[RO Completion Dip] {ticker} — conditions met but suppressed: "
+                    f"only {_age_days}d since N-2 (need 30d minimum — RO has not had time to complete)"
+                )
+                db.update_state(_suppress_key, "1")
             return False
 
         # Condition 3: premium collapsed back below 10%
