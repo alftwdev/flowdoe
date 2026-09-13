@@ -5043,6 +5043,53 @@ class HighFidelityAnalyticsEngine:
             return round(val, 2)
         return 0.0
 
+    def fetch_valuation_regime(self) -> dict:
+        """
+        Buffett Indicator: total US equity market cap / GDP as a structural valuation signal.
+        Uses FRED NCBEILQ027S (Z.1 domestic nonfinancial equities, billions) / GDP (billions).
+        Cached weekly — quarterly data changes slowly; zero runtime cost after first fetch.
+        Returns: {buffett_pct, regime, top_score_boost} — None on failure.
+        Regime thresholds (vs ~110% historical average):
+          NORMAL   < 160%  |  ELEVATED 160-190%  |  STRETCHED 190-220%  |  EXTREME > 220%
+        """
+        cache_key = "valuation_regime_data"
+        cache_date_key = "valuation_regime_date"
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cached_date = self.db.get_state(cache_date_key)
+        if cached_date:
+            try:
+                days_old = (datetime.now() - datetime.strptime(cached_date, "%Y-%m-%d")).days
+                if days_old < 7:
+                    raw = self.db.get_state(cache_key)
+                    if raw:
+                        return json.loads(raw)
+            except Exception:
+                pass
+        try:
+            eq  = self._fetch_fred_metric("NCBEILQ027S")  # millions (Z.1 flow of funds)
+            gdp = self._fetch_fred_metric("GDP")           # billions SAAR → × 1000 = millions
+            if not eq or not gdp or gdp == 0 or eq < 1_000_000:
+                return None
+            buffett_pct = round((eq / (gdp * 1000)) * 100, 1)
+            # Sanity gate: discard nonsensical values
+            if not (50 <= buffett_pct <= 500):
+                return None
+            if buffett_pct >= 220:
+                regime, boost = "EXTREME", 8
+            elif buffett_pct >= 190:
+                regime, boost = "STRETCHED", 5
+            elif buffett_pct >= 160:
+                regime, boost = "ELEVATED", 2
+            else:
+                regime, boost = "NORMAL", 0
+            result = {"buffett_pct": buffett_pct, "regime": regime, "top_score_boost": boost}
+            self.db.update_state(cache_key, json.dumps(result))
+            self.db.update_state(cache_date_key, today_str)
+            return result
+        except Exception as e:
+            logger.error(f"Valuation regime fetch failed: {e}")
+            return None
+
     def fetch_binance_derivatives(self) -> dict:
         """
         Binance FAPI public endpoints — no API key required.

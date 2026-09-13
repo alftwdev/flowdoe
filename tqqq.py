@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import time
 import logging
 import requests
@@ -1652,6 +1653,30 @@ class TQQQTacticalSniper:
             elif _orb_bias == "BULLISH":
                 t = max(0, t - 5)
                 ext["orb_top_boost"] = -5
+        except Exception:
+            pass
+
+        # Valuation regime (Buffett Indicator) — structural overvaluation boosts PUT conviction.
+        # Reads weekly-cached DB key; zero API calls at runtime. Max +8 pts.
+        try:
+            _vr_raw = db.get_state("valuation_regime_data")
+            if _vr_raw:
+                _vr = json.loads(_vr_raw)
+                _vr_boost = _vr.get("top_score_boost", 0)
+                if _vr_boost > 0:
+                    t += _vr_boost
+                    ext["valuation_regime"] = _vr.get("regime")
+                    ext["buffett_pct"] = _vr.get("buffett_pct")
+        except Exception:
+            pass
+
+        # HY complacency: narrow spread (<3.5%) while vol not fully suppressed = credit market
+        # ignoring risk while other fear signals are present → complacency trap. Max +4 pts.
+        try:
+            _hy_v = float(db.get_state("fred_hy_spread_value") or 0)
+            if 0 < _hy_v < 3.5 and vix_z >= -0.3:
+                t += 4
+                ext["hy_complacency"] = round(_hy_v, 2)
         except Exception:
             pass
 

@@ -717,6 +717,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         yc   = engine.fetch_yield_curve()
         snap = engine.fetch_fred_macro_snapshot()
         hy   = engine.fetch_hy_spread()
+        engine.fetch_valuation_regime()   # populate/refresh DB cache; display handled below
         real_vix = bias["real_vix"]
         _edm = real_vix / 15.874   # sqrt(252) — daily expected move from Natenberg (1994)
         _vix_regime = ('Calm. Options cheap.' if real_vix < 15 else
@@ -733,7 +734,14 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         else:
             yc_line = "N/A"
         ff_line  = f"`{snap.get('fedfunds', '?')}%` Fed Funds"
-        hy_line  = f"`{hy:.2f}%` {'✅ healthy' if hy < 4.5 else '⚠️ stress' if hy < 6 else '🔴 crisis'}" if hy else "N/A"
+        # HY spread: flag complacency (tight spread while market not in deep calm)
+        if hy:
+            _hy_tag = '✅ healthy' if hy < 4.5 else ('⚠️ stress' if hy < 6 else '🔴 crisis')
+            if hy < 3.5:
+                _hy_tag = '⚠️ tight · complacency risk'
+            hy_line = f"`{hy:.2f}%` {_hy_tag}"
+        else:
+            hy_line = "N/A"
         cpi_line = f"`{snap.get('cpi_yoy', '?')}%` CPI YoY" if snap.get("cpi_yoy") else ""
         urate    = snap.get("unrate")
     except Exception as e:
@@ -742,12 +750,29 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         vix_line = f"`{bias['real_vix']:.1f}`"
         urate = None
 
+    # Valuation regime line — only shown when Buffett Indicator is STRETCHED or EXTREME
+    valuation_line = None
+    try:
+        import json as _vr_json
+        _vr_raw = db.get_state("valuation_regime_data")
+        if _vr_raw:
+            _vr = _vr_json.loads(_vr_raw)
+            _bp = _vr.get("buffett_pct", 0)
+            _vr_regime = _vr.get("regime", "NORMAL")
+            if _vr_regime in ("STRETCHED", "EXTREME"):
+                _vr_icon = "🔴" if _vr_regime == "EXTREME" else "⚠️"
+                valuation_line = f"{_vr_icon} Mkt/GDP: `{_bp:.0f}%` — {_vr_regime.lower()} vs ~110% hist. avg"
+    except Exception:
+        pass
+
     macro_section = (
         "**MACRO ENVIRONMENT**\n"
         f"┣ VIX: {vix_line}\n"
         f"┣ Yield Curve: {yc_line}\n"
         f"┣ {ff_line} | HY Spread: {hy_line}\n"
     )
+    if valuation_line:
+        macro_section += f"┣ {valuation_line}\n"
     if cpi_line and urate:
         macro_section += f"┗ {cpi_line} | Unemployment: `{urate:.1f}%`\n"
     elif cpi_line:
