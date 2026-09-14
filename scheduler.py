@@ -2597,6 +2597,94 @@ def main():
             except Exception as e:
                 logger.error(f"personal_scorecard mode failed: {e}")
 
+        elif args.mode == "oct_nav_reminder":
+            # ── OCTOBER NAV REASSESSMENT REMINDER → Pushover ONLY ────────────────
+            # Fires every Sunday in October via market_scheduler.py SCHEDULE_OCTOBER_SUNDAY.
+            # October is when the Cornerstone Board locks the NAV that sets next year's
+            # CLM/CRF distribution rate (21% × end-Oct NAV). This reminder prompts:
+            #   1. Check CEFConnect for current CLM/CRF NAV
+            #   2. Compute 2027 distribution preview and update CLAUDE.md Section 0-B
+            #   3. Assess whether to accumulate before the NAV lock or wait
+            # All data from DB — zero API calls.
+            try:
+                from datetime import date as _date
+                today_s = _date.today().isoformat()
+                _month  = _date.today().month
+                _day    = _date.today().day
+
+                # Estimate days until end-of-October NAV lock (approx Oct 31)
+                days_to_lock = (31 - _day) if _month == 10 else 0
+
+                clm_nav_raw = engine.db.get_state("clm_last_nav")
+                crf_nav_raw = engine.db.get_state("crf_last_nav")
+                clm_nav = float(clm_nav_raw) if clm_nav_raw else None
+                crf_nav = float(crf_nav_raw) if crf_nav_raw else None
+
+                clm_price_raw = engine.db.get_state("clm_last_price")
+                crf_price_raw = engine.db.get_state("crf_last_price")
+                clm_price = float(clm_price_raw) if clm_price_raw else None
+                crf_price = float(crf_price_raw) if crf_price_raw else None
+
+                lines = ["🗓 OCTOBER NAV LOCK — Annual Reassessment"]
+                lines.append(f"Board locks 2027 distribution rate in ~{days_to_lock}d (end of Oct).")
+                lines.append("")
+                lines.append("CURRENT NAV (from CEFConnect via monitor.py):")
+
+                for sym, nav, price in (("CLM", clm_nav, clm_price), ("CRF", crf_nav, crf_price)):
+                    ann_dist_2026 = 1.458 if sym == "CLM" else 1.4112
+                    if nav and nav > 0:
+                        dist_2027_preview = round(nav * 0.21, 4)
+                        fv_2027_preview   = round(dist_2027_preview / 0.19, 2)
+                        dist_mo_preview   = round(dist_2027_preview / 12, 4)
+                        change_pct = round((dist_2027_preview - ann_dist_2026) / ann_dist_2026 * 100, 1)
+                        change_str = f"{change_pct:+.1f}% vs 2026"
+                        prem_str   = ""
+                        if price and price > 0:
+                            prem = round((price / nav - 1) * 100, 1)
+                            prem_str = f" | Market {prem:+.1f}% premium"
+                        lines.append(
+                            f"┣ {sym}: NAV ${nav:.2f}{prem_str}"
+                        )
+                        lines.append(
+                            f"┃  2027 dist preview: ${dist_mo_preview:.4f}/mo (${dist_2027_preview:.4f}/yr, {change_str})"
+                        )
+                        lines.append(
+                            f"┗  2027 FV at 19% yield: ~${fv_2027_preview:.2f}"
+                        )
+                    else:
+                        lines.append(f"┣ {sym}: NAV unavailable — check CEFConnect manually")
+
+                lines.append("")
+                lines.append("ACTION CHECKLIST:")
+                lines.append("☐ Confirm NAV on CEFConnect (cefconnect.com → CLM / CRF)")
+                lines.append("☐ Update CLAUDE.md §0-B: CLM/CRF_ANNUAL_DIST_2027 + FV_2027")
+                lines.append("☐ Update NAV_DEFAULTS in daily_pulse.py + monitor.py fallback")
+                lines.append("☐ Assess accumulation: if 2027 FV > current price → strong buy zone")
+                lines.append("☐ If NAV rising → 2027 dist > 2026 → higher FV → hold and DRIP")
+                lines.append("☐ If NAV falling → 2027 dist < 2026 → recalibrate yield floor")
+
+                msg = "\n".join(lines)
+                _p_tok = os.getenv("PUSHOVER_API_TOKEN")
+                _p_usr = os.getenv("PUSHOVER_USER_KEY")
+                if _p_tok and _p_usr:
+                    import requests as _rq
+                    _rq.post(
+                        "https://api.pushover.net/1/messages.json",
+                        data={
+                            "token": _p_tok, "user": _p_usr,
+                            "title": f"🍂 October NAV Reminder — {today_s}",
+                            "message": msg,
+                            "priority": 0,
+                        },
+                        timeout=15,
+                    )
+                    logger.info("October NAV reminder dispatched via Pushover.")
+                else:
+                    logger.warning("oct_nav_reminder: Pushover credentials not set.")
+
+            except Exception as e:
+                logger.error(f"oct_nav_reminder mode failed: {e}")
+
         elif args.mode == "orb_scan":
             # ── ORB SCAN → #options-wheel (WEBHOOK_TRADE_SIGNALS) ─────────────
             # 15-min Opening Range Breakout scan. Fires at 9:50 ET (14:50 UTC).

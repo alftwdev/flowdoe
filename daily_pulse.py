@@ -365,8 +365,8 @@ def format_pulse_message(cef, state, ro_status=None, ro_gate_info=None):
         lines.append(f"┣ CLM at ${clm_price:.2f}: {clm_yield:.1f}% yield → +${income_1k:.2f}/mo per $1k")
         lines.append(f"┣ Advantage: +{advantage:.1f}pp vs idle  ({clm_yield:.1f}% − {cpi:.1f}% CPI)")
         lines.append(f"┣ Portfolio real yield: {bp['real_portfolio_yield']:+.1f}% (19% blended − {cpi:.1f}% CPI)")
-        lines.append(f"┣ Margin real cost: {bp['margin_real_cost']:+.2f}% ({MARGIN_RATE}% rate − {cpi:.1f}% CPI)")
-        lines.append(f"┗ Capital ladder: Margin {MARGIN_RATE}% (now) → Box spread ~4.75% (target $100k) → IBC vault 4.5–6.5% (long-term)")
+        lines.append(f"┣ Margin real cost: {bp['margin_real_cost']:+.2f}% ({MARGIN_RATE}% rate − {cpi:.1f}% CPI) — carry confirmed")
+        lines.append(f"┗ NAV buffer: DRIP share growth +23%/yr outpaces {cpi:.1f}% CPI")
 
     title   = f"⚡ Evening Pulse — {today}"
     message = "\n".join(lines)

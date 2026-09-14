@@ -138,6 +138,13 @@ SCHEDULE_SUNDAY_ONLY = [
     ( 4,  0, "personal_scorecard", "scheduler",    ["--mode", "personal_scorecard"], False),
 ]
 
+# October-only Sunday entries — annual NAV reassessment reminder (fires every Sunday in October).
+# October is when Cornerstone Board locks the next year's distribution rate (21% × end-Oct NAV).
+# The reminder fires weekly during October so there's a window to update constants before the lock.
+SCHEDULE_OCTOBER_SUNDAY = [
+    ( 4, 15, "oct_nav_reminder",   "scheduler",    ["--mode", "oct_nav_reminder"],   False),
+]
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _db_key(task_key: str, date_str: str) -> str:
@@ -192,10 +199,12 @@ def run():
         date_str = now_utc.strftime("%Y-%m-%d")
         h, m     = now_utc.hour, now_utc.minute
 
+        is_october = now_utc.month == 10
         schedule = (
             SCHEDULE
-            + (SCHEDULE_FRIDAY_ONLY  if weekday == 4 else [])
-            + (SCHEDULE_SUNDAY_ONLY  if weekday == 6 else [])
+            + (SCHEDULE_FRIDAY_ONLY   if weekday == 4               else [])
+            + (SCHEDULE_SUNDAY_ONLY   if weekday == 6               else [])
+            + (SCHEDULE_OCTOBER_SUNDAY if weekday == 6 and is_october else [])
         )
         for (t_h, t_m, task_key, script, args, wkdays_only) in schedule:
             if wkdays_only and not is_wkday:
