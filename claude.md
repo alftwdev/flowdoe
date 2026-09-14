@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Aug 24 2026 — distribution constants corrected (press release Aug 17); 2027 preview constants added; 52-week low detector wired; both tickers hit 52w lows today (CLM $6.69 / CRF $6.44); active RO; Oct NAV lock is key catalyst; CLM RO formula corrected to 104% NAV (was 112%)*
+*Last updated: Sept 14 2026 — RO timeline heuristics corrected from 3-cycle forensic data; daily RO snapshot logger added to monitor.py; CLM $6.455 / CRF $6.260 on live market (2.3% premiums, new lows); ex-div Sept 15 confirmed; N-2/A expected ~Oct 1-2; record date ~Oct 13-16*
 
 ---
 
@@ -566,8 +566,22 @@ Phase 7 — Recovery:
   Resume DRIP at NAV. Re-enter full position if not already done.
 ```
 
-**Record date timing heuristic:** ~59 days post-N-2 (based on 2025 data).
-**Expiration timing heuristic:** ~84 days post-N-2 (record date + 25 subscription days).
+**3-cycle forensic timeline (2022 + 2025 + 2026 — use these, not single-cycle estimates):**
+```
+N-2 → N-2/A:          ~46-47 days (~6.7 weeks) — consistent across all 3 cycles
+N-2/A → Effective:    ~2 days (SEC declares effective, press release same day or next)
+Effective → Record:   ~10-11 days (424B3 sets concrete record date and sub price)
+Record → Expiration:  ~25 days (2025) or ~53 days (2022) — 25 days is now the norm
+─────────────────────────────────────────────────────────────────────────────────
+N-2 → Record date:    ~59 days total  (46 + 2 + 11)
+N-2 → Expiration:     ~84 days total  (59 + 25)
+```
+**N-2/A is NOT the buy trigger** — it finalizes terms but the price already moved on the N-2.
+**"Near bottom" historically clusters at record date through expiration** — not at N-2 announcement.
+**Most premium compression happens at N-2 filing, not N-2/A** — 2026 confirmed: ~25%→~6% by Day 11.
+**The N-2/A + 424B3 is when market gets exact dilution math** and may re-price a second time (smaller move).
+**Sub price formula (2026):** flat 104% NAV only — no market-price floor. Less dilution than 2022/2025.
+**Open-market buyer beats RO** when market price ≤ sub price (= ≤ 104% NAV). Track this daily.
 
 ---
 
@@ -607,30 +621,37 @@ Aug 17 capitulation:     8.62M CLM vol (4.6× avg), Cornerstone press release da
                          CLM $7.35 → $6.94 in one session (–2027 dist announcement)
 Aug 25 (Day 11):         CLM $6.74 (52w low $6.65 intraday), CRF $6.48 (52w low $6.44)
 NAV as of Aug 21:        CLM $6.31 | CRF $6.12  (from CEFConnect — refreshed Aug 25 2026)
-Current premiums:        CLM 6.81% | CRF 5.56%  (52w avg: 19.60% / 18.46%)
-Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × current NAV; shifts with Oct NAV)
-Estimated record date:   ~Oct 12, 2026  (59 days post-N-2 heuristic)
-Estimated expiration:    ~Nov 6, 2026
-Sept 15 ex-div:          CLM –$0.1215 | CRF –$0.1176 (mechanical drop; CRF falls to sub-price)
+Sept 14 LIVE (Day 31):   CLM $6.455 (–1.90%) | CRF $6.260 (–1.73%) — NEW 52w price lows
+                         CLM premium: 2.30% | CRF premium: 2.29% — NEW all-cycle low premiums
+                         CLM BELOW Tier 2 zone ($6.50–$6.65) — already in Tier 2/3 overlap
+                         Both below 2027 FV already (CLM FV $6.97 / CRF FV $6.74)
+Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × NAV; both prices now BELOW sub price)
+                         → Open-market buyer BEATS RO participants at current price
+Sept 15 ex-div:          CLM –$0.1215 | CRF –$0.1176 (mechanical drop confirmed)
+                         Post-ex-div projected: CLM ~$6.33 | CRF ~$6.14 (both deep below sub price)
+N-2/A expected:          ~Oct 1-2, 2026 (46-47 day historical gap from Aug 14 N-2)
+                         → Finalizes sub price; press release follows 2 days later
+Record date estimated:   ~Oct 13-16, 2026 (corrected from single-cycle Oct 12 estimate)
+Expiration estimated:    ~Nov 7-10, 2026 (record + 25 subscription days)
 Oct NAV lock:            End of October 2026 — Board sets 2027 distribution rate
-2027 FV estimate:        CLM ~$6.97 | CRF ~$6.76  (21% of Oct NAV ÷ 19% yield target)
+2027 FV estimate:        CLM ~$6.97 | CRF ~$6.74  (based on July NAV; actual locked end Oct)
 
-WHY 2026 IS FRONT-LOADED (different from 2025):
-  In 2025, CLM traded at ~17% premium when N-2 was filed — the market had room to
-  compress premium gradually toward sub price over the 84-day window.
-  In 2026, the Aug 17 Cornerstone press release revealed the 2027 distribution preview
-  ($0.1103/mo vs $0.1215/mo current). The market repriced to 2027 FV (~$6.97) within
-  3 days of the N-2. By Day 11, CLM is BELOW 2027 FV. The sell-off happened
-  before the record date, not during the subscription window.
-  → The 2025 "record date = bottom" pattern may NOT hold in 2026.
-  → The 2026 bottom may have already occurred (Aug 25 52w lows), or be forming now.
-  → September seasonality + ex-div Sept 15 add additional downward pressure.
+WHY 2026 IS FRONT-LOADED (different from 2022 and 2025):
+  In 2022/2025, premiums were 17-25% when N-2 filed — gradual compression over 84 days.
+  In 2026, the Aug 17 press release revealed the lower 2027 distribution immediately.
+  The market fully repriced from ~25% premium → ~2% premium by Day 31 (today).
+  This means "bottom" likely formed much earlier (Aug-Sept) rather than at record date.
+  2026 is the first cycle where open-market buyers beat RO participants BEFORE the record date.
+  → Sub price formula (104% flat, no market floor) = lowest-ever RO discount.
+  → Weaker uptake expected in subscription window (similar to 2025 which saw poor uptake at 12%).
 
-Tiered re-entry zones established Aug 25, 2026:
-  Tier 1 (Now, Aug 25–Sept 14):          CLM $6.65–$6.80 | CRF $6.40–$6.55
-  Tier 2 (Post-ex-div, Sept 15–19):      CLM $6.50–$6.65 | CRF $6.25–$6.40
-  Tier 3 (Record date, ~Oct 8–16):       CLM $6.30–$6.55 | CRF $6.00–$6.25
-  Tier 4 (Peak fear, scenario only):     CLM $6.00–$6.30 | CRF $5.75–$6.00
+Tiered re-entry zones (updated Sept 14, 2026):
+  Tier 1 (Aug 25–Sept 14): CLM $6.65–$6.80 | CRF $6.40–$6.55 [EXPIRED — prices already below]
+  Tier 2 (Sept 15–19):     CLM $6.50–$6.65 | CRF $6.25–$6.40 [BREACHED early — CLM at $6.455]
+  Tier 3 (~Oct 13–16):     CLM $6.30–$6.55 | CRF $6.00–$6.25 [ACTIVE range as of Sept 14]
+  Tier 4 (peak fear):      CLM $6.00–$6.30 | CRF $5.75–$6.00 [Reserve scenario]
+  NOTE: Prices breached Tier 2 BEFORE ex-div. Hold partial reserve for Tier 3/4 — do not
+  deploy all capital at current levels given N-2/A + record date selling still ahead.
 
 UPDATE THIS BLOCK when the 424B3 is filed (actual record date + sub price),
 when expiration occurs, and when the post-expiration recovery level is known.
@@ -661,11 +682,16 @@ CRF_PREMIUM_LOW_HISTORICAL = 4.66   # 52w low premium (percent) as of Aug 2026
 
 ### RO Cycle Comparison Table (add rows for each future cycle)
 
-| Cycle | Formula | N-2 Price | Record Date | Low Price | Low Date | Sub Price | Post-Exp 1mo |
-|-------|---------|-----------|-------------|-----------|----------|-----------|--------------|
-| 2025 CLM | 112%×NAV | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
-| 2026 CLM | 104%×NAV | $7.35 | ~Oct 12 est. | $6.65 intra | Aug 25 | ~$6.56 est. | TBD |
-| 2026 CRF | 104%×NAV | ~$7.12 | ~Oct 12 est. | $6.44 intra | Aug 25 | ~$6.37 est. | TBD |
+| Cycle | Formula | N-2→N2/A | N-2 Price | Record Date | Low Price | Low Date | Sub Price | Post-Exp 1mo |
+|-------|---------|----------|-----------|-------------|-----------|----------|-----------|--------------|
+| 2022 CLM | 112%×NAV or 65%×mkt | 47d | — | Apr 18 | ~$6.92 | ~Record date | ~$6.61 | ~$7.88 (10% prem) |
+| 2025 CLM | 112%×NAV or 80%×mkt | 46d | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
+| 2026 CLM | 104%×NAV flat | 46-47d est. | $7.35 | ~Oct 13-16 est. | $6.455 live | Sept 14 | ~$6.56 est. | TBD |
+| 2026 CRF | 104%×NAV flat | 46-47d est. | ~$7.12 | ~Oct 13-16 est. | $6.260 live | Sept 14 | ~$6.37 est. | TBD |
+
+**Key cross-cycle insight:** In 2022 and 2025, the low landed AT the record date. In 2026, prices
+broke below sub price by Day 31 (pre-ex-div) due to the concurrent distribution reset announcement.
+The 2026 cycle is front-loaded — premium collapsed at announcement, not gradually over 84 days.
 
 *Update TBD fields after 424B3 filing and post-expiration settlement.*
 

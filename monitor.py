@@ -18,6 +18,7 @@ Upgrades in this revision (per engineering session):
 """
 
 import os
+import json
 import requests
 import time
 import sys
@@ -432,6 +433,79 @@ def can_broadcast(sector: str, is_major: bool = True) -> bool:
         logger.info(f"[{sector}] Alert cap ({ALERT_MAX_PER_SECTOR}/24h) reached — suppressing.")
         return False
     return True
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RO DAILY SNAPSHOT LOGGER
+# Writes one compact JSON record per ticker per day while an RO is active.
+# Keyed as `ro_daily_log:{date}:{ticker}` — queryable by date prefix.
+# No noise: only fires when ro_dodge_active_{ticker} is set in DB.
+# Called once per day from send_daily_pulse().
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_ro_daily_snapshot(ticker: str, price: float, nav: float) -> None:
+    """
+    Logs a compact RO tracking record to DB for the given ticker.
+    Called from send_daily_pulse() when ro_dodge_active_{ticker} is set.
+    Captures: price, NAV, premium%, sub price estimate, days since N-2, phase.
+    """
+    try:
+        dodge_date_str = db.get_state(f"ro_dodge_active_{ticker}", "")
+        if not dodge_date_str:
+            return
+
+        today_str = datetime.now(pytz.timezone("Pacific/Honolulu")).strftime("%Y-%m-%d")
+        log_key   = f"ro_daily_log:{today_str}:{ticker}"
+        if db.get_state(log_key):
+            return  # already logged today
+
+        days_since_n2 = 0
+        try:
+            n2_dt = datetime.strptime(dodge_date_str, "%Y-%m-%d")
+            days_since_n2 = (datetime.now() - n2_dt).days
+        except Exception:
+            pass
+
+        annual_dist  = 1.458 if ticker == "CLM" else 1.4112
+        ro_formula   = 1.04   # 2026: flat 104% NAV
+        sub_price    = round(nav * ro_formula, 4) if nav > 0 else 0.0
+        premium_pct  = round((price / nav - 1) * 100, 2) if nav > 0 else 0.0
+        fv_19pct     = round(annual_dist / 0.19, 2)
+        yield_at_mkt = round(annual_dist / price * 100, 2) if price > 0 else 0.0
+        beat_ro      = price <= sub_price  # open-market buyer beats RO participant
+
+        # Determine RO phase based on days elapsed and known calendar
+        if days_since_n2 < 14:
+            phase = "initial_selloff"
+        elif days_since_n2 < 45:
+            phase = "pre_n2a_bleed"     # typical N-2→N-2/A window (~7 weeks)
+        elif days_since_n2 < 60:
+            phase = "n2a_window"        # N-2/A filing + record date press release
+        elif days_since_n2 < 90:
+            phase = "subscription_window"  # 25-day sub window; rights trading on exchange
+        else:
+            phase = "post_expiration"
+
+        record = {
+            "date":            today_str,
+            "ticker":          ticker,
+            "days_since_n2":   days_since_n2,
+            "price":           round(price, 4),
+            "nav":             round(nav, 4),
+            "premium_pct":     premium_pct,
+            "sub_price_est":   sub_price,
+            "beat_ro":         beat_ro,
+            "fv_19pct":        fv_19pct,
+            "yield_at_mkt":    yield_at_mkt,
+            "phase":           phase,
+        }
+        db.update_state(log_key, json.dumps(record))
+        logger.info(
+            f"[RO Log] {ticker} day {days_since_n2}: price={price:.3f} "
+            f"premium={premium_pct:.1f}% sub≈{sub_price:.2f} beat_ro={beat_ro} phase={phase}"
+        )
+    except Exception as e:
+        logger.error(f"[RO Log] {ticker} daily snapshot failed: {e}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SEC EDGAR — N-2 + 13D/G FILING WATCHER
@@ -3294,6 +3368,14 @@ def send_daily_pulse(is_test=False):
     db.update_state("cornerstone_alert_tier_rank", TIER_RANK.get(worst_tier, 0))
     if worst_tier in ("ELEVATED", "CRITICAL"):
         db.update_state(f"cornerstone_alert_fired_{datetime.now().strftime('%Y-%m-%d')}", True)
+
+    # ── RO daily snapshot: one compact log entry per active ticker per day ──
+    for _ro_tk in ("CLM", "CRF"):
+        if db.get_state(f"ro_dodge_active_{_ro_tk}"):
+            _tk_price = float(db.get_state(f"{_ro_tk.lower()}_last_price") or 0)
+            _tk_nav   = float(db.get_state(f"{_ro_tk.lower()}_last_nav") or 0)
+            if _tk_price > 0 and _tk_nav > 0:
+                log_ro_daily_snapshot(_ro_tk, _tk_price, _tk_nav)
 
     # ── Income channel box efficiency snippet (once per day, box-active only) ──
     # Dispatches borrowing-efficiency metrics to #dividend-ccetfs as income context.
