@@ -123,6 +123,23 @@ SCHEDULE = [
     (21, 30, "store_daily_iv",     "scheduler",    ["--mode", "store_daily_iv"],  True),
     # weekly_scorecard fires Friday only — gated here, not inside the script.
     # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
+    # TQQQ sniper sweep — every 30 min during RTH (14:00–20:30 UTC).
+    # execute_sniper_sweep() has its own is_market_hours() guard — fires off-hours return immediately.
+    # Each task_key is time-specific so each 30-min slot fires exactly once per day.
+    (14,  0, "tqqq_1400",          "tqqq",         [],                            True),
+    (14, 30, "tqqq_1430",          "tqqq",         [],                            True),
+    (15,  0, "tqqq_1500",          "tqqq",         [],                            True),
+    (15, 30, "tqqq_1530",          "tqqq",         [],                            True),
+    (16,  0, "tqqq_1600",          "tqqq",         [],                            True),
+    (16, 30, "tqqq_1630",          "tqqq",         [],                            True),
+    (17,  0, "tqqq_1700",          "tqqq",         [],                            True),
+    (17, 30, "tqqq_1730",          "tqqq",         [],                            True),
+    (18,  0, "tqqq_1800",          "tqqq",         [],                            True),
+    (18, 30, "tqqq_1830",          "tqqq",         [],                            True),
+    (19,  0, "tqqq_1900",          "tqqq",         [],                            True),
+    (19, 30, "tqqq_1930",          "tqqq",         [],                            True),
+    (20,  0, "tqqq_2000",          "tqqq",         [],                            True),
+    (20, 30, "tqqq_2030",          "tqqq",         [],                            True),
 ]
 
 # Friday-only entries appended separately so the main loop can filter them.
@@ -164,6 +181,8 @@ def build_cmd(script: str, args: list) -> list:
         return cmd + args if args else cmd
     if script == "announcements":
         return [PYTHON, os.path.join(BASE_DIR, "announcements.py")]
+    if script == "tqqq":
+        return [PYTHON, os.path.join(BASE_DIR, "tqqq.py"), "--run-once"]
     raise ValueError(f"Unknown script type: {script}")
 
 def fire(task_key: str, cmd: list):

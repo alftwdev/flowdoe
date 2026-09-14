@@ -3489,6 +3489,11 @@ if __name__ == "__main__":
             logger.warning(f"Entry chart skipped: {_e}")
         sys.exit(0)
 
+    if "--run-once" in sys.argv:
+        sniper = TQQQTacticalSniper()
+        sniper.execute_sniper_sweep()
+        sys.exit(0)
+
     logger.info("Initializing TQQQ Tactical Sniper Daemon...")
 
     # WS removed: shared_ws.py created a new connection per process restart (module-level
