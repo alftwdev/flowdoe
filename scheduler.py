@@ -480,7 +480,7 @@ def main():
 
                                 # Activity badge — only show HIGH BUZZ or TRENDING (skip WATCHING)
                                 _label = bz.get("label", "")
-                                label_badge = {"HIGH BUZZ": " | 🔥 High Buzz", "TRENDING": " | 📈 Trending"}.get(_label, "")
+                                label_badge = {"HIGH BUZZ": " | High Buzz", "TRENDING": " | Trending"}.get(_label, "")
 
                                 # SentiSense underlying — now comes from buzz dict (pre-fetched in analytics.py)
                                 bz_ul_sent  = bz.get("ul_sent") or {}
@@ -503,7 +503,9 @@ def main():
                                     )
 
                                 if buzz_score > 0:
-                                    buzz_line = f"┣ Buzz: {lean_emoji} `{msg_count}` msgs — `{bull_pct}%` bullish (score `{buzz_score}`)\n"
+                                    _activity_str = {"HIGH BUZZ": "High", "TRENDING": "Active", "WATCHING": "Low"}.get(_label, "Low")
+                                    _lean_str = lean.title() if lean else "Mixed"
+                                    buzz_line = f"┣ Buzz: {_activity_str} — {lean_emoji} {_lean_str} ({bull_pct}% bullish, score {buzz_score})\n"
                                 else:
                                     buzz_line = "┣ Buzz: — (yield-sorted fill — no social signal today)\n"
 
@@ -522,7 +524,7 @@ def main():
                             if WEBHOOK_INCOME:
                                 send_essentials_embed(
                                     WEBHOOK_INCOME,
-                                    "📡 CC INCOME RADAR | Top 3 by Community Buzz",
+                                    "CC INCOME RADAR | Top 3 by Community Buzz",
                                     new_payload, 0x9b59b6
                                 )
                                 logger.info(f"Social-first CC ETF radar dispatched: top {len(top3)} by buzz.")

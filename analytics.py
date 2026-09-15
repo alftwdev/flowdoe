@@ -4817,32 +4817,36 @@ class HighFidelityAnalyticsEngine:
                 "BEARISH" if bull_pct <= 30 else
                 "MIXED"
             )
+            # Label by recency_score, not raw msg_count (StockTwits always returns 30 msgs/call —
+            # msg_count is the API page size, not a measure of activity).
+            # recency_score: all 30 msgs from last 2h ≈ 30; spread over 24h ≈ 15; all stale ≈ 3.
             label = (
-                "HIGH BUZZ" if msg_count >= 20 else
-                "TRENDING"  if msg_count >= 10 else
+                "HIGH BUZZ" if recency_score >= 15 else
+                "TRENDING"  if recency_score >= 5  else
                 "WATCHING"
             )
             family, freq = self.NEW_INCOME_ETF_UNIVERSE.get(sym, ("Unknown", "?"))
             results.append({
-                "symbol":     sym,
-                "family":     family,
-                "freq":       freq,
-                "msg_count":  msg_count,
-                "bullish":    bulls,
-                "bearish":    bears,
-                "bull_pct":   bull_pct,
-                "lean":       lean,
-                "buzz_score": buzz_score,
-                "label":      label,
-                "ul_ticker":  ul,
-                "ul_sent":    ul_sent,
-                "ul_boost":   round(ul_boost, 1),
+                "symbol":        sym,
+                "family":        family,
+                "freq":          freq,
+                "msg_count":     msg_count,
+                "bullish":       bulls,
+                "bearish":       bears,
+                "bull_pct":      bull_pct,
+                "lean":          lean,
+                "buzz_score":    buzz_score,
+                "recency_score": round(recency_score, 2),
+                "label":         label,
+                "ul_ticker":     ul,
+                "ul_sent":       ul_sent,
+                "ul_boost":      round(ul_boost, 1),
             })
 
         # Primary: buzz_score (ST recency × conviction + SS underlying boost).
         # Secondary: bull_pct — higher conviction wins when scores tie.
-        # Tertiary: msg_count as raw volume confirmation.
-        results.sort(key=lambda x: (x["buzz_score"], x["bull_pct"], x["msg_count"]), reverse=True)
+        # Tertiary: recency_score as tiebreaker (fresher messages win when scores are equal).
+        results.sort(key=lambda x: (x["buzz_score"], x["bull_pct"], x["recency_score"]), reverse=True)
         return results[:top_n]
 
     def generate_futures_social_snapshot(self) -> dict:
