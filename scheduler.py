@@ -111,34 +111,6 @@ def main():
             # Credit & Liquidity and Treasury & Macro no longer dispatch as standalone embeds
             # to #market-analysis — that data is now inline in market_analysis.py's consolidated
             # morning brief (13:10 UTC). Only conditional signals dispatch here.
-            liq_payload = engine.generate_macro_liquidity_payload()  # still computed for carry-trade logic
-
-            # Cross-sector carry-trade regime: USD/JPY + Gold gives a clean risk-on/off read.
-            # Dispatches to #market-analysis only when unambiguous (not MIXED) — no forex channel.
-            try:
-                fx_quotes = engine._fetch_twelve_data_quotes(["USD/JPY", "XAU/USD"])
-                regime, explanation, usdjpy_chg, gold_chg = engine.assess_risk_sentiment_regime(fx_quotes)
-                if regime != "🟡 MIXED" and WEBHOOK_MARKET:
-                    if engine.db.track_and_limit_alerts("fx_risk_regime_sync", regime, usdjpy_chg, max_broadcasts=2, threshold_pct=0.3):
-                        regime_payload = (
-                            f"┣ Regime: {regime}\n"
-                            f"┣ USD/JPY: `{usdjpy_chg:+.2f}%` | Gold (XAU/USD): `{gold_chg:+.2f}%`\n"
-                            f"┗ {explanation}"
-                        )
-                        _regime_color = COLOR_GREEN if "RISK-ON" in regime else COLOR_RED
-                        send_essentials_embed(WEBHOOK_MARKET, "Carry Trade Risk Regime", regime_payload, _regime_color)
-                        logger.info(f"Dispatched carry-trade regime sync ({regime})")
-
-                        spy_price_data = engine._execute_query("price", {"symbol": "SPY"})
-                        if spy_price_data and "price" in spy_price_data:
-                            direction = "UP" if regime == "🟢 RISK-ON" else "DOWN"
-                            today_str = datetime.now().strftime("%Y-%m-%d")
-                            engine.log_ledger_prediction(
-                                "forex", f"SPY_{today_str}", direction, float(spy_price_data["price"]),
-                                ticker="SPY", context=regime
-                            )
-            except Exception as e:
-                logger.error(f"Carry-trade regime sync failed: {e}")
 
             crypto_payload = engine.generate_crypto_matrix_payload()
             if crypto_payload and WEBHOOK_CRYPTO:

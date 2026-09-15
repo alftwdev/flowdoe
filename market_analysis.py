@@ -821,8 +821,8 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
     try:
         bottom_score = int(db.get_state("tqqq_bottom_score") or 0)
         top_score    = int(db.get_state("tqqq_top_score") or 0)
-        _c_icon = "🟢" if bottom_score >= 55 else ("🔆" if bottom_score >= 40 else "🔒")
-        _p_icon = "🔴" if top_score    >= 55 else ("🔆" if top_score    >= 40 else "🔒")
+        _c_icon = "🟢" if bottom_score >= 55 else ("⚠️" if bottom_score >= 40 else "")
+        _p_icon = "🔴" if top_score    >= 55 else ("⚠️" if top_score    >= 40 else "")
         _status = (
             "CALL OPEN — fear confirmed" if bottom_score >= 55 else
             "PUT OPEN — extension confirmed" if top_score >= 55 else
@@ -887,7 +887,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             if energy_red:  triggers.append(f"XLE {xle_chg:+.1f}%")
             if rate_spike:  triggers.append(f"T10-T2 +{float(yc_spread)-float(yc_prev):.2f}% rate spike")
             mlpi_entry_line = (
-                f"┣ 🛢️ MLPI ENTRY WINDOW — {' | '.join(triggers)} | MLPI {mlpi_chg:+.1f}% — "
+                f"┣ MLPI ENTRY WINDOW — {' | '.join(triggers)} | MLPI {mlpi_chg:+.1f}% — "
                 f"Accumulation conditions. Cash buy (no new margin).\n"
             )
     except Exception:
@@ -907,10 +907,10 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             elif _n2:
                 edgar_alerts.append(f"{_ct} ⚠️ N-2 DETECTED ({_n2}) — monitor.py managing, see #cornerstone")
             elif _watch == "active":
-                edgar_alerts.append(f"{_ct} 👀 30%+ premium watch — pre-N-2 threshold, no filing yet")
+                edgar_alerts.append(f"{_ct} ⚠️ 30%+ premium watch — pre-N-2 threshold, no filing yet")
     except Exception:
         pass
-    edgar_line = "┣ 📋 EDGAR: " + " | ".join(edgar_alerts) + "\n" if edgar_alerts else ""
+    edgar_line = "┣ EDGAR: " + " | ".join(edgar_alerts) + "\n" if edgar_alerts else ""
 
     # Re-entry tracker — surfaces live score when an RO dodge is active.
     # Zero API calls: reads keys written by monitor.py every loop tick.
@@ -946,7 +946,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             )
     except Exception:
         pass
-    reentry_line = "┣ 🔄 Re-entry: " + " | ".join(reentry_lines) + "\n" if reentry_lines else ""
+    reentry_line = "┣ Re-entry: " + " | ".join(reentry_lines) + "\n" if reentry_lines else ""
 
     # Bollen (2010) mood forward signal — "Twitter Mood Predicts the Stock Market."
     # Low calmness/high anxiety (F&G ≤ 25) Granger-causes DJIA declines 2–6 days later.
@@ -958,12 +958,12 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             _ssv = float(_ss_mood)
             if _ssv <= 25:
                 mood_fwd_line = (
-                    f"┣ 🧠 Mood (2–6d lead): Anxiety extreme (`{_ssv:.0f}`) — "
+                    f"┣ Mood (2–6d lead): Anxiety extreme (`{_ssv:.0f}`) — "
                     f"elevated anxiety leads market pressure by 2–6 days (Bollen 2010). Stay defensive.\n"
                 )
             elif _ssv >= 75:
                 mood_fwd_line = (
-                    f"┣ 🧠 Mood (2–6d lead): Euphoria high (`{_ssv:.0f}`) — "
+                    f"┣ Mood (2–6d lead): Euphoria high (`{_ssv:.0f}`) — "
                     f"mean reversion risk in 2–6 days. Tighten strikes, avoid chasing.\n"
                 )
     except Exception:
@@ -1061,7 +1061,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             _flag = "⚠️" if _pct < 50 else "✅"
             _conf_parts.append(f"{_label} {_pct}% ({_w}/{_t}) {_flag}")
         if _conf_parts:
-            ledger_conf_line = "┣ 📈 Signal accuracy (30d): " + " | ".join(_conf_parts) + "\n"
+            ledger_conf_line = "┣ Signal accuracy (30d): " + " | ".join(_conf_parts) + "\n"
     except Exception:
         pass
 
@@ -1122,7 +1122,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
             _d   = sum(1 for h in _hl if h["sentiment"] == "bearish")
             _agg = "BULLISH" if _b > _d else ("BEARISH" if _d > _b else "MIXED")
             _top = " | ".join(h["title"][:55] for h in _hl[:2])
-            headlines_line = f"┣ 📰 Headlines ({_agg}, {_b}B/{_d}D): {_top}\n"
+            headlines_line = f"┣ Headlines ({_agg}, {_b}B/{_d}D): {_top}\n"
     except Exception:
         pass
 
