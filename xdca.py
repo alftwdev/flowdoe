@@ -444,6 +444,7 @@ def dispatch_eod_summary(vixy_z):
         return  # already fired today
 
     lines = []
+    any_signal = False
     for sym in DCA_TICKERS:
         zone   = db.get_state(f"xdca_{sym}_zone") or "—"
         price  = db.get_state(f"xdca_{sym}_price") or "—"
@@ -452,15 +453,23 @@ def dispatch_eod_summary(vixy_z):
 
         if zone in ("C", "D"):
             zone_display = f"🔴 {zone} — {ZONE_CONFIG[zone]['label']}"
+            any_signal = True
         elif zone == "B":
-            zone_display = f"⚠️ B — ACCUMULATE"
+            zone_display = "⚠️ B — ACCUMULATE"
+            any_signal = True
         elif zone == "A":
-            zone_display = f"🟡 A — WATCH"
+            zone_display = "🟡 A — WATCH"
+            any_signal = True
         else:
             zone_display = "🟢 No signal"
 
         ul  = DCA_TICKERS[sym]["underlying"]
         lines.append(f"**{sym}** — ${price} | RSI {rsi} | {ul} -{draw}% | {zone_display}")
+
+    if not any_signal:
+        db.update_state(key, "snoozed")
+        logger.info("[EOD] All tickers at no-signal — EOD summary snoozed")
+        return
 
     vixy_str = f"{vixy_z:+.2f}σ" if vixy_z is not None else "n/a"
     body = "\n".join(lines) + f"\n\nVIXY fear: `{vixy_str}` | Monthly distributions → CLM/CRF margin paydown"
@@ -470,7 +479,7 @@ def dispatch_eod_summary(vixy_z):
             "title":       "Tier 2 DCA — EOD Status",
             "description": body,
             "color":       0x2ecc71,
-            "footer":      {"text": f"XSPI · XQQI · MLPI · KQQQ | {today}"},
+            "footer":      {"text": f"XSPI · XQQI · MLPI · KQQQ | {today} | Not financial advice. Educational purposes only."},
         }]
     }
     _send_discord(payload)
