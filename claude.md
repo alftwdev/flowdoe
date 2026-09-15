@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 14 2026 — RO timeline heuristics corrected from 3-cycle forensic data; daily RO snapshot logger added to monitor.py; CLM $6.455 / CRF $6.260 on live market (2.3% premiums, new lows); ex-div Sept 15 confirmed; N-2/A expected ~Oct 1-2; record date ~Oct 13-16*
+*Last updated: Sept 15 2026 — Ex-div day: 1/3 DCA deployed at Tier 3 (CLM ~$6.33 / CRF ~$6.14), 2/3 reserve held for N-2/A (~Oct 1-2) + record date (~Oct 13-16). RO primary catalyst events documented (N-2 > N-2/A > record date > ex-div). xdca.py added (Tier 2 DCA scanner: XSPI/XQQI/MLPI/KQQQ).*
 
 ---
 
@@ -609,12 +609,41 @@ The 25-day subscription window saw price APPRECIATION, not continuation of selli
 
 ---
 
-### 2026 RO — Live Data (Updated Aug 25, 2026)
+### 2026 RO — Live Data (Updated Sept 15, 2026)
 
 ```
 Ticker: CLM + CRF (concurrent cycle, both active)
 Formula: 104% × NAV at expiration close (BOTH tickers — most aggressive formula ever;
          prior CLM cycles used market price floor: max(107–112%×NAV, 65–90%×market))
+
+PRIMARY CATALYST EVENTS — WHAT DROPS CLM/CRF PRICE DURING EVERY RO CYCLE:
+  ① N-2 FILING (Day 0): Largest single-session drop of the entire cycle.
+     Institutional holders who cannot hold during dilution begin distributing immediately.
+     2026: CLM $7.35 → $6.94 on Aug 17 (Day 3 of filing awareness + press release).
+     Premiums compress from multi-cycle highs to near-historical lows within 2 weeks.
+     Key signal: EDGAR watcher fires → monitor.py dispatches CRITICAL → execute 99% sell.
+
+  ② N-2/A FILING (~Day 46-47): Second wave. Smaller but definitive.
+     SEC effectiveness declaration confirms exact dilution terms. Market re-prices
+     the final sub price formula and record date. Any holders who waited to sell
+     at the N-2 use the N-2/A as their exit point.
+     Expected 2026: ~Oct 1-2. Watch for 1-3 day price pressure after filing.
+     Premium already near historical lows → limited incremental downside,
+     but can create the final flush that sets the true cycle low.
+
+  ③ 424B3 / RECORD DATE (~Day 59): Historically the cycle low in 2022 and 2025.
+     Sets exact record date + start of 25-day subscription window. Rights-holders
+     who can subscribe begin doing so; non-subscribing holders sell rights on exchange.
+     In 2026 this may not be the low (front-loaded compression already occurred)
+     but watch for 1-2 day pressure around the 424B3 filing.
+
+  ④ EX-DIVIDEND DATE (mid-month): Mechanical drop only. Not a new seller event.
+     -$0.1215 CLM / -$0.1176 CRF guaranteed mechanical decline. Creates 1-3 day
+     accumulation window before income buyers re-enter for next month's distribution.
+     Best entry for cash buyers who missed the N-2 capitulation.
+
+  RULE FOR FUTURE CYCLES: Deploy capital in tranches around ① and ④.
+  Reserve 2/3 of DCA capital for events ② and ③ (N-2/A + record date).
 
 N-2 filed:               Aug 14, 2026 | CLM $7.35
 Aug 17 capitulation:     8.62M CLM vol (4.6× avg), Cornerstone press release day.
@@ -627,31 +656,45 @@ Sept 14 LIVE (Day 31):   CLM $6.455 (–1.90%) | CRF $6.260 (–1.73%) — NEW 5
                          Both below 2027 FV already (CLM FV $6.97 / CRF FV $6.74)
 Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × NAV; both prices now BELOW sub price)
                          → Open-market buyer BEATS RO participants at current price
-Sept 15 ex-div:          CLM –$0.1215 | CRF –$0.1176 (mechanical drop confirmed)
-                         Post-ex-div projected: CLM ~$6.33 | CRF ~$6.14 (both deep below sub price)
+Sept 15 (Day 32):        Ex-dividend day. CLM –$0.1215 | CRF –$0.1176 (mechanical drop).
+                         Ex-div dip created short-term accumulation window as expected.
+                         ACTION TAKEN: 1/3 of DCA capital deployed at ex-div dip prices
+                           (Tier 3 zone: CLM ~$6.33 / CRF ~$6.14 area).
+                         Into close: prices began recovering — market broadly red today
+                           (macro drag, not CEF-specific). Partial recovery, not full reversal.
+                         RESERVE: 2/3 of DCA capital held for N-2/A (~Oct 1-2) and
+                           record date (~Oct 13-16) catalysts.
 N-2/A expected:          ~Oct 1-2, 2026 (46-47 day historical gap from Aug 14 N-2)
                          → Finalizes sub price; press release follows 2 days later
+                         → NEXT PRIMARY CATALYST: watch for 1-3 day selling pressure
 Record date estimated:   ~Oct 13-16, 2026 (corrected from single-cycle Oct 12 estimate)
+                         → DEPLOY REMAINING RESERVE: use 2/3 reserve around this date
 Expiration estimated:    ~Nov 7-10, 2026 (record + 25 subscription days)
+                         → RO overhang clears; premium mean-reversion begins
 Oct NAV lock:            End of October 2026 — Board sets 2027 distribution rate
 2027 FV estimate:        CLM ~$6.97 | CRF ~$6.74  (based on July NAV; actual locked end Oct)
 
 WHY 2026 IS FRONT-LOADED (different from 2022 and 2025):
   In 2022/2025, premiums were 17-25% when N-2 filed — gradual compression over 84 days.
   In 2026, the Aug 17 press release revealed the lower 2027 distribution immediately.
-  The market fully repriced from ~25% premium → ~2% premium by Day 31 (today).
+  The market fully repriced from ~25% premium → ~2% premium by Day 31.
   This means "bottom" likely formed much earlier (Aug-Sept) rather than at record date.
   2026 is the first cycle where open-market buyers beat RO participants BEFORE the record date.
   → Sub price formula (104% flat, no market floor) = lowest-ever RO discount.
   → Weaker uptake expected in subscription window (similar to 2025 which saw poor uptake at 12%).
+  → 2/3 reserve strategy is correct: N-2/A and record date may cause secondary flushes
+    even if the primary bottom is already in. Each flush = add tranche, not all at once.
 
-Tiered re-entry zones (updated Sept 14, 2026):
+Tiered re-entry zones (updated Sept 15, 2026):
   Tier 1 (Aug 25–Sept 14): CLM $6.65–$6.80 | CRF $6.40–$6.55 [EXPIRED — prices already below]
-  Tier 2 (Sept 15–19):     CLM $6.50–$6.65 | CRF $6.25–$6.40 [BREACHED early — CLM at $6.455]
-  Tier 3 (~Oct 13–16):     CLM $6.30–$6.55 | CRF $6.00–$6.25 [ACTIVE range as of Sept 14]
-  Tier 4 (peak fear):      CLM $6.00–$6.30 | CRF $5.75–$6.00 [Reserve scenario]
-  NOTE: Prices breached Tier 2 BEFORE ex-div. Hold partial reserve for Tier 3/4 — do not
-  deploy all capital at current levels given N-2/A + record date selling still ahead.
+  Tier 2 (Sept 15–19):     CLM $6.50–$6.65 | CRF $6.25–$6.40 [BREACHED — ex-div dropped below]
+  Tier 3 (Sept 15–Oct 16): CLM $6.30–$6.55 | CRF $6.00–$6.25 [ACTIVE — 1/3 deployed Sept 15]
+  Tier 4 (peak fear):      CLM $6.00–$6.30 | CRF $5.75–$6.00 [Reserve — N-2/A or record date flush]
+  RESERVE PLAN: 2/3 of DCA capital held. Deploy in 1-2 additional tranches:
+    Tranche 2: on N-2/A filing date (~Oct 1-2) if price dips further
+    Tranche 3: at/around record date (~Oct 13-16) which is historically the cycle low
+    If neither causes meaningful dip: deploy remaining reserve across Oct as income buyer
+    support builds heading into subscription window expiration (~Nov 7-10).
 
 UPDATE THIS BLOCK when the 424B3 is filed (actual record date + sub price),
 when expiration occurs, and when the post-expiration recovery level is known.
@@ -686,12 +729,23 @@ CRF_PREMIUM_LOW_HISTORICAL = 4.66   # 52w low premium (percent) as of Aug 2026
 |-------|---------|----------|-----------|-------------|-----------|----------|-----------|--------------|
 | 2022 CLM | 112%×NAV or 65%×mkt | 47d | — | Apr 18 | ~$6.92 | ~Record date | ~$6.61 | ~$7.88 (10% prem) |
 | 2025 CLM | 112%×NAV or 80%×mkt | 46d | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
-| 2026 CLM | 104%×NAV flat | 46-47d est. | $7.35 | ~Oct 13-16 est. | $6.455 live | Sept 14 | ~$6.56 est. | TBD |
-| 2026 CRF | 104%×NAV flat | 46-47d est. | ~$7.12 | ~Oct 13-16 est. | $6.260 live | Sept 14 | ~$6.37 est. | TBD |
+| 2026 CLM | 104%×NAV flat | 46-47d est. | $7.35 | ~Oct 13-16 est. | ~$6.33 (post ex-div Sept 15) | Sept 15+ | ~$6.56 est. | TBD |
+| 2026 CRF | 104%×NAV flat | 46-47d est. | ~$7.12 | ~Oct 13-16 est. | ~$6.14 (post ex-div Sept 15) | Sept 15+ | ~$6.37 est. | TBD |
 
 **Key cross-cycle insight:** In 2022 and 2025, the low landed AT the record date. In 2026, prices
 broke below sub price by Day 31 (pre-ex-div) due to the concurrent distribution reset announcement.
 The 2026 cycle is front-loaded — premium collapsed at announcement, not gradually over 84 days.
+
+**Primary price-drop catalysts in every cycle (in order of magnitude):**
+1. **N-2 filing** — largest drop; institutions exit as dilution is confirmed
+2. **N-2/A filing** — second wave; confirms exact sub price math; 1-3 day pressure
+3. **424B3 / Record date** — final flush; historically THE cycle low in 2022 + 2025
+4. **Ex-dividend** — mechanical only; creates 1-3 day window, not a seller event
+
+**2026 DCA log:**
+- Sept 15: 1/3 deployed at ex-div dip (Tier 3 zone). 2/3 in reserve.
+- Oct 1-2 (est.): N-2/A watch — add Tranche 2 if price flushes
+- Oct 13-16 (est.): Record date watch — add Tranche 3 (historically the low)
 
 *Update TBD fields after 424B3 filing and post-expiration settlement.*
 
@@ -1466,6 +1520,8 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
 | `seed_cef_premiums.py` | 🗑️ Removed | Merged into db_tools.py (`python db_tools.py --seed-premiums`). |
 | `sentisense_client.py` | ✅ Live | SentiSense API client with full DB caching. Trackers added Jul 15: get_reddit_picks (7-day cache), get_sentiment_movers (daily), get_sentiment_leaderboard (daily). Wired into analytics.py trending_plays + futures_social as additional discovery sources. |
+| `xdca.py` | ✅ Live | Tier 2 Income ETF near-bottom DCA scanner. Always-on 10-min RTH loop. Monitors XSPI, XQQI, MLPI, KQQQ for zone-based DCA signals. Zone A/B silent (DB only). Zone C/D = "BUYING OPPORTUNITY" → #dividend-ccetfs + Pushover (D only). Underlying proxies: XSPI→SPY, XQQI→QQQ, KQQQ→QQQ, MLPI→XLE. See xdca_design_notes.md for Option 2 (buffer reset date enhancement). |
+| `xdca_design_notes.md` | ✅ Live | Design notes for xdca.py. Documents Option 2 (Innovator quarterly buffer reset date seeding for XSPI/XQQI), NAV erosion hardening rationale, and future enhancements. Option 2 DB key memo also stored in DB as `xdca_option2_note`. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
 | `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY + SENTISENSE_API_KEY. |
 
@@ -1755,6 +1811,7 @@ PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scor
 - [x] **Call of the Week block** (Sep 2026) — appended to `--mode personal_scorecard` Pushover. Pulls best WIN signal from signal_ledger (past 7 days), formats as clean text card. Pushover-only — forward manually to X/#fintwit when ready to post.
 
 ### Scripts Still to Build
+- [x] **XSPI/XQQI/MLPI/KQQQ DCA Scanner** (`xdca.py`) — always-on 10-min RTH loop, 4 tiered zones (A/B silent, C/D = "BUYING OPPORTUNITY" alert), VIXY z-score gate prevents DCA into calm drift-down. See `xdca_design_notes.md` for Option 2 (Sept 15 2026).
 - [ ] `crypto.py` — dedicated BTC/ETH channel script (currently served by scheduler.py `--mode crypto_social`)
 - [ ] `announcements.py` — weekly accuracy scorecard, prediction vs actual grader
 - [ ] `/CL` `/GC` deep-dive/breakout module — futures channel board-only for commodities; ES/NQ have full profile
