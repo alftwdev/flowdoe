@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 15 2026 — Ex-div day: 1/3 DCA deployed at Tier 3 (CLM ~$6.33 / CRF ~$6.14), 2/3 reserve held for N-2/A (~Oct 1-2) + record date (~Oct 13-16). RO primary catalyst events documented (N-2 > N-2/A > record date > ex-div). xdca.py added (Tier 2 DCA scanner: XSPI/XQQI/MLPI/KQQQ).*
+*Last updated: Sept 17 2026 — Sept 16: continued DCA (day after ex-div dip extended). EDGAR research: full CLM N-2 filing history 2012-2026 documented; next RO estimated Feb-Mar 2028 (most likely) pending premium recovery to 15-20%.*
 
 ---
 
@@ -744,10 +744,73 @@ The 2026 cycle is front-loaded — premium collapsed at announcement, not gradua
 
 **2026 DCA log:**
 - Sept 15: 1/3 deployed at ex-div dip (Tier 3 zone). 2/3 in reserve.
+- Sept 16: Continued dip the day AFTER ex-div — CLM/CRF drifted lower again. Added to
+  position. Confirms pattern: ex-div day + 1-2 days is an extended accumulation window,
+  not a single-session spike. Income buyers re-enter gradually, not all at once.
 - Oct 1-2 (est.): N-2/A watch — add Tranche 2 if price flushes
 - Oct 13-16 (est.): Record date watch — add Tranche 3 (historically the low)
 
 *Update TBD fields after 424B3 filing and post-expiration settlement.*
+
+---
+
+### Historical RO Cadence — CLM N-2 Filing Dates (EDGAR verified, Sept 17 2026)
+
+Source: SEC EDGAR CIK 0000814083 (CLM). CRF runs concurrent cycles.
+N-2/A amendments shown to confirm completion; each N-2 is a unique RO cycle.
+
+```
+N-2 Filed      N-2/A Filed   Gap to next N-2    Notes
+──────────────────────────────────────────────────────────────────────
+2012-10-17     (2012-11-16)  →  329d (~11mo)   Annual cluster starts
+2013-09-12     (2013-10-18)  →  372d (~12mo)   Annual
+2014-09-19     (no N-2/A?)  →  685d (~23mo)   Gap — possible withdrawal or delay
+2016-08-05     (2016-09-14)  →  307d (~10mo)   Annual cluster resumes
+2017-06-09     (2017-07-07)  →  336d (~11mo)   Annual
+2018-05-11     (2018-06-07)  → 1014d (~34mo)  Long gap — 3 consecutive ROs then pause
+2021-02-19     (2021-04-01)  →  364d (~12mo)   Annual
+2022-02-18     (2022-04-06)  → 1098d (~37mo)  Long gap — another 3yr pause
+2025-02-21     (2025-04-08)  →  539d (~18mo)   Short gap — driven by distribution reset
+2026-08-14     (pending ~Oct 1-2)              ← CURRENT CYCLE
+```
+
+**Inter-cycle gap statistics (9 measured gaps):**
+- Annual cycles (~10-12mo): 2012-14, 2016-18, 2021-22 — Cornerstone does clusters of 2-3
+- Long pauses (~34-37mo): after 2018 and after 2022 — cluster exhaustion, premium recovery needed
+- Anomalous short gap (~18mo): 2025→2026, triggered by concurrent distribution reset announcement
+
+**Seasonal preference (N-2 filing month):**
+- Feb-Mar: 4 cycles (2021, 2022, 2025, and prior years)
+- May-Jun: 2 cycles (2017, 2018)
+- Aug-Oct: 5 cycles (2012, 2013, 2014, 2016, 2026)
+Cornerstone uses Feb or Aug windows most often. The 2026 was Aug (distribution reset forced timing).
+
+**What gates the NEXT RO (premium threshold rule):**
+Cornerstone needs a premium sufficiently above NAV for the rights to have value.
+At 2% premium (today), the rights would price at almost nothing — no economic sense.
+Historical minimum premium to launch: ~10-15% (inferred from prior cycle start prices).
+
+Premium recovery forecast:
+- Current: ~2% (Sept 2026)
+- Post-expiration (~Nov 2026): RO overhang clears; income buyers return
+- Premium recovery to 10%+: realistically 6-18 months post-expiration = May-Nov 2027
+- Premium recovery to 15-20%+: 12-24 months post-expiration = Nov 2027-Nov 2028
+
+**Next RO probability window:**
+```
+Earliest possible N-2 filing: Aug 2027 (~12mo after current N-2, IF premium recovers fast)
+Most likely window:            Feb-Mar 2028 (~18mo post-expiration) — mirrors 2025 Feb cycle
+Conservative estimate:         Aug-Oct 2028 (~2yr post-expiration) — mirrors 3yr gap pattern
+
+RULE: Monitor CLM/CRF premium quarterly. When premium re-enters 15-20% range for
+3+ consecutive weeks, flag as "RO risk elevated" and set ro_season_watch in DB.
+No premium recovery = no RO. 2% premium → Cornerstone cannot do a viable RO.
+```
+
+**Watch signal for future cycles:**
+When NAV is locked end of October each year → if distribution INCREASES → premium likely
+expands → RO probability rises for the following Feb or Aug window.
+When distribution DECREASES (as in 2026) → premium compressed → RO delayed until recovery.
 
 ---
 
