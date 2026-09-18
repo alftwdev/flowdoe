@@ -1886,7 +1886,7 @@ PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scor
 - [ ] Wheel position entry still manual-only (`scheduler.py --mode wheel_position`) — no brokerage API
 
 ### Monetization
-- [ ] `bait_dispatcher.py` — Pushover-only bait content dispatch (see §15 for templates + schedule)
+- [x] `bait_dispatcher.py` — Pushover bait dispatch + #free-data Discord embed (built Sept 18 2026). 3 weekday Pushover notifications (one per bait, each with X-ready draft + hashtags); 1 consolidated weekend/holiday Pushover. Pulls live CLM/CRF price/NAV/z-score + market bias from DB. Rotating 4-week hook variants. Dedup via `bait_last_sent_{date}`. PA cron: `0 18 * * *` (8:00 AM HST). USE_ENGAGEMENT_CTA flag: flip True when Tweet Hunter auto-DM is live.
 - [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #free-data (delayed)
 - [ ] Subscriber tier gating — lock premium channels, route free tier to #free-data only
 - [ ] bit.ly links created (cfx-ro, cfx-wheel, cfx-morning) → all point to Gumroad product page
