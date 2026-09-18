@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 17 2026 — Sept 16: continued DCA (day after ex-div dip extended). EDGAR research: full CLM N-2 filing history 2012-2026 documented; next RO estimated Feb-Mar 2028 (most likely) pending premium recovery to 15-20%.*
+*Last updated: Sept 17 2026 — Discord restructured: #announcements renamed #free-data (public bait, T-48h delayed), new #announcements channel added (manual subscriber-only ops). Content marketing strategy initiated: 3 bait templates for X, Pushover daily dispatch added to scripts-to-build. One traffic source chosen: X (#FinTwit, reply-first strategy). bit.ly tracking setup for Gumroad funnel.*
 
 ---
 
@@ -1374,7 +1374,8 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 ### Channel Map
 | Channel | Webhook .env key | Script | Purpose |
 |---------|-----------------|--------|---------|
-| #announcements | WEBHOOK_ANNOUNCEMENTS | announcements.py | Free tier scorecard/bait — conversion engine |
+| #free-data | WEBHOOK_ANNOUNCEMENTS | announcements.py (to build) | Public bait channel — T-48h delayed signal recaps + accuracy scorecard. Locks actionable fields (entry timing, price zones) with 🔒 Subscriber only. Shows RO Risk score + outcome AFTER window closes. Drives Gumroad conversion. |
+| #announcements | *(none — manual only)* | Manual posts only | Subscriber-only operational channel. Change logs, PA maintenance windows, strategy updates, new feature rollouts. No webhook. |
 | #cornerstone | WEBHOOK_CORNERSTONE_RO | monitor.py | CLM/CRF protection engine |
 | #market-analysis | WEBHOOK_MARKET_ANALYSIS | market_analysis.py | 0800 HST premarket command center |
 | #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day) + IB breakout scanner + yield curve/Fed Funds from FRED |
@@ -1885,8 +1886,10 @@ PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scor
 - [ ] Wheel position entry still manual-only (`scheduler.py --mode wheel_position`) — no brokerage API
 
 ### Monetization
-- [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #announcements
-- [ ] Subscriber tier gating — lock premium channels, route free tier to #announcements only
+- [ ] `bait_dispatcher.py` — Pushover-only bait content dispatch (see §15 for templates + schedule)
+- [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #free-data (delayed)
+- [ ] Subscriber tier gating — lock premium channels, route free tier to #free-data only
+- [ ] bit.ly links created (cfx-ro, cfx-wheel, cfx-morning) → all point to Gumroad product page
 
 ---
 
@@ -1980,3 +1983,158 @@ W2 employees who want to build wealth systematically without day-trading. That n
 exists and has money. The weak point right now is that the analysis is siloed across
 channels — `market_analysis.py` is the glue that makes it feel like one coherent
 intelligence system rather than five separate bots. Build that first.
+
+---
+
+## 15. Content Marketing & Subscriber Acquisition (initiated Sept 17 2026)
+
+### Core Methodology (from validated digital product creator research)
+- **One traffic source, one product, one funnel.** X is the chosen platform — #FinTwit
+  finance community is active, CLM/CRF investors are there, real-time market events drive
+  organic engagement even with zero followers.
+- **Membership model** (Discord tiers) is the right vehicle — recurring revenue, community
+  moat, AI-proof (live signals + real community can't be replicated by AI alone).
+- **Pre-sell before over-building** — the system is already live. Prove it works with
+  real data. Track record IS the product demo.
+- **Email converts 40× more than social.** Future: add email capture step between
+  Gumroad purchase and Discord invite. Build the list, own the audience.
+- **Quick-win bait only** — the freebie/bait must give an immediately usable framework
+  (tool or checklist), not an essay. Solve one specific painful problem per piece.
+
+### Confirmed Retail Investor Pain Points (sourced Sept 16-17 2026)
+
+**CLM/CRF investors (observed from live Discord community discussion):**
+- "I have 1000 shares at $6.56. I thought that was a good price till recently." —
+  Bought without understanding RO cycle timing or premium compression risk.
+- "You guys should follow a plan, if it means stay out during RO, just do it without
+  question." — No systematic plan for RO events; emotional decision-making.
+- "Well and RO can take a month so it's nice to keep the dividend flowing." —
+  Confused about whether to hold or sell during the RO window.
+- "It has broke from the indexes, its price has not reflected the growth we have seen
+  in the underlying ytd." — Don't understand the premium/NAV disconnect from underlying.
+- DRIP at NAV benefit (cost basis reduction over time) is broadly unknown.
+**Root problem: no automated early warning for N-2 filings, no RO playbook.**
+
+**Options/wheel traders (universal pain points):**
+- Get assigned at wrong time ("wheel went against me even though IV was high")
+- Skip IVR vs HV30 spread check — sell into IV spikes that already happened
+- Enter within 45 days of earnings — IV crush after report destroys the premium edge
+**Root problem: no screener applying all 3 filters simultaneously.**
+
+**Retail investors generally (time/research pain):**
+- Spend 45-60 min each morning across multiple sites before knowing market posture
+- Don't know which signals actually matter vs noise
+**Root problem: no synthesized morning signal that replaces 4 tabs of research.**
+
+### 3 Bait Content Templates (Pushover → manual post to X)
+
+Principle: show the problem is real and the system exists. Lock the actionable output
+(entry timing, price zones, screener results). Deliver a usable framework, not the answer.
+
+**Bait 1 — CLM/CRF Rights Offering Anatomy**
+Hook: "If you hold CLM or CRF and this drop caught you off guard, you're not alone."
+Framework delivered: 4-phase RO anatomy (N-2 → N-2/A → record date → ex-div), each phase's
+price behavior, which is actionable and which is mechanical.
+Gated: entry timing, price zones, live RO Risk score, next catalyst date.
+Hashtags: `#ClosedEndFunds #DividendInvesting #FinTwit #PassiveIncome #IncomeInvesting`
+
+**Bait 2 — Options Wheel 3-Filter Checklist**
+Hook: "The wheel strategy sounds simple. Most people skip the filter that matters most."
+Framework delivered: Filter 1 (IVR > 35%), Filter 2 (IV − HV30 ≥ 5pp), Filter 3 (no
+earnings within 45 days). Why each matters. 5yr backtest note (without Filter 2: ~1% CAGR).
+Gated: which specific tickers pass all 3 filters today, live screener output.
+Hashtags: `#OptionsTrading #TheWheel #CashSecuredPuts #FinTwit #PassiveIncome`
+
+**Bait 3 — 60-Second Morning Market Posture**
+Hook: "Most retail investors spend an hour every morning on 3 different sites."
+Framework delivered: 5 signals (VIX level, VIX term structure, HY spread, SPY vs SMA200,
+Fear & Greed) and what each reading means for the day's posture.
+Gated: the automated synthesis (BULLISH/NEUTRAL/BEARISH verdict with 12+ signals),
+specific level thresholds, and the morning brief itself.
+Hashtags: `#StockMarket #PreMarket #FinTwit #DividendInvesting #IncomeInvesting`
+
+### Bait Pushover Dispatch Schedule (`bait_dispatcher.py` — to build)
+
+```
+Weekdays (Mon-Fri, market open days):
+  3 separate Pushover notifications — one per bait, sent ~8:00 AM HST (pre-market)
+  Each includes: hook line + 3-bullet framework + bit.ly link
+  Rotate content variants weekly so hooks don't go stale
+
+Weekends + Market Holidays (Sat/Sun + NYSE holiday list):
+  1 consolidated Pushover — all 3 baits as snippets, clearly labeled
+  Format:
+    Weekend Bait Snippets [date]
+    🚨 CLM/CRF: [2-line hook for Bait 1]
+    ─────
+    📋 Wheel: [2-line hook for Bait 2]
+    ─────
+    📊 Market: [2-line hook for Bait 3]
+
+Implementation:
+  - Check date: if weekday AND not in NYSE_HOLIDAYS → 3 separate; else → consolidated
+  - NYSE holidays 2026 remaining: Nov 26 (Thanksgiving), Dec 25 (Christmas)
+  - NYSE holidays 2027: Jan 1, Jan 19 (MLK), Feb 16 (Presidents Day), Apr 2 (Good Friday),
+    May 25 (Memorial Day), Jul 5 (Independence Day observed), Sep 7 (Labor Day),
+    Nov 26 (Thanksgiving), Dec 25 (Christmas)
+  - Pushover priority: normal (not high) — these are draft prompts, not alerts
+  - DB key: bait_last_sent_{date} (dedup — never send twice in one calendar day)
+```
+
+### X Visibility Strategy — Reply-First Approach
+
+Zero followers ≠ zero reach. The path is through replies, not original posts.
+
+**Daily routine (do this BEFORE posting your own content):**
+1. Search X for: `CLM`, `CRF`, `closed end fund`, `rights offering`, `$CLM`, `#DividendInvesting`
+2. Find 5 posts where someone is asking a question or expressing confusion
+3. Reply with a specific, genuinely useful answer (1-3 sentences). No pitch, no link.
+   Example: someone asks "why did CLM drop today?" → reply with the 4-catalyst anatomy
+4. After 5 substantive replies, post your own bait thread for the day
+5. On the bait post: tag 1-2 larger accounts who post about CLM/CRF/CEF if the reply
+   is genuinely relevant to their audience (not spammy)
+
+**Quote-tweet strategy for organic reach:**
+- When CLM/CRF or Cornerstone press releases drop → be FIRST to quote-tweet with context
+- When EDGAR watcher fires → quote the SEC EDGAR search link with "N-2 filed" context
+- These event-driven posts get organic reach because people search for the ticker in real time
+
+**Posting times for max finance engagement on X:**
+- 8:30-9:15 AM ET (market open window — highest finance traffic)
+- 3:30-4:15 PM ET (market close window — recap/reaction traffic)
+- Avoid midday (lowest engagement for finance content)
+
+**Hashtag discipline (5 max per post — more hurts reach on X):**
+- Always include: `#FinTwit` (the finance Twitter community tag — broadest reach)
+- Rotate the other 4 from the per-bait lists above
+
+### bit.ly Tracking Setup
+
+Create 3 separate links at app.bitly.com (free account):
+```
+bit.ly/cfx-ro      → Gumroad product page (for CLM/CRF bait posts)
+bit.ly/cfx-wheel   → Gumroad product page (for options wheel bait posts)
+bit.ly/cfx-morning → Gumroad product page (for morning posture bait posts)
+```
+Dashboard shows per-link: total clicks, click-over-time, referrer source (X vs Pinterest
+vs direct link), country, device. This tells you which bait is converting so you double
+down on the winner. Free tier = 30 days history. Paid ($8/mo) = 2 years + custom domain.
+
+### #free-data Channel Post Format (Discord)
+
+Lock actionable fields. Show the score. Show the outcome AFTER the window closes.
+
+```
+☕ CLM — Rights Offering Recap [48h delay]
+┣ Filed: N-2 detected (48h ago)
+┣ Price at alert: 🔒 Subscriber only
+┣ RO Risk score: 74/100 (CRITICAL)
+┣ Action taken: 🔒 Subscriber only
+┣ Price since: -1.9% in 2 sessions
+┗ Next catalyst: 🔒 Subscriber only
+→ Live signals + entry timing: [bit.ly/cfx-ro]
+Footer: Cornerstone Flowstate · Free tier · Data is 48h delayed
+```
+
+Rule: NEVER post a #free-data embed that is actionable within its window.
+The data must be verifiably real (no fabrication) but always arrive after the trade window.
