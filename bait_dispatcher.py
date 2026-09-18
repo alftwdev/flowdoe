@@ -1,21 +1,39 @@
 """
 bait_dispatcher.py — Cornerstone Flowstate content marketing dispatch
-Sends 3 daily bait drafts via Pushover for manual copy-paste to X.
-Also posts a T-48h delayed #free-data Discord embed.
 
-Weekdays (market open):     3 separate Pushover notifications (one per bait)
-Weekends + NYSE holidays:   1 consolidated Pushover with all 3 as snippets
-DB dedup:                   bait_last_sent_{YYYY-MM-DD}
-Run via PA cron:            0 18 * * 1-5  (8:00 AM HST = 18:00 UTC weekdays)
-                            0 18 * * 6,0  (8:00 AM HST Saturday/Sunday)
-                            Add a duplicate entry for holidays via check inside script.
+Two modes, two scheduler entries in market_scheduler.py:
+
+  DRAFT mode (default, 18:00 UTC = 8:00 AM HST):
+    Weekdays:  3 Pushover notifications (one per bait) for manual X posting
+    Weekends:  1 consolidated snippet Pushover
+    Dedup key: bait_last_sent_draft_{YYYY-MM-DD}
+
+  AUTO-POST mode (--auto-post flag, 12:30 UTC = 8:30 AM ET = 2:30 AM HST):
+    Weekdays:  posts 3 tweet threads directly to X via Twitter API v2
+               + silent Pushover recap (priority=-1, no sound — user is asleep)
+    Weekends:  silent consolidated Pushover only (no X post on weekends)
+    Dedup key: bait_last_sent_autopost_{YYYY-MM-DD}
+    Gate:      X_AUTO_POST_ENABLED=true in .env + Twitter credentials set
+
+Setup for auto-posting (do once):
+  1. Apply for Twitter Developer account at developer.twitter.com (free)
+  2. Create app with Read+Write permissions → get 4 credentials
+  3. Add to .env: X_AUTO_POST_ENABLED=true
+                  TWITTER_API_KEY=...
+                  TWITTER_API_SECRET=...
+                  TWITTER_ACCESS_TOKEN=...
+                  TWITTER_ACCESS_TOKEN_SECRET=...
+  4. pip install tweepy  (on PA: pip3.10 install tweepy)
+  5. Both scheduler entries run independently — draft Pushover still fires at 8 AM HST
 
 NOT a financial advisor. Educational content only.
 """
 
 import os
 import json
+import time
 import logging
+import argparse
 import requests
 from datetime import date, datetime, timedelta
 
@@ -26,9 +44,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("bait_dispatcher")
 
-PUSHOVER_API_TOKEN = os.getenv("PUSHOVER_API_TOKEN", "")
-PUSHOVER_USER_KEY  = os.getenv("PUSHOVER_USER_KEY", "")
+PUSHOVER_API_TOKEN  = os.getenv("PUSHOVER_API_TOKEN", "")
+PUSHOVER_USER_KEY   = os.getenv("PUSHOVER_USER_KEY", "")
 WEBHOOK_ANNOUNCEMENTS = os.getenv("WEBHOOK_ANNOUNCEMENTS", "")
+
+# ── X (Twitter) auto-post credentials ─────────────────────────────────────────
+# All 4 required for tweepy.Client OAuth1 User Context (the only auth that writes tweets).
+X_AUTO_POST_ENABLED         = os.getenv("X_AUTO_POST_ENABLED", "false").lower() == "true"
+TWITTER_API_KEY             = os.getenv("TWITTER_API_KEY", "")
+TWITTER_API_SECRET          = os.getenv("TWITTER_API_SECRET", "")
+TWITTER_ACCESS_TOKEN        = os.getenv("TWITTER_ACCESS_TOKEN", "")
+TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
 
 db = EcosystemDatabase()
 
@@ -301,6 +327,36 @@ def format_bait1(data: dict) -> dict:
     hook = hook_template.format(**data)
     cta  = BAIT1_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT1_CTA_DIRECT
 
+    # 4-tweet thread for X auto-posting (each tweet ≤ 280 chars)
+    if USE_ENGAGEMENT_CTA:
+        cta_tweet = (
+            f"Most retail holders panic at ① and miss the real entry at ③.\n\n"
+            f"{BAIT1_CTA_ENGAGEMENT}\n\n"
+            f"{BAIT1_HASHTAGS}"
+        )
+    else:
+        cta_tweet = (
+            f"Most retail holders panic at ① and miss the real entry at ③.\n\n"
+            f"Live RO signal + entry alerts 👇\n{GUMROAD_LINK}\n\n"
+            f"{BAIT1_HASHTAGS}"
+        )
+    thread_tweets = [
+        hook,
+        (
+            "🔴 ① N-2 Filed → LARGEST drop of the entire cycle.\n"
+            "Institutions exit immediately. Price compresses from premium high → historical low within days.\n\n"
+            "🟠 ② N-2/A (~47 days later) → Second wave.\n"
+            "Confirms exact sub price. Another 1-3 day flush."
+        ),
+        (
+            "🟡 ③ Record Date (~day 59) → Historically the cycle LOW.\n"
+            "Open-market buyers who got in BELOW sub price beat RO participants.\n\n"
+            "🟢 ④ Ex-Dividend → Mechanical only.\n"
+            "Creates 1-3 day accumulation window. Not a seller event."
+        ),
+        cta_tweet,
+    ]
+
     x_draft = (
         f"{hook}\n\n"
         f"{BAIT1_FRAMEWORK}\n\n"
@@ -309,13 +365,14 @@ def format_bait1(data: dict) -> dict:
         f"{NFA}"
     )
     return {
-        "emoji":     "🚨",
-        "title":     "Bait 1 — CLM/CRF Rights Offering",
-        "hook":      hook,
-        "framework": BAIT1_FRAMEWORK,
-        "cta":       cta,
-        "hashtags":  BAIT1_HASHTAGS,
-        "x_draft":   x_draft,
+        "emoji":         "🚨",
+        "title":         "Bait 1 — CLM/CRF Rights Offering",
+        "hook":          hook,
+        "framework":     BAIT1_FRAMEWORK,
+        "cta":           cta,
+        "hashtags":      BAIT1_HASHTAGS,
+        "x_draft":       x_draft,
+        "thread_tweets": thread_tweets,
     }
 
 
@@ -323,6 +380,26 @@ def format_bait2(data: dict) -> dict:
     variant = _week_variant()
     hook = BAIT2_HOOKS[variant]
     cta  = BAIT2_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT2_CTA_DIRECT
+
+    if USE_ENGAGEMENT_CTA:
+        cta_tweet = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
+    else:
+        cta_tweet = f"Live screener + which tickers pass today 👇\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
+    thread_tweets = [
+        hook,
+        (
+            "✅ Filter 1: IVR > 35%\n"
+            "IV is elevated vs its own 52-week history. The premium edge exists in the market.\n\n"
+            "✅ Filter 2: IV − HV30 ≥ 5 volatility points\n"
+            "IV must EXCEED realized vol by 5pp. If IV caught up to a past spike that normalized → edge is gone."
+        ),
+        (
+            "✅ Filter 3: No earnings within 45 days\n"
+            "IV crush after a report destroys the premium edge. Earnings = forced close or max-loss risk.\n\n"
+            "Skip Filter 2 and you're selling into a past volatility event. Most common wheel mistake."
+        ),
+        cta_tweet,
+    ]
 
     x_draft = (
         f"{hook}\n\n"
@@ -332,13 +409,14 @@ def format_bait2(data: dict) -> dict:
         f"{NFA}"
     )
     return {
-        "emoji":     "📋",
-        "title":     "Bait 2 — Options Wheel 3-Filter",
-        "hook":      hook,
-        "framework": BAIT2_FRAMEWORK,
-        "cta":       cta,
-        "hashtags":  BAIT2_HASHTAGS,
-        "x_draft":   x_draft,
+        "emoji":         "📋",
+        "title":         "Bait 2 — Options Wheel 3-Filter",
+        "hook":          hook,
+        "framework":     BAIT2_FRAMEWORK,
+        "cta":           cta,
+        "hashtags":      BAIT2_HASHTAGS,
+        "x_draft":       x_draft,
+        "thread_tweets": thread_tweets,
     }
 
 
@@ -348,6 +426,26 @@ def format_bait3(data: dict) -> dict:
     hook = hook_template.format(**data)
     cta  = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
 
+    if USE_ENGAGEMENT_CTA:
+        cta_tweet = f"{BAIT3_CTA_ENGAGEMENT}\n\n{BAIT3_HASHTAGS}"
+    else:
+        cta_tweet = f"Full morning brief + TQQQ cycle score 👇\n{GUMROAD_LINK}\n\n{BAIT3_HASHTAGS}"
+    thread_tweets = [
+        hook,
+        (
+            "📊 Signal 1: VIX level (below 20 = calm / above 25 = fear)\n"
+            "📊 Signal 2: VIX term structure (VIXY/VXZ — backwardation = sustained fear, not a one-day spike)\n"
+            "📊 Signal 3: HY Credit Spread (FRED live — > 4.5% = credit stress, not just equity noise)"
+        ),
+        (
+            "📊 Signal 4: SPY vs SMA200 (above = bull regime, below = bear regime)\n"
+            "📊 Signal 5: Fear & Greed Index (< 25 = extreme fear = TQQQ CALL territory)\n\n"
+            "All 5 → one verdict: BULLISH / NEUTRAL / BEARISH.\n"
+            "Takes 60 seconds once you have the stack. Most people don't have the stack."
+        ),
+        cta_tweet,
+    ]
+
     x_draft = (
         f"{hook}\n\n"
         f"{BAIT3_FRAMEWORK}\n\n"
@@ -356,13 +454,14 @@ def format_bait3(data: dict) -> dict:
         f"{NFA}"
     )
     return {
-        "emoji":     "📊",
-        "title":     "Bait 3 — 60-Second Morning Posture",
-        "hook":      hook,
-        "framework": BAIT3_FRAMEWORK,
-        "cta":       cta,
-        "hashtags":  BAIT3_HASHTAGS,
-        "x_draft":   x_draft,
+        "emoji":         "📊",
+        "title":         "Bait 3 — 60-Second Morning Posture",
+        "hook":          hook,
+        "framework":     BAIT3_FRAMEWORK,
+        "cta":           cta,
+        "hashtags":      BAIT3_HASHTAGS,
+        "x_draft":       x_draft,
+        "thread_tweets": thread_tweets,
     }
 
 
@@ -484,16 +583,58 @@ def post_free_data_embed(data: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEDUP
+# X AUTO-POST  (tweepy v4+, Twitter API v2, OAuth1 User Context)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def already_sent_today() -> bool:
-    key = f"bait_last_sent_{date.today().isoformat()}"
+def post_thread_to_x(tweets: list[str], label: str = "") -> bool:
+    """Post tweets as a thread. First is root; subsequent are replies to the previous."""
+    try:
+        import tweepy
+    except ImportError:
+        logger.warning("tweepy not installed — run: pip3.10 install tweepy")
+        return False
+
+    if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
+        logger.warning("X API credentials missing in .env — skipping auto-post")
+        return False
+
+    client = tweepy.Client(
+        consumer_key=TWITTER_API_KEY,
+        consumer_secret=TWITTER_API_SECRET,
+        access_token=TWITTER_ACCESS_TOKEN,
+        access_token_secret=TWITTER_ACCESS_TOKEN_SECRET,
+    )
+
+    prev_id = None
+    tag = f" [{label}]" if label else ""
+    for i, text in enumerate(tweets):
+        try:
+            kwargs = {"text": text[:280]}
+            if prev_id:
+                kwargs["in_reply_to_tweet_id"] = prev_id
+            resp = client.create_tweet(**kwargs)
+            prev_id = resp.data["id"]
+            logger.info(f"X tweet {i+1}/{len(tweets)} posted (id={prev_id}){tag}")
+            if i < len(tweets) - 1:
+                time.sleep(3)
+        except Exception as e:
+            logger.error(f"X tweet {i+1}/{len(tweets)} failed{tag}: {e}")
+            return False
+
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEDUP  (separate keys for draft vs auto-post modes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def already_sent_today(mode: str = "draft") -> bool:
+    key = f"bait_last_sent_{mode}_{date.today().isoformat()}"
     return bool(db.get_state(key))
 
 
-def mark_sent_today():
-    key = f"bait_last_sent_{date.today().isoformat()}"
+def mark_sent_today(mode: str = "draft"):
+    key = f"bait_last_sent_{mode}_{date.today().isoformat()}"
     db.update_state(key, datetime.utcnow().isoformat())
     logger.info(f"Marked sent: {key}")
 
@@ -503,11 +644,21 @@ def mark_sent_today():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    today_str = date.today().strftime("%Y-%m-%d")
-    logger.info(f"bait_dispatcher running — {today_str}")
+    parser = argparse.ArgumentParser(description="Cornerstone Flowstate bait dispatcher")
+    parser.add_argument(
+        "--auto-post", action="store_true",
+        help="Post threads directly to X (Twitter API v2). Fires at 12:30 UTC (8:30 AM ET). "
+             "Requires X_AUTO_POST_ENABLED=true + Twitter credentials in .env."
+    )
+    args = parser.parse_args()
 
-    if already_sent_today():
-        logger.info("Already sent today — skipping.")
+    # Mode determines dedup key + behavior
+    mode = "autopost" if args.auto_post else "draft"
+    today_str = date.today().strftime("%Y-%m-%d")
+    logger.info(f"bait_dispatcher running — {today_str} — mode={mode}")
+
+    if already_sent_today(mode):
+        logger.info(f"Already sent today ({mode}) — skipping.")
         return
 
     data = pull_market_data()
@@ -523,23 +674,49 @@ def main():
 
     closed = is_market_closed_today()
 
-    if closed:
-        # ── WEEKEND / HOLIDAY — 1 consolidated Pushover ──
-        logger.info("Market closed today — sending consolidated bait snippet.")
-        title, body = build_consolidated_notification(baits, today_str)
-        send_pushover(title, body)
+    if args.auto_post:
+        # ── AUTO-POST mode (12:30 UTC = 8:30 AM ET = 2:30 AM HST) ──────────
+        # User is asleep in Hawaii. Posts fire at ET peak, silent Pushover recap.
+        if closed:
+            logger.info("Market closed — no X posts on weekends/holidays. Sending silent Pushover snippet.")
+            title, body = build_consolidated_notification(baits, today_str)
+            send_pushover(title, f"[Weekend — no X post]\n\n{body}", priority=-1)
+        elif not X_AUTO_POST_ENABLED:
+            logger.warning(
+                "X_AUTO_POST_ENABLED=false — set it to 'true' in .env to activate. "
+                "Sending silent Pushover drafts instead."
+            )
+            for bait in baits:
+                t, b = build_weekday_notification(bait)
+                send_pushover(t, f"[X AUTO-POST NOT ENABLED — copy/paste manually]\n\n{b}", priority=-1)
+        else:
+            logger.info("Auto-posting 3 threads to X (8:30 AM ET peak)...")
+            for bait in baits:
+                posted = post_thread_to_x(bait["thread_tweets"], label=bait["title"])
+                status = "✅ Posted to X" if posted else "❌ X post FAILED"
+                t, b = build_weekday_notification(bait)
+                send_pushover(t, f"{status}\n\n{b}", priority=-1)  # silent — user asleep
+
+            # #free-data Discord embed
+            post_free_data_embed(data)
+
     else:
-        # ── WEEKDAY — 3 separate Pushover notifications ──
-        logger.info("Market open today — sending 3 separate bait notifications.")
-        for bait in baits:
-            t, b = build_weekday_notification(bait)
-            send_pushover(t, b)
+        # ── DRAFT mode (18:00 UTC = 8:00 AM HST) — Pushover drafts for manual posting ──
+        if closed:
+            logger.info("Market closed — sending consolidated weekend snippet.")
+            title, body = build_consolidated_notification(baits, today_str)
+            send_pushover(title, body)
+        else:
+            logger.info("Market open — sending 3 bait draft notifications.")
+            for bait in baits:
+                t, b = build_weekday_notification(bait)
+                send_pushover(t, b)
 
-        # Post #free-data Discord embed (weekdays only — delayed by design)
-        post_free_data_embed(data)
+            # #free-data Discord embed (weekdays only)
+            post_free_data_embed(data)
 
-    mark_sent_today()
-    logger.info("bait_dispatcher complete.")
+    mark_sent_today(mode)
+    logger.info(f"bait_dispatcher complete — mode={mode}.")
 
 
 if __name__ == "__main__":
