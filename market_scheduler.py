@@ -121,6 +121,10 @@ SCHEDULE = [
     # IV accumulation — stores daily ATM IV per symbol after close.
     # Accumulating since Jul 11 2026; usable baseline ~30 days; full 52-week IVR after 252 days.
     (21, 30, "store_daily_iv",     "scheduler",    ["--mode", "store_daily_iv"],  True),
+    # Bait dispatch — 3 weekday Pushover drafts + #free-data Discord embed; 1 consolidated weekend snippet.
+    # Script handles weekday/weekend/NYSE-holiday logic internally. wkdays_only=False → runs daily.
+    # 8:00 AM HST = 18:00 UTC. Deduped via DB key bait_last_sent_{date}.
+    (18,  0, "bait_dispatcher",   "bait_dispatcher", [],                         False),
     # weekly_scorecard fires Friday only — gated here, not inside the script.
     # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
     # TQQQ sniper sweep — every 30 min during RTH (14:00–20:30 UTC).
@@ -181,6 +185,8 @@ def build_cmd(script: str, args: list) -> list:
         return cmd + args if args else cmd
     if script == "announcements":
         return [PYTHON, os.path.join(BASE_DIR, "announcements.py")]
+    if script == "bait_dispatcher":
+        return [PYTHON, os.path.join(BASE_DIR, "bait_dispatcher.py")]
     if script == "tqqq":
         return [PYTHON, os.path.join(BASE_DIR, "tqqq.py"), "--run-once"]
     raise ValueError(f"Unknown script type: {script}")

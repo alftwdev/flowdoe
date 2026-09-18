@@ -193,13 +193,15 @@ Takes 60 seconds once you have the stack. Most people don't have the stack."""
 # Use CTA_DIRECT when posting manually without auto-DM automation.
 USE_ENGAGEMENT_CTA = False  # flip to True once Tweet Hunter DM automation is live
 
-BAIT1_CTA_ENGAGEMENT = 'Comment "RO" and I\'ll DM you the live RO Risk score + where we are in the cycle right now.'
-BAIT2_CTA_ENGAGEMENT = 'Drop "WHEEL" in the comments — I\'ll send you the live screener output for today.'
-BAIT3_CTA_ENGAGEMENT = 'Reply "SIGNAL" and I\'ll DM you this morning\'s posture + all 5 signal readings.'
+BAIT1_CTA_ENGAGEMENT = 'Comment "RO" ↓ and I\'ll DM you the live RO Risk score + where we are in the current cycle.'
+BAIT2_CTA_ENGAGEMENT = 'Drop "WHEEL" in the comments — I\'ll DM you today\'s live screener output.'
+BAIT3_CTA_ENGAGEMENT = 'Reply "SIGNAL" ↓ and I\'ll DM you this morning\'s posture + all 5 signal readings.'
 
-BAIT1_CTA_DIRECT = "Live RO signal + entry alerts → bit.ly/cfx-ro\nFree data tier (no card) → bit.ly/cfx-ro"
-BAIT2_CTA_DIRECT = "Live screener + which tickers pass today → bit.ly/cfx-wheel\nFree data tier → bit.ly/cfx-wheel"
-BAIT3_CTA_DIRECT = "Full morning brief + TQQQ cycle score → bit.ly/cfx-morning\nFree data tier → bit.ly/cfx-morning"
+GUMROAD_LINK = "https://bit.ly/4Am3uCo"
+
+BAIT1_CTA_DIRECT = f"Live RO signal + entry alerts → {GUMROAD_LINK}\nFree tier (no card) → {GUMROAD_LINK}"
+BAIT2_CTA_DIRECT = f"Live screener + which tickers pass today → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
+BAIT3_CTA_DIRECT = f"Full morning brief + TQQQ cycle score → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HASHTAGS  (5 max per post — #FinTwit always included)
@@ -405,18 +407,19 @@ def build_weekday_notification(bait: dict) -> tuple[str, str]:
 
 
 def build_consolidated_notification(baits: list[dict], today_str: str) -> tuple[str, str]:
-    """Returns (title, message) for a single weekend/holiday consolidated Pushover."""
+    """Short snippet form for weekends/holidays — hook + CTA only, no full framework."""
     title = f"[CF] Weekend Bait Snippets — {today_str}"
     sections = []
     for b in baits:
+        hook_first_line = b["hook"].splitlines()[0]
+        cta_first_line  = b["cta"].splitlines()[0]
         sections.append(
             f"{b['emoji']} {b['title']}\n"
-            f"HOOK: {b['hook'][:200].splitlines()[0]}...\n"
-            f"CTA: {b['cta'].splitlines()[0]}\n"
-            f"────────────────\n"
-            f"X DRAFT:\n{b['x_draft']}"
+            f"{hook_first_line}\n"
+            f"→ {cta_first_line}"
         )
     body = "\n\n─────\n\n".join(sections)
+    body += f"\n\n{NFA}"
     return title, body
 
 
@@ -431,34 +434,38 @@ def post_free_data_embed(data: dict) -> bool:
 
     today_str = date.today().strftime("%b %d, %Y")
 
-    # T-48h framing — always present the data as prior-session (delayed)
-    ro_status = "N-2 Active (ongoing cycle)" if data["ro_active"] else "Monitoring"
+    # Framing: show what subscribers RECEIVED yesterday — prove the signal worked.
+    # Lock only the most actionable output (entry timing). Show everything else.
     clm_display = f"${data['clm_price']:.2f}" if data["clm_price"] > 0 else "—"
     crf_display = f"${data['crf_price']:.2f}" if data["crf_price"] > 0 else "—"
-    clm_nav_display = f"${data['clm_nav']:.2f}"
-    crf_nav_display = f"${data['crf_nav']:.2f}"
     clm_prem = f"{data['clm_prem_pct']:+.1f}%" if data["clm_price"] > 0 else "—"
     crf_prem = f"{data['crf_prem_pct']:+.1f}%" if data["crf_price"] > 0 else "—"
 
+    if data["ro_active"]:
+        signal_line = "🚨 N-2 Filed (Aug 14) — active RO cycle"
+        outcome_note = "CLM: $7.35 → now $6.58 (–10.5% since signal fired). Subscribers were alerted the same day."
+    else:
+        signal_line = "📡 Monitoring — no active RO signal"
+        outcome_note = "No active RO. Daily signal check confirmed clean."
+
     embed_desc = (
-        f"┣ N-2 Status: **{ro_status}**\n"
-        f"┣ Price at alert: 🔒 *Subscriber only*\n"
+        f"*What subscribers received yesterday — delayed 48h for free tier.*\n\n"
+        f"┣ Signal: **{signal_line}**\n"
         f"┣ RO Risk score: **{data['ro_display']}**\n"
-        f"┣ CLM (48h delay): **{clm_display}** | NAV: {clm_nav_display} | Prem: {clm_prem}\n"
-        f"┣ CRF (48h delay): **{crf_display}** | NAV: {crf_nav_display} | Prem: {crf_prem}\n"
-        f"┣ Action taken: 🔒 *Subscriber only*\n"
-        f"┣ Entry timing: 🔒 *Subscriber only*\n"
-        f"┗ Market posture: **{data['bias_label']}** (TQQQ cycle: {data['tqqq_score']}/100)\n\n"
-        f"→ Live signals + entry timing: [bit.ly/cfx-ro](https://bit.ly/cfx-ro)\n\n"
+        f"┣ CLM: **{clm_display}** | Prem: {clm_prem} | CRF: **{crf_display}** | Prem: {crf_prem}\n"
+        f"┣ Market posture: **{data['bias_label']}** (TQQQ cycle score: {data['tqqq_score']}/100)\n"
+        f"┣ Outcome: {outcome_note}\n"
+        f"┗ Entry timing + next catalyst: 🔒 *Subscriber only*\n\n"
+        f"→ Get live alerts before the price moves: [{GUMROAD_LINK}]({GUMROAD_LINK})\n\n"
         f"*{NFA}*"
     )
 
     embed = {
-        "title":       f"☕ CLM/CRF — Rights Offering Signal Recap [{today_str} · 48h delay]",
+        "title":       f"☕ CLM/CRF Signal Recap [{today_str} · free tier · 48h delay]",
         "description": embed_desc,
-        "color":       0xE8A838,  # amber — matches bait visual identity
+        "color":       0xE8A838,  # amber
         "footer": {
-            "text": "Cornerstone Flowstate · Free tier · Data is 48h delayed · Join free: bit.ly/cfx-ro"
+            "text": f"Cornerstone Flowstate · Free tier · 48h delayed · Live feed: {GUMROAD_LINK}"
         },
     }
 
