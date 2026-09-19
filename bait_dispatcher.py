@@ -691,11 +691,14 @@ def main():
                 send_pushover(t, f"[X AUTO-POST NOT ENABLED — copy/paste manually]\n\n{b}", priority=-1)
         else:
             logger.info("Auto-posting 3 threads to X (8:30 AM ET peak)...")
-            for bait in baits:
+            for i, bait in enumerate(baits):
                 posted = post_thread_to_x(bait["thread_tweets"], label=bait["title"])
                 status = "✅ Posted to X" if posted else "❌ X post FAILED"
                 t, b = build_weekday_notification(bait)
                 send_pushover(t, f"{status}\n\n{b}", priority=-1)  # silent — user asleep
+                if i < len(baits) - 1:
+                    logger.info("Waiting 5 min before next thread (natural cadence)...")
+                    time.sleep(300)
 
             # #free-data Discord embed
             post_free_data_embed(data)
