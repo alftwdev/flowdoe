@@ -512,6 +512,80 @@ def log_ro_daily_snapshot(ticker: str, price: float, nav: float) -> None:
 # CIKs verified live 2026-06-23 against SEC company search.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _post_n2a_event_to_x(ticker: str, filing_date: str):
+    """Post a live RO N-2/A event thread to X when first detected. Fires once per cycle."""
+    try:
+        import tweepy
+    except ImportError:
+        logger.warning("[EDGAR] tweepy not installed — N-2/A X post skipped")
+        return
+
+    api_key    = os.getenv("TWITTER_API_KEY", "")
+    api_secret = os.getenv("TWITTER_API_SECRET", "")
+    acc_token  = os.getenv("TWITTER_ACCESS_TOKEN", "")
+    acc_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
+    if not (os.getenv("X_AUTO_POST_ENABLED", "false").lower() == "true"
+            and api_key and api_secret and acc_token and acc_secret):
+        logger.info("[EDGAR] X auto-post disabled or credentials missing — N-2/A thread skipped")
+        return
+
+    clm_price = db.get_state("clm_last_price") or "~$6.45"
+    clm_nav   = db.get_state("clm_last_nav")   or "~$6.31"
+    try:
+        sub_est = f"${float(str(clm_nav).replace('$','').strip()) * 1.04:.2f}"
+    except Exception:
+        sub_est = "~$6.56"
+
+    gumroad = "https://bit.ly/4Am3uCo"
+    tkr = ticker  # CLM or CRF
+
+    tweets = [
+        (f"🚨 {tkr} N-2/A just hit SEC EDGAR (filed {filing_date}).\n\n"
+         f"This amendment finalizes Rights Offering terms — subscription price, "
+         f"record date, and subscription window.\n\n"
+         f"Here's what this means and what the price does next. 🧵"),
+        (f"The N-2/A is the 2nd catalyst in every CLM/CRF RO cycle.\n\n"
+         f"N-2 (Aug 14): institutions began distributing → price −9.5% in 11 days.\n"
+         f"N-2/A (today): confirms exact dilution math → market re-prices again.\n\n"
+         f"Historical pattern: 1–3 days mild selling pressure after this filing."),
+        (f"2026 RO formula: 104% × NAV at expiration close (no market price floor).\n\n"
+         f"Estimated sub price: {sub_est}\n"
+         f"{tkr} current price: ${clm_price}\n\n"
+         f"Price ≤ sub price = open-market buyers beat the rights offering.\n"
+         f"That's where we've been since Sept 14."),
+        (f"What's next:\n"
+         f"→ Record date: ~Oct 13–16 (historically THE cycle low in 2022 + 2025)\n"
+         f"→ 25-day subscription window opens\n"
+         f"→ Expiration: ~Nov 7–10 (RO overhang clears → premium recovery begins)\n\n"
+         f"After expiration: income buyers return, premium mean-reverts toward 19%."),
+        (f"We caught the N-2 on Aug 14 via SEC EDGAR monitoring.\n"
+         f"We're tracking every catalyst in real time.\n\n"
+         f"#free-data ↓ shows delayed recaps.\n"
+         f"Live alerts + entry zones → {gumroad}\n\n"
+         f"#CLM #CRF #ClosedEndFunds #DividendInvesting #FinTwit"),
+    ]
+
+    client = tweepy.Client(
+        consumer_key=api_key, consumer_secret=api_secret,
+        access_token=acc_token, access_token_secret=acc_secret,
+    )
+    prev_id = None
+    for i, text in enumerate(tweets):
+        try:
+            kwargs = {"text": text[:280]}
+            if prev_id:
+                kwargs["in_reply_to_tweet_id"] = prev_id
+            resp = client.create_tweet(**kwargs)
+            prev_id = resp.data["id"]
+            logger.info(f"[EDGAR] N-2/A X thread {i+1}/{len(tweets)} posted (id={prev_id})")
+            if i < len(tweets) - 1:
+                time.sleep(5)
+        except Exception as xe:
+            logger.error(f"[EDGAR] N-2/A X thread tweet {i+1} failed: {xe}")
+            return
+    logger.info(f"[EDGAR] {tkr} N-2/A thread posted to X ({len(tweets)} tweets)")
+
+
 def check_sec_edgar(session, ticker):
     """
     Scrapes SEC EDGAR for all forms in EDGAR_FORMS_TO_WATCH.
@@ -606,6 +680,8 @@ def check_sec_edgar(session, ticker):
                                 logger.info(f"[EDGAR] {ticker} N-2/A first-detection Pushover sent (filed {date})")
                         except Exception as _pe:
                             logger.warning(f"[EDGAR] N-2/A Pushover failed ({ticker}): {_pe}")
+                        # Auto-post educational thread to X (fires once per cycle, same gate as Pushover)
+                        _post_n2a_event_to_x(ticker, date)
             elif "SC 13D" in form and "SC 13D" not in seen_forms:
                 if age <= HOLDER_RECENCY_DAYS:
                     flags.append(f"⚠️ 13D LARGE HOLDER CHANGE ({date})")
