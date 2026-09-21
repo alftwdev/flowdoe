@@ -147,31 +147,33 @@ BAIT2_HOOKS = [
 ]
 
 BAIT3_HOOKS = [
-    # Week A — time saved
+    # Week A — time saved (problem-first, most universal hook)
     (
         "I used to spend 45 minutes every morning across Bloomberg, CBOE, Finviz, and Twitter.\n"
         "Now I check 5 numbers. Takes 60 seconds.\n\n"
         "Today's read: {bias_label}\n\n"
         "Here's the exact stack:"
     ),
-    # Week B — specific level
+    # Week B — specific level + actionable thresholds
     (
         "VIX above 20: stay defensive.\n"
         "VIX above 25 in backwardation: get your puts on.\n"
         "VIX drops back below 1.0 term ratio: that's the LEAP CALL entry window.\n\n"
         "5-signal morning posture (today: {bias_label}):"
     ),
-    # Week C — relatable frustration
+    # Week C — relatable failure (missed entry due to no system)
     (
-        "The worst trade setups I've taken came from skipping the morning posture.\n"
+        "The worst setups I've taken came from skipping the morning posture.\n"
         "Entered bullish when the regime was already flipping.\n\n"
-        "5 numbers. 60 seconds. Here's the stack:"
+        "5 numbers. 60 seconds. Today reads {bias_label}.\n\n"
+        "Here's the stack:"
     ),
-    # Week D — outcome-first
+    # Week D — most people don't have this (scarcity + data-first)
     (
-        "This morning's market posture: {bias_label}\n"
-        "TQQQ cycle score: {tqqq_score}/100\n\n"
-        "That's the output. Here's how it's built:"
+        "Most retail analysis takes 45 minutes and still leaves you guessing.\n\n"
+        "5 signals. 60 seconds. {bias_label}.\n"
+        "TQQQ cycle score: {tqqq_score}/100.\n\n"
+        "Here's the exact stack:"
     ),
 ]
 
@@ -203,11 +205,11 @@ IV crush after a report destroys the premium edge. Earnings = forced close or ma
 Skip Filter 2 and you're selling into a past volatility event. That's the most common wheel mistake."""
 
 BAIT3_FRAMEWORK = """\
-📊 Signal 1: VIX level (below 20 = calm / above 25 = fear)
-📊 Signal 2: VIX term structure (VIXY/VXZ — backwardation = sustained fear, not a one-day spike)
-📊 Signal 3: HY Credit Spread (FRED live — > 4.5% = credit stress, not just equity noise)
-📊 Signal 4: SPY vs SMA200 (above = bull regime, below = bear regime)
-📊 Signal 5: Fear & Greed Index (< 25 = extreme fear = TQQQ CALL territory)
+① VIX level — below 20 = calm / above 25 = fear
+② VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike
+③ HY Credit Spread — FRED live; > 4.5% = credit stress bleeding into equity risk
+④ SPY vs SMA200 — above = bull regime / below = bear regime
+⑤ Fear & Greed Index — < 25 = extreme fear = TQQQ CALL territory
 
 All 5 → one verdict: BULLISH / NEUTRAL / BEARISH.
 Takes 60 seconds once you have the stack. Most people don't have the stack."""
@@ -234,7 +236,7 @@ BAIT3_CTA_DIRECT = f"Full morning brief + TQQQ cycle score → {GUMROAD_LINK}\nF
 # ─────────────────────────────────────────────────────────────────────────────
 BAIT1_HASHTAGS = "#CLM #CRF #ClosedEndFunds #DividendInvesting #FinTwit"
 BAIT2_HASHTAGS = "#OptionsTrading #TheWheel #CashSecuredPuts #PassiveIncome #FinTwit"
-BAIT3_HASHTAGS = "#StockMarket #PreMarket #IncomeInvesting #DividendInvesting #FinTwit"
+BAIT3_HASHTAGS = "#TQQQ #PreMarket #IncomeInvesting #DividendInvesting #FinTwit"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NFA FOOTER
@@ -426,20 +428,26 @@ def format_bait3(data: dict) -> dict:
     hook = hook_template.format(**data)
     cta  = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
 
+    tqqq_score = data.get("tqqq_score", "?")
     if USE_ENGAGEMENT_CTA:
         cta_tweet = f"{BAIT3_CTA_ENGAGEMENT}\n\n{BAIT3_HASHTAGS}"
     else:
-        cta_tweet = f"Full morning brief + TQQQ cycle score 👇\n{GUMROAD_LINK}\n\n{BAIT3_HASHTAGS}"
+        cta_tweet = (
+            f"Full 12-signal brief + live TQQQ score ({tqqq_score}/100) 🔒\n"
+            f"Subscribers see all 5 readings + today's entry threshold.\n"
+            f"Free tier → {GUMROAD_LINK}\n\n"
+            f"{BAIT3_HASHTAGS}"
+        )
     thread_tweets = [
         hook,
         (
-            "📊 Signal 1: VIX level (below 20 = calm / above 25 = fear)\n"
-            "📊 Signal 2: VIX term structure (VIXY/VXZ — backwardation = sustained fear, not a one-day spike)\n"
-            "📊 Signal 3: HY Credit Spread (FRED live — > 4.5% = credit stress, not just equity noise)"
+            "① VIX level — below 20 = calm / above 25 = fear\n"
+            "② VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike\n"
+            "③ HY Credit Spread — FRED live; > 4.5% = credit stress bleeding into equity risk"
         ),
         (
-            "📊 Signal 4: SPY vs SMA200 (above = bull regime, below = bear regime)\n"
-            "📊 Signal 5: Fear & Greed Index (< 25 = extreme fear = TQQQ CALL territory)\n\n"
+            "④ SPY vs SMA200 — above = bull regime / below = bear regime\n"
+            "⑤ Fear & Greed Index — < 25 = extreme fear = TQQQ CALL territory\n\n"
             "All 5 → one verdict: BULLISH / NEUTRAL / BEARISH.\n"
             "Takes 60 seconds once you have the stack. Most people don't have the stack."
         ),
