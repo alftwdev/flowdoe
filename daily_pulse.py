@@ -275,6 +275,75 @@ def fetch_ro_gate_info():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TIER 2 — MLPI + MAIN personal watchlist (Pushover only, never Discord)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Known approximate annual distributions — update when funds announce changes.
+# MLPI (Pacer MLP & Infrastructure ETF): ~$0.12/mo × 12 = $1.44/yr
+# MAIN (Main Street Capital): $0.245/mo regular = $2.94/yr (plus specials)
+TIER2_ANNUAL_DIST = {"MLPI": 1.44, "MAIN": 2.94}
+
+def fetch_tier2_snapshot() -> dict:
+    """
+    Fetches live MLPI + MAIN price via Twelve Data REST (2 TD credits).
+    Computes yield at current price, reads mlpi_entry_signal from DB for DCA signal.
+    Returns dict keyed by ticker with price, yield, dca_signal.
+    Pushover only — never routed to Discord.
+    """
+    results = {}
+    session = requests.Session()
+    try:
+        from database import EcosystemDatabase
+        db = EcosystemDatabase()
+        mlpi_signal = db.get_state("mlpi_entry_signal_fired") or ""
+    except Exception:
+        db = None
+        mlpi_signal = ""
+
+    for ticker in ("MLPI", "MAIN"):
+        try:
+            r = session.get(
+                f"https://api.twelvedata.com/price?symbol={ticker}&apikey={TD_API_KEY}",
+                timeout=12)
+            price = float(r.json().get("price", 0.0))
+        except Exception as e:
+            logger.warning(f"Tier 2 price fetch failed {ticker}: {e}")
+            price = 0.0
+
+        annual_dist = TIER2_ANNUAL_DIST.get(ticker, 0.0)
+        yield_pct   = round(annual_dist / price * 100, 1) if price > 0 else 0.0
+
+        # DCA signal: for MLPI, check if mlpi_entry_signal fired today
+        today_str = date.today().isoformat()
+        if ticker == "MLPI":
+            if today_str in mlpi_signal:
+                dca_signal = "⚡ DCA SIGNAL — energy dip triggered today"
+            elif yield_pct >= 15.0:
+                dca_signal = "✅ Yield ≥15% — accumulate zone"
+            elif yield_pct >= 13.0:
+                dca_signal = "🟡 Hold — yield fair (13-15%)"
+            else:
+                dca_signal = "⏸ Hold — yield below 13% threshold"
+        else:  # MAIN
+            if yield_pct >= 7.0:
+                dca_signal = "✅ Yield ≥7% — add on dips"
+            elif yield_pct >= 6.0:
+                dca_signal = "🟡 Hold — yield fair (6-7%)"
+            else:
+                dca_signal = "⏸ Hold — yield compressed"
+
+        monthly_dist = round(annual_dist / 12, 3)
+        results[ticker] = {
+            "price":        price,
+            "yield_pct":    yield_pct,
+            "annual_dist":  annual_dist,
+            "monthly_dist": monthly_dist,
+            "dca_signal":   dca_signal,
+        }
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STATE — run-date dedup
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -338,14 +407,29 @@ def format_pulse_message(cef, state, ro_status=None, ro_gate_info=None):
             lines.append(f"┗ Accumulate at or below ${fv_2027:.2f}")
         lines.append("")
 
-    # ── WHEEL DESK — open positions DTE + exit advisory
+    # ── WHEEL DESK — open positions DTE + exit advisory (suppressed when empty)
     wheel_lines = fetch_wheel_desk_snapshot()
-    if wheel_lines != ["No open wheel positions"]:
+    if wheel_lines and wheel_lines != ["No open wheel positions"]:
         lines.append("WHEEL DESK")
         lines.extend(wheel_lines)
-    else:
-        lines.append("WHEEL DESK — no open positions")
         lines.append("")
+
+    # ── TIER 2 — MLPI + MAIN personal watchlist (Pushover only, never Discord)
+    tier2 = fetch_tier2_snapshot()
+    if tier2:
+        lines.append("TIER 2 — INCOME ENGINES")
+        for t2_ticker, t2 in tier2.items():
+            price       = t2.get("price", 0.0)
+            yield_pct   = t2.get("yield_pct", 0.0)
+            monthly_dist= t2.get("monthly_dist", 0.0)
+            dca_signal  = t2.get("dca_signal", "")
+            if price > 0:
+                lines.append(f"{t2_ticker}: ${price:.2f}  |  Yield: {yield_pct:.1f}%")
+                lines.append(f"┣ {dca_signal}")
+                lines.append(f"┗ Monthly dist: ~${monthly_dist:.3f}/share")
+            else:
+                lines.append(f"{t2_ticker}: price unavailable")
+            lines.append("")
 
     # ── DEPLOY vs IDLE — CPI opportunity cost
     bp = fetch_buying_power_snapshot()
