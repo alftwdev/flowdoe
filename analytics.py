@@ -3585,7 +3585,6 @@ class HighFidelityAnalyticsEngine:
         channel_lines = "".join(filter(None, [futures_line, ro_line, options_line, income_line]))
 
         payload = (
-            f"📣 **DAILY ACCURACY INDEX**\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**#market-analysis**  SPY: `${predicted:,.2f}` → `${actual:,.2f}` "
             f"| {spy_dir_predicted} → {spy_actual_dir} {ma_icon}\n"
@@ -3594,7 +3593,9 @@ class HighFidelityAnalyticsEngine:
             f"**Channel Accuracy Breakdown**\n"
             f"{channel_lines}"
             f"{crypto_line}"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Live signals + full morning brief → https://bit.ly/4Am3uCo\n"
+            f"*Not financial advice — for informational/educational use only.*"
         )
         return payload
 
