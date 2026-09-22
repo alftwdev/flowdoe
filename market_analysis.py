@@ -625,7 +625,7 @@ def _wheel_idle_str(db: EcosystemDatabase) -> str:
     except Exception:
         pass
     if not parts and not earnings_warns:
-        return "No screener data — run wheel_signals"
+        return "Idle · Filter: IVR >35% · IV−HV30 >5pp · no earnings ≤45d"
     ivr_str = " · ".join(parts) if parts else "—"
     warn_str = " | " + " ".join(earnings_warns) if earnings_warns else ""
     return f"IVR: {ivr_str}{warn_str}"
@@ -692,7 +692,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
                 if _qqq_up else ""
             )
             market_structure_section = (
-                "\n**OVERNIGHT MARKET STRUCTURE**\n"
+                "**OVERNIGHT MARKET STRUCTURE**\n"
                 f"┣ SPY: POC `${float(_spy_poc):,.2f}` | VAH `${float(_spy_vah):,.2f}` | VAL `${float(_spy_val):,.2f}`\n"
                 f"{'┣' if _qqq_up else '┗'} SPY range: `${float(_spy_lo):,.2f}` – `${float(_spy_up):,.2f}`\n"
                 + _qqq_line
@@ -766,7 +766,7 @@ def _build_morning_report(engine: HighFidelityAnalyticsEngine, db: EcosystemData
         pass
 
     macro_section = (
-        "**MACRO ENVIRONMENT**\n"
+        "\n**MACRO ENVIRONMENT**\n"
         f"┣ VIX: {vix_line}\n"
         f"┣ Yield Curve: {yc_line}\n"
         f"┣ {ff_line} | HY Spread: {hy_line}\n"

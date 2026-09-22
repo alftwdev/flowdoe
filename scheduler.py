@@ -1128,13 +1128,13 @@ def main():
                     hw_lines = []
                     for (hw_sym, hw_rsi) in high_watch:
                         rsi_part = f" | {hw_rsi}" if hw_rsi else ""
-                        hw_lines.append(f"┣ 🔴 **{hw_sym}** — HIGH social{rsi_part} | verify IV on chain before entering")
-                    payload_parts.append("\n**HIGH SOCIAL — IV unconfirmed** (check Tradier chain manually)\n" + "\n".join(hw_lines))
+                        hw_lines.append(f"┣ 🔴 **{hw_sym}**{rsi_part} | verify IV before entering")
+                    payload_parts.append("\n**HIGH SOCIAL — IV unconfirmed**\n" + "\n".join(hw_lines))
 
                 if watch_syms:
                     payload_parts.append(f"\n**ON WATCH** ({len(watch_syms)} names)\n┗ " + " · ".join(watch_syms))
 
-                payload_parts.append(f"\n┗ {directive} Stocks >$100 → spread shown.")
+                payload_parts.append(f"┗ {directive} Stocks >$100 → spread shown.")
                 candidates_payload = "\n".join(payload_parts)
 
                 if not (action_lines or high_watch or watch_syms):
@@ -2006,42 +2006,6 @@ def main():
                 except Exception as _oce:
                     logger.error(f"BTC on-chain pulse failed: {_oce}")
 
-                # ── Crypto Community Radar ─────────────────────────────────────
-                # r/CryptoCurrency, r/CryptoMarkets, r/Bitcoin, r/Ethereum,
-                # r/CryptoTechnology — surfaces tokens/projects mentioned ≥2×
-                # in posts with actual crypto analysis context (not news aggregation).
-                try:
-                    _crypto_radar = engine.fetch_crypto_community_intel()
-                    if _crypto_radar and WEBHOOK_CRYPTO:
-                        _bull_kw = {"bull", "moon", "pump", "breakout", "accumulate", "buy", "bullish", "long", "rise", "surge", "rally", "ath", "support", "hold", "hodl", "green"}
-                        _bear_kw = {"bear", "dump", "crash", "sell", "short", "fall", "drop", "bearish", "resistance", "fud", "red", "liquidat", "rekt", "down"}
-                        _cr_lines = []
-                        for item in _crypto_radar:
-                            sym      = item["ticker"]
-                            mentions = item["mentions"]
-                            _titles_text = " ".join(item.get("titles", [])).lower()
-                            _bull_hits = sum(1 for w in _bull_kw if w in _titles_text)
-                            _bear_hits = sum(1 for w in _bear_kw if w in _titles_text)
-                            if _bull_hits > _bear_hits:
-                                _sent_icon, _sent_label = "🟢", "Bullish"
-                            elif _bear_hits > _bull_hits:
-                                _sent_icon, _sent_label = "🔴", "Bearish"
-                            else:
-                                _sent_icon, _sent_label = "🟡", "Neutral"
-                            _cr_lines.append(f"┣ **{sym}** — `{mentions}` mentions · {_sent_icon} {_sent_label}")
-                        if _cr_lines:
-                            _cr_lines[-1] = _cr_lines[-1].replace("┣", "┗", 1)
-                            _cr_payload = "\n".join(_cr_lines)
-                            send_essentials_embed(
-                                WEBHOOK_CRYPTO,
-                                "CRYPTO SOCIAL BUZZ",
-                                _cr_payload, 0xf39c12
-                            )
-                            logger.info(f"Crypto community radar dispatched: {len(_crypto_radar)} tokens.")
-                    else:
-                        logger.info("Crypto community radar: no tokens with ≥2 mentions this scan.")
-                except Exception as _cre:
-                    logger.error(f"Crypto community radar failed: {_cre}")
 
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")
