@@ -65,35 +65,23 @@ PUSHOVER_USER    = os.getenv("PUSHOVER_USER_KEY")
 # Update if fund company publishes a materially different target distribution.
 # ─────────────────────────────────────────────────────────────────────────────
 DCA_TICKERS = {
-    "XSPI": {
-        "name":          "Innovator S&P 500 Power Buffer+Income",
-        "underlying":    "SPY",
-        "est_yield_pct": 12.0,   # Innovator Power Buffer CC overlay; updates with IV regime
-        "monthly":       True,
-    },
-    "XQQI": {
-        "name":          "Innovator Nasdaq 100 Power Buffer+Income",
-        "underlying":    "QQQ",
-        "est_yield_pct": 14.0,
-        "monthly":       True,
-    },
     "MLPI": {
-        "name":          "ETRACS Alerian MLP+CC ETN",
+        "name":          "NEOS MLP & Energy Infrastructure High Income ETF",
         "underlying":    "XLE",   # energy sector proxy — same trigger as scheduler mlpi_entry
-        "est_yield_pct": 15.0,
-        "monthly":       True,
-    },
-    "KQQQ": {
-        "name":          "Kurv Tech Titans CC ETF",
-        "underlying":    "QQQ",
-        "est_yield_pct": 15.0,
+        "est_yield_pct": 15.0,    # OTM CC on MLP/energy names; monthly distributions
         "monthly":       True,
     },
     "XBCI": {
-        "name":          "Innovator Bitcoin Buffer+Income",
+        "name":          "Innovator Bitcoin Buffer+Income ETF",
         "underlying":    "IBIT",  # BlackRock Bitcoin ETF — best liquid BTC proxy on TD
-        "est_yield_pct": 18.0,    # BTC IV is structurally higher than equity IV → higher CC premium
+        "est_yield_pct": 18.0,    # BTC IV structurally higher than equity IV → higher CC premium
         "monthly":       True,
+    },
+    "CHPY": {
+        "name":          "YieldMax Semiconductor Portfolio Option Income ETF",
+        "underlying":    "NVDA",  # dominant CHPY holding; semiconductor sector leader proxy
+        "est_yield_pct": 40.0,    # OTM call-spread on 15-30 semi names; weekly distributions
+        "monthly":       False,   # weekly pay — monthly income est. still used for margin paydown calc
     },
 }
 
@@ -485,7 +473,7 @@ def dispatch_eod_summary(vixy_z):
             "title":       "Tier 2 DCA — EOD Status",
             "description": body,
             "color":       0x2ecc71,
-            "footer":      {"text": f"XSPI · XQQI · MLPI · KQQQ | {today} | Not financial advice. Educational purposes only."},
+            "footer":      {"text": f"MLPI · XBCI · CHPY | {today} | Not financial advice. Educational purposes only."},
         }]
     }
     _send_discord(payload)
