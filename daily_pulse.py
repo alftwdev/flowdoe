@@ -425,6 +425,55 @@ def fetch_tier2_snapshot() -> dict:
     return results
 
 
+def format_tier2_message() -> str:
+    """
+    Formats Tier 2 (MLPI / XBCI / CHPY) as a standalone Pushover message.
+    Sent as a second push so it never competes with CLM/CRF for the 1024-char limit.
+    """
+    today = date.today().strftime("%b %d, %Y")
+    tier2 = fetch_tier2_snapshot()
+    if not tier2:
+        return ""
+    lines = []
+    for t2_ticker, t2 in tier2.items():
+        price          = t2.get("price", 0.0)
+        yield_pct      = t2.get("yield_pct", 0.0)
+        monthly_est    = t2.get("monthly_est", 0.0)
+        dca_signal     = t2.get("dca_signal", "")
+        underlying_rsi = t2.get("underlying_rsi")
+        drawdown_pct   = t2.get("drawdown_pct")
+        sector_signal  = t2.get("sector_signal")
+        verdict        = t2.get("verdict", "")
+        cfg            = TIER2_TICKERS.get(t2_ticker, {})
+        underlying     = cfg.get("underlying", "")
+        sector_tag     = cfg.get("sector_tag", "")
+        sector_thesis  = cfg.get("sector_thesis", "")
+        if price > 0:
+            lines.append(f"{t2_ticker}: ${price:.2f}  |  ~{yield_pct:.0f}%  |  Est. ~${monthly_est:.3f}/mo")
+            if underlying_rsi and drawdown_pct:
+                try:
+                    rsi_val   = float(underlying_rsi)
+                    draw_val  = float(drawdown_pct)
+                    rsi_flag  = " ⚡" if rsi_val < 30 else (" ✅" if rsi_val < 35 else "")
+                    draw_flag = " ⚡" if draw_val >= 8 else (" ✅" if draw_val >= 5 else "")
+                    lines.append(f"┣ {underlying} RSI: {rsi_val:.0f}{rsi_flag}  ·  {draw_val:.1f}% off 20d high{draw_flag}")
+                except Exception:
+                    pass
+            if sector_tag:
+                if sector_signal:
+                    lean, score = sector_signal
+                    lines.append(f"┣ {sector_tag} | {underlying}: {lean} ({score:+.0f}) · {sector_thesis}")
+                else:
+                    lines.append(f"┣ {sector_tag} · {sector_thesis}")
+            if verdict:
+                lines.append(f"┣ Verdict: {verdict}")
+            lines.append(f"┗ {dca_signal}")
+        else:
+            lines.append(f"{t2_ticker}: price unavailable")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STATE — run-date dedup
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,8 +503,7 @@ def format_pulse_message(cef, state, ro_status=None, ro_gate_info=None):
     today = date.today().strftime("%b %d, %Y")
     lines = []
 
-    # ── CORNERSTONE: CLM / CRF
-    lines.append("CORNERSTONE (CLM / CRF)")
+    # ── CORNERSTONE: CLM / CRF (no section header — title carries context)
     tickers_list = list(ro_status.keys()) if ro_status else ["CLM", "CRF"]
     for ticker in tickers_list:
         edgar_str   = ro_status.get(ticker, "⚪ unavailable") if ro_status else "⚪ unavailable"
@@ -495,49 +543,6 @@ def format_pulse_message(cef, state, ro_status=None, ro_gate_info=None):
         lines.append("WHEEL DESK")
         lines.extend(wheel_lines)
         lines.append("")
-
-    # ── TIER 2 — MLPI / XBCI / CHPY (Pushover only, never Discord)
-    tier2 = fetch_tier2_snapshot()
-    if tier2:
-        lines.append("——————————————")
-        lines.append("")
-        lines.append("TIER 2 — INCOME ENGINES")
-        for t2_ticker, t2 in tier2.items():
-            price          = t2.get("price", 0.0)
-            yield_pct      = t2.get("yield_pct", 0.0)
-            monthly_est    = t2.get("monthly_est", 0.0)
-            dca_signal     = t2.get("dca_signal", "")
-            underlying_rsi = t2.get("underlying_rsi")
-            drawdown_pct   = t2.get("drawdown_pct")
-            cfg = TIER2_TICKERS.get(t2_ticker, {})
-            underlying    = cfg.get("underlying", "")
-            sector_tag    = cfg.get("sector_tag", "")
-            sector_thesis = cfg.get("sector_thesis", "")
-            sector_signal = t2.get("sector_signal")   # (lean, score) or None
-            verdict       = t2.get("verdict", "")
-            if price > 0:
-                lines.append(f"{t2_ticker}: ${price:.2f}  |  ~{yield_pct:.0f}%  |  Est. ~${monthly_est:.3f}/mo")
-                if underlying_rsi and drawdown_pct:
-                    try:
-                        rsi_val  = float(underlying_rsi)
-                        draw_val = float(drawdown_pct)
-                        rsi_flag = " ⚡" if rsi_val < 30 else (" ✅" if rsi_val < 35 else "")
-                        draw_flag = " ⚡" if draw_val >= 8 else (" ✅" if draw_val >= 5 else "")
-                        lines.append(f"┣ {underlying} RSI: {rsi_val:.0f}{rsi_flag}  ·  {draw_val:.1f}% off 20d high{draw_flag}")
-                    except Exception:
-                        pass
-                if sector_tag:
-                    if sector_signal:
-                        lean, score = sector_signal
-                        lines.append(f"┣ {sector_tag} | {underlying}: {lean} ({score:+.0f}) · {sector_thesis}")
-                    else:
-                        lines.append(f"┣ {sector_tag} · {sector_thesis}")
-                if verdict:
-                    lines.append(f"┣ Verdict: {verdict}")
-                lines.append(f"┗ {dca_signal}")
-            else:
-                lines.append(f"{t2_ticker}: price unavailable")
-            lines.append("")
 
     # ── DEPLOY vs IDLE — CPI opportunity cost
     bp = fetch_buying_power_snapshot()
@@ -607,6 +612,12 @@ def run_daily_pulse(force=False):
 
     title, message = format_pulse_message(cef_data, state, ro_status, ro_gate_info=ro_gate_info)
     success = push_to_pushover(title, message, priority=0)
+
+    # Second push — Tier 2 (separate to avoid 1024-char Pushover limit)
+    t2_message = format_tier2_message()
+    if t2_message:
+        today_str_fmt = date.today().strftime("%b %d, %Y")
+        push_to_pushover(f"📊 Tier 2 — {today_str_fmt}", t2_message, priority=0)
 
     if success:
         state["last_run_date"] = today_str
