@@ -89,6 +89,12 @@ DCA_TICKERS = {
         "est_yield_pct": 15.0,
         "monthly":       True,
     },
+    "XBCI": {
+        "name":          "Innovator Bitcoin Buffer+Income",
+        "underlying":    "IBIT",  # BlackRock Bitcoin ETF — best liquid BTC proxy on TD
+        "est_yield_pct": 18.0,    # BTC IV is structurally higher than equity IV → higher CC premium
+        "monthly":       True,
+    },
 }
 
 # Unique underlying tickers to fetch
