@@ -16,6 +16,7 @@ Two modes, two scheduler entries in market_scheduler.py:
     Gate:      X_AUTO_POST_ENABLED=true in .env + Twitter credentials set
 
 Setup for auto-posting (do once):
+  X:
   1. Apply for Twitter Developer account at developer.twitter.com (free)
   2. Create app with Read+Write permissions → get 4 credentials
   3. Add to .env: X_AUTO_POST_ENABLED=true
@@ -24,7 +25,18 @@ Setup for auto-posting (do once):
                   TWITTER_ACCESS_TOKEN=...
                   TWITTER_ACCESS_TOKEN_SECRET=...
   4. pip install tweepy  (on PA: pip3.10 install tweepy)
-  5. Both scheduler entries run independently — draft Pushover still fires at 8 AM HST
+
+  Threads (fires alongside X in auto-post mode):
+  1. See threads_client.py module docstring for full one-time OAuth flow
+  2. Add to .env: THREADS_AUTO_POST_ENABLED=true
+                  THREADS_ACCESS_TOKEN=<long-lived token>
+                  THREADS_USER_ID=<your Threads numeric user ID>
+                  THREADS_APP_ID=<Meta app ID>
+                  THREADS_APP_SECRET=<Meta app secret>
+  3. Seed token expiry once: python3.10 threads_client.py --seed-expiry
+  4. Auto-refresh handles all subsequent renewals (60-day tokens, refreshed 7d before expiry)
+
+  Both scheduler entries run independently — draft Pushover still fires at 8 AM HST
 
 NOT a financial advisor. Educational content only.
 """
@@ -55,6 +67,10 @@ TWITTER_API_KEY             = os.getenv("TWITTER_API_KEY", "")
 TWITTER_API_SECRET          = os.getenv("TWITTER_API_SECRET", "")
 TWITTER_ACCESS_TOKEN        = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
+
+# ── Threads (Instagram) auto-post credentials ──────────────────────────────────
+# Fires alongside X in auto-post mode. See threads_client.py for one-time setup.
+THREADS_AUTO_POST_ENABLED = os.getenv("THREADS_AUTO_POST_ENABLED", "false").lower() == "true"
 
 db = EcosystemDatabase()
 
@@ -633,6 +649,27 @@ def post_thread_to_x(tweets: list[str], label: str = "") -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# THREADS CONTENT ADAPTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _adapt_for_threads(tweets: list[str]) -> list[str]:
+    """
+    Adapts X thread_tweets for Threads posting:
+    - Strips #FinTwit (X-specific tag, meaningless on Threads)
+    - Keeps content otherwise identical (all tweets are ≤280 chars, well within Threads 500)
+    """
+    adapted = []
+    for tweet in tweets:
+        text = tweet.replace("#FinTwit", "").strip()
+        while "  " in text:
+            text = text.replace("  ", " ")
+        while "\n\n\n" in text:
+            text = text.replace("\n\n\n", "\n\n")
+        adapted.append(text.strip())
+    return adapted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DEDUP  (separate keys for draft vs auto-post modes)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -698,12 +735,28 @@ def main():
                 t, b = build_weekday_notification(bait)
                 send_pushover(t, f"[X AUTO-POST NOT ENABLED — copy/paste manually]\n\n{b}", priority=-1)
         else:
-            logger.info("Auto-posting 3 threads to X (8:30 AM ET peak)...")
+            logger.info("Auto-posting 3 threads to X + Threads (8:30 AM ET peak)...")
+            try:
+                from threads_client import post_thread as _post_threads
+            except ImportError:
+                _post_threads = None
+
             for i, bait in enumerate(baits):
-                posted = post_thread_to_x(bait["thread_tweets"], label=bait["title"])
-                status = "✅ Posted to X" if posted else "❌ X post FAILED"
+                # ── X ──────────────────────────────────────────────────────
+                x_posted = post_thread_to_x(bait["thread_tweets"], label=bait["title"])
+                x_status = "✅ X" if x_posted else "❌ X FAILED"
+
+                # ── Threads ─────────────────────────────────────────────────
+                th_status = "⏸ Threads disabled"
+                if THREADS_AUTO_POST_ENABLED and _post_threads is not None:
+                    th_posts   = _adapt_for_threads(bait["thread_tweets"])
+                    th_posted  = _post_threads(th_posts, db=db, label=bait["title"])
+                    th_status  = "✅ Threads" if th_posted else "❌ Threads FAILED"
+                elif THREADS_AUTO_POST_ENABLED and _post_threads is None:
+                    th_status  = "❌ threads_client.py missing"
+
                 t, b = build_weekday_notification(bait)
-                send_pushover(t, f"{status}\n\n{b}", priority=-1)  # silent — user asleep
+                send_pushover(t, f"{x_status} · {th_status}\n\n{b}", priority=-1)  # silent
                 if i < len(baits) - 1:
                     logger.info("Waiting 5 min before next thread (natural cadence)...")
                     time.sleep(300)
