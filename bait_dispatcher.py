@@ -108,27 +108,27 @@ BAIT1_HOOKS = [
         "I held CLM through the 2025 Rights Offering.\n"
         "Watched it drop 12% over 6 weeks.\n"
         "I didn't know when the bottom was.\n\n"
-        "Here's the 4-phase RO anatomy every CLM/CRF holder needs to know:"
+        "The 4-phase RO anatomy 🧵"
     ),
     # Week B — newsjack / specific event
     (
         "CLM filed an N-2 with the SEC on Aug 14.\n"
         "Most holders found out when the price was already down 9%.\n\n"
-        "Rights Offerings are public filings. You can see them coming.\n"
-        "Here's exactly what to do:"
+        "Rights Offerings are public filings. You can see them coming.\n\n"
+        "The protocol 🧵"
     ),
     # Week C — against conventional wisdom
     (
         "Most CLM/CRF holders think the ex-dividend dip is the buy signal.\n"
         "It's not. It's the 4th catalyst. The real entry is earlier.\n\n"
-        "The 4-phase anatomy:"
+        "The 4-phase anatomy 🧵"
     ),
-    # Week D — specific number hook
+    # Week D — specific number hook (live data injected)
     (
         "RO Risk score: {ro_display}\n"
-        "CLM at ${clm_price:.2f} | CRF at ${crf_price:.2f}\n"
+        "CLM ${clm_price:.2f} | CRF ${crf_price:.2f}\n"
         "Premium: {clm_prem_label}\n\n"
-        "This is what a live N-2 signal looks like. Here's how to read it:"
+        "This is what a live N-2 signal looks like 🧵"
     ),
 ]
 
@@ -137,28 +137,28 @@ BAIT2_HOOKS = [
     (
         "I ran the wheel strategy for 6 months.\n"
         "Net premium collected: basically zero.\n\n"
-        "Here's the one filter I was skipping — and why it's the only one that matters:"
+        "The one filter I was skipping 🧵"
     ),
     # Week B — specific stat
     (
-        "5-year backtest of the wheel WITHOUT the VRP filter: ~1% CAGR.\n"
-        "WITH the filter: 8-12%. Same stocks. Same DTE.\n\n"
-        "The 3-filter screen:"
+        "5-year wheel backtest WITHOUT the VRP filter: ~1% CAGR.\n"
+        "WITH it: 8-12%. Same stocks. Same DTE.\n\n"
+        "3 filters. 60 seconds 🧵"
     ),
     # Week C — against convention
     (
         "Most options traders screen for high IVR.\n"
         "That's the wrong starting point.\n\n"
         "IVR tells you IV is elevated vs its own history.\n"
-        "It doesn't tell you if the premium is real or a historical relic.\n"
-        "Here's the 3-filter stack:"
+        "It doesn't tell you if the premium is real or a historical relic.\n\n"
+        "The 3-filter stack 🧵"
     ),
-    # Week D — specific question
+    # Week D — specific scenario
     (
         "You see a CSP setup with 45% IVR. Looks great.\n"
         "Then the IV crush hits before you even get to expiry.\n\n"
-        "IV vs HV30 was flat. That was the tell.\n"
-        "The 3-filter check list:"
+        "IV vs HV30 was flat. That was the tell.\n\n"
+        "The 3-filter checklist 🧵"
     ),
 ]
 
@@ -168,28 +168,28 @@ BAIT3_HOOKS = [
         "I used to spend 45 minutes every morning across Bloomberg, CBOE, Finviz, and Twitter.\n"
         "Now I check 5 numbers. Takes 60 seconds.\n\n"
         "Today's read: {bias_label}\n\n"
-        "Here's the exact stack:"
+        "The stack 🧵"
     ),
     # Week B — specific level + actionable thresholds
     (
         "VIX above 20: stay defensive.\n"
         "VIX above 25 in backwardation: get your puts on.\n"
         "VIX drops back below 1.0 term ratio: that's the LEAP CALL entry window.\n\n"
-        "5-signal morning posture (today: {bias_label}):"
+        "5-signal morning posture — today: {bias_label} 🧵"
     ),
     # Week C — relatable failure (missed entry due to no system)
     (
         "The worst setups I've taken came from skipping the morning posture.\n"
         "Entered bullish when the regime was already flipping.\n\n"
         "5 numbers. 60 seconds. Today reads {bias_label}.\n\n"
-        "Here's the stack:"
+        "The stack 🧵"
     ),
-    # Week D — most people don't have this (scarcity + data-first)
+    # Week D — scarcity + live data
     (
         "Most retail analysis takes 45 minutes and still leaves you guessing.\n\n"
         "5 signals. 60 seconds. {bias_label}.\n"
         "TQQQ cycle score: {tqqq_score}/100.\n\n"
-        "Here's the exact stack:"
+        "The stack 🧵"
     ),
 ]
 
@@ -243,7 +243,7 @@ BAIT3_CTA_ENGAGEMENT = 'Reply "SIGNAL" ↓ and I\'ll DM you this morning\'s post
 
 GUMROAD_LINK = "https://bit.ly/4Am3uCo"
 
-BAIT1_CTA_DIRECT = f"Live RO signal + entry alerts → {GUMROAD_LINK}\nFree tier (no card) → {GUMROAD_LINK}"
+BAIT1_CTA_DIRECT = f"Live RO signal + entry alerts → {GUMROAD_LINK}\nFree tier included — no card needed."
 BAIT2_CTA_DIRECT = f"Live screener + which tickers pass today → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
 BAIT3_CTA_DIRECT = f"Full morning brief + TQQQ cycle score → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
 
@@ -564,12 +564,20 @@ def post_free_data_embed(data: dict) -> bool:
     clm_prem = f"{data['clm_prem_pct']:+.1f}%" if data["clm_price"] > 0 else "—"
     crf_prem = f"{data['crf_prem_pct']:+.1f}%" if data["crf_price"] > 0 else "—"
 
+    CLM_FAIR_VALUE = 7.67  # 2026 confirmed (annual_dist / 0.19)
+    CRF_FAIR_VALUE = 7.43
+
     if data["ro_active"]:
-        signal_line = "🚨 N-2 Filed (Aug 14) — active RO cycle"
-        outcome_note = "CLM: $7.35 → now $6.58 (–10.5% since signal fired). Subscribers were alerted the same day."
+        signal_line = "🚨 Active RO — N-2 filed, monitoring daily"
+        clm_vs_fv = ((data["clm_price"] / CLM_FAIR_VALUE) - 1) * 100 if data["clm_price"] > 0 else 0
+        outcome_note = (
+            f"CLM at ${data['clm_price']:.2f} ({clm_vs_fv:+.1f}% vs fair value ${CLM_FAIR_VALUE:.2f}). "
+            f"Subscribers tracking live entry zones."
+        )
     else:
         signal_line = "📡 Monitoring — no active RO signal"
-        outcome_note = "No active RO. Daily signal check confirmed clean."
+        prem_str = f"{data['clm_prem_pct']:+.1f}%" if data["clm_price"] > 0 else "—"
+        outcome_note = f"CLM premium {prem_str} vs NAV. Daily signal check: clean."
 
     embed_desc = (
         f"*What subscribers received yesterday — delayed 48h for free tier.*\n\n"
@@ -655,12 +663,21 @@ def post_thread_to_x(tweets: list[str], label: str = "") -> bool:
 def _adapt_for_threads(tweets: list[str]) -> list[str]:
     """
     Adapts X thread_tweets for Threads posting:
-    - Strips #FinTwit (X-specific tag, meaningless on Threads)
-    - Keeps content otherwise identical (all tweets are ≤280 chars, well within Threads 500)
+    - Strips lines that are exclusively hashtags (Meta confirmed hashtags don't boost
+      organic reach on Threads — they clutter the CTA without SEO benefit)
+    - Keeps all substantive content identical (≤280 chars, within Threads 500-char limit)
     """
     adapted = []
     for tweet in tweets:
-        text = tweet.replace("#FinTwit", "").strip()
+        lines = tweet.split("\n")
+        cleaned = []
+        for line in lines:
+            words = line.strip().split()
+            # Drop lines where every word is a hashtag
+            if words and all(w.startswith("#") for w in words):
+                continue
+            cleaned.append(line)
+        text = "\n".join(cleaned).strip()
         while "  " in text:
             text = text.replace("  ", " ")
         while "\n\n\n" in text:
