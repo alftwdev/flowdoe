@@ -664,6 +664,16 @@ Sept 15 (Day 32):        Ex-dividend day. CLM –$0.1215 | CRF –$0.1176 (mecha
                            (macro drag, not CEF-specific). Partial recovery, not full reversal.
                          RESERVE: 2/3 of DCA capital held for N-2/A (~Oct 1-2) and
                            record date (~Oct 13-16) catalysts.
+Sept 25 (Day 42):        CLM $6.38 | CRF $6.15 — recovering from post-ex-div lows
+                         CONFIRMED 52w lows (Yahoo Finance): CLM $6.23 | CRF $6.05
+                           — dip ran deeper into Tier 4 territory post Sept 15 before recovery
+                         EDGAR verified: NO N-2/A filed yet for CLM or CRF as of Sept 25
+                         Next ex-dividend CONFIRMED: Oct 15, 2026 — CLM $0.122/share (announced)
+                           → Oct 15 ex-div coincides with estimated RO record date window (Oct 13-16)
+                           → DOUBLE catalyst in same week: record date selling + mechanical ex-div drop
+                         Both still BELOW sub price (CLM $6.38 < $6.56 est. | CRF $6.15 < $6.37 est.)
+                         Both generating ~23% yield at current prices (above 19% FV threshold)
+                         RESERVE PLAN (unchanged): 2/3 still held — deploy at N-2/A + Oct 15 window
 N-2/A expected:          ~Oct 1-2, 2026 (46-47 day historical gap from Aug 14 N-2)
                          → Finalizes sub price; press release follows 2 days later
                          → NEXT PRIMARY CATALYST: watch for 1-3 day selling pressure
@@ -747,8 +757,15 @@ The 2026 cycle is front-loaded — premium collapsed at announcement, not gradua
 - Sept 16: Continued dip the day AFTER ex-div — CLM/CRF drifted lower again. Added to
   position. Confirms pattern: ex-div day + 1-2 days is an extended accumulation window,
   not a single-session spike. Income buyers re-enter gradually, not all at once.
-- Oct 1-2 (est.): N-2/A watch — add Tranche 2 if price flushes
-- Oct 13-16 (est.): Record date watch — add Tranche 3 (historically the low)
+  Post-ex-div lows confirmed: CLM $6.23 | CRF $6.05 (52w lows per Yahoo Finance Sept 25).
+- Sept 25: Prices recovering to CLM $6.38 / CRF $6.15. Do NOT chase — N-2/A is ~6 days away.
+  Hold 2/3 reserve for the two remaining catalysts.
+- Oct 1-2 (est.): N-2/A filing — DEPLOY Tranche 2 if CLM dips $6.20–$6.35 / CRF $5.90–$6.10
+- Oct 15 (confirmed): Ex-dividend ($0.122 CLM announced) + estimated RO record date
+  → DOUBLE catalyst window — DEPLOY Tranche 3 here regardless of price level
+  → Historically the cycle low in 2022 and 2025; doubly important with ex-div coinciding
+- Oct 16+: If neither catalyst creates a dip below today's levels, begin deploying remaining
+  reserve gradually — RO overhang clears at expiration (~Nov 7-10), premium recovery follows
 
 *Update TBD fields after 424B3 filing and post-expiration settlement.*
 
