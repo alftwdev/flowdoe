@@ -42,6 +42,7 @@ NOT a financial advisor. Educational content only.
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -108,27 +109,27 @@ BAIT1_HOOKS = [
         "I held CLM through the 2025 Rights Offering.\n"
         "Watched it drop 12% over 6 weeks.\n"
         "I didn't know when the bottom was.\n\n"
-        "The 4-phase RO anatomy 🧵"
+        "The 4-phase RO anatomy:"
     ),
     # Week B — newsjack / specific event
     (
         "CLM filed an N-2 with the SEC on Aug 14.\n"
         "Most holders found out when the price was already down 9%.\n\n"
         "Rights Offerings are public filings. You can see them coming.\n\n"
-        "The protocol 🧵"
+        "The protocol:"
     ),
     # Week C — against conventional wisdom
     (
         "Most CLM/CRF holders think the ex-dividend dip is the buy signal.\n"
         "It's not. It's the 4th catalyst. The real entry is earlier.\n\n"
-        "The 4-phase anatomy 🧵"
+        "The 4-phase anatomy:"
     ),
     # Week D — specific number hook (live data injected)
     (
         "RO Risk score: {ro_display}\n"
         "CLM ${clm_price:.2f} | CRF ${crf_price:.2f}\n"
         "Premium: {clm_prem_label}\n\n"
-        "This is what a live N-2 signal looks like 🧵"
+        "This is what a live N-2 signal looks like:"
     ),
 ]
 
@@ -137,13 +138,13 @@ BAIT2_HOOKS = [
     (
         "I ran the wheel strategy for 6 months.\n"
         "Net premium collected: basically zero.\n\n"
-        "The one filter I was skipping 🧵"
+        "The one filter I was skipping:"
     ),
     # Week B — specific stat
     (
         "5-year wheel backtest WITHOUT the VRP filter: ~1% CAGR.\n"
         "WITH it: 8-12%. Same stocks. Same DTE.\n\n"
-        "3 filters. 60 seconds 🧵"
+        "3 filters. 60 seconds:"
     ),
     # Week C — against convention
     (
@@ -151,14 +152,14 @@ BAIT2_HOOKS = [
         "That's the wrong starting point.\n\n"
         "IVR tells you IV is elevated vs its own history.\n"
         "It doesn't tell you if the premium is real or a historical relic.\n\n"
-        "The 3-filter stack 🧵"
+        "The 3-filter stack:"
     ),
     # Week D — specific scenario
     (
         "You see a CSP setup with 45% IVR. Looks great.\n"
         "Then the IV crush hits before you even get to expiry.\n\n"
         "IV vs HV30 was flat. That was the tell.\n\n"
-        "The 3-filter checklist 🧵"
+        "The 3-filter checklist:"
     ),
 ]
 
@@ -168,28 +169,28 @@ BAIT3_HOOKS = [
         "I used to spend 45 minutes every morning across Bloomberg, CBOE, Finviz, and Twitter.\n"
         "Now I check 5 numbers. Takes 60 seconds.\n\n"
         "Today's read: {bias_label}\n\n"
-        "The stack 🧵"
+        "The stack:"
     ),
     # Week B — specific level + actionable thresholds
     (
         "VIX above 20: stay defensive.\n"
         "VIX above 25 in backwardation: get your puts on.\n"
         "VIX drops back below 1.0 term ratio: that's the LEAP CALL entry window.\n\n"
-        "5-signal morning posture — today: {bias_label} 🧵"
+        "5-signal morning posture — today: {bias_label}"
     ),
     # Week C — relatable failure (missed entry due to no system)
     (
         "The worst setups I've taken came from skipping the morning posture.\n"
         "Entered bullish when the regime was already flipping.\n\n"
         "5 numbers. 60 seconds. Today reads {bias_label}.\n\n"
-        "The stack 🧵"
+        "The stack:"
     ),
     # Week D — scarcity + live data
     (
         "Most retail analysis takes 45 minutes and still leaves you guessing.\n\n"
         "5 signals. 60 seconds. {bias_label}.\n"
         "TQQQ cycle score: {tqqq_score}/100.\n\n"
-        "The stack 🧵"
+        "The stack:"
     ),
 ]
 
@@ -198,36 +199,40 @@ BAIT3_HOOKS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 BAIT1_FRAMEWORK = """\
-🔴 ① N-2 Filed → LARGEST drop of the entire cycle. Institutions exit immediately. Price compresses from premium high → historical low within days.
+Phase 1 — N-2 Filed
+Largest drop of the entire cycle. Institutions exit immediately. Price compresses from premium high to historical low within days.
 
-🟠 ② N-2/A (~47 days later) → Second wave. Confirms exact sub price. Another 1-3 day flush.
+Phase 2 — N-2/A (approx. 47 days later)
+Second wave. Confirms exact sub price. Another 1-3 day flush.
 
-🟡 ③ Record Date (~day 59) → Historically the cycle LOW. Open-market buyers who got in BELOW sub price beat RO participants.
+Phase 3 — Record Date (approx. day 59)
+Historically the cycle low. Open-market buyers who got in BELOW sub price beat RO participants.
 
-🟢 ④ Ex-Dividend → Mechanical only. Creates 1-3 day accumulation window. Not a seller event.
+Phase 4 — Ex-Dividend
+Mechanical only. Creates 1-3 day accumulation window. Not a seller event.
 
-Most retail holders panic at ① and miss the optimal entry at ③."""
+Most retail holders panic at Phase 1 and miss the optimal entry at Phase 3."""
 
 BAIT2_FRAMEWORK = """\
-✅ Filter 1: IVR > 35%
+Filter 1: IVR above 35%
 IV is elevated vs its own 52-week history. The premium edge exists in the market.
 
-✅ Filter 2: IV − HV30 ≥ 5 volatility points
-IV must EXCEED realized volatility by at least 5pp. If IV just caught up to a past spike that already normalized → the edge is gone.
+Filter 2: IV minus HV30 at least 5 volatility points
+IV must EXCEED realized volatility by 5pp. If IV just caught up to a past spike that already normalized, the edge is gone.
 
-✅ Filter 3: No earnings within 45 days
+Filter 3: No earnings within 45 days
 IV crush after a report destroys the premium edge. Earnings = forced close or max-loss risk.
 
 Skip Filter 2 and you're selling into a past volatility event. That's the most common wheel mistake."""
 
 BAIT3_FRAMEWORK = """\
-① VIX level — below 20 = calm / above 25 = fear
-② VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike
-③ HY Credit Spread — FRED live; > 4.5% = credit stress bleeding into equity risk
-④ SPY vs SMA200 — above = bull regime / below = bear regime
-⑤ Fear & Greed Index — < 25 = extreme fear = TQQQ CALL territory
+1. VIX level — below 20 = calm / above 25 = fear
+2. VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike
+3. HY Credit Spread — FRED live; above 4.5% = credit stress bleeding into equity risk
+4. SPY vs SMA200 — above = bull regime / below = bear regime
+5. Fear and Greed Index — below 25 = extreme fear = TQQQ CALL territory
 
-All 5 → one verdict: BULLISH / NEUTRAL / BEARISH.
+All 5 lead to one verdict: BULLISH / NEUTRAL / BEARISH.
 Takes 60 seconds once you have the stack. Most people don't have the stack."""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,8 +249,8 @@ BAIT3_CTA_ENGAGEMENT = 'Reply "SIGNAL" ↓ and I\'ll DM you this morning\'s post
 GUMROAD_LINK = "https://bit.ly/4Am3uCo"
 
 BAIT1_CTA_DIRECT = f"Live RO signal + entry alerts → {GUMROAD_LINK}\nFree tier included — no card needed."
-BAIT2_CTA_DIRECT = f"Live screener + which tickers pass today → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
-BAIT3_CTA_DIRECT = f"Full morning brief + TQQQ cycle score → {GUMROAD_LINK}\nFree tier → {GUMROAD_LINK}"
+BAIT2_CTA_DIRECT = f"Live screener + which tickers pass today → {GUMROAD_LINK}\nFree tier included — no card needed."
+BAIT3_CTA_DIRECT = f"Full morning brief + TQQQ cycle score → {GUMROAD_LINK}\nFree tier included — no card needed."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HASHTAGS  (5 max per post — #FinTwit always included)
@@ -295,11 +300,11 @@ def pull_market_data() -> dict:
 
     # Premium label for CLM
     if clm_z >= 1.5:
-        clm_prem_label = f"+{clm_z:.1f}σ (elevated)"
+        clm_prem_label = f"elevated (+{clm_z:.1f} above avg)"
     elif clm_z <= -0.5:
-        clm_prem_label = f"{clm_z:+.1f}σ (discount/near-NAV)"
+        clm_prem_label = f"near-NAV ({clm_z:+.1f} below avg)"
     else:
-        clm_prem_label = f"{clm_z:+.1f}σ (normal range)"
+        clm_prem_label = f"normal range ({clm_z:+.1f} vs avg)"
 
     # RO display string
     if ro_clm:
@@ -348,28 +353,28 @@ def format_bait1(data: dict) -> dict:
     # 4-tweet thread for X auto-posting (each tweet ≤ 280 chars)
     if USE_ENGAGEMENT_CTA:
         cta_tweet = (
-            f"Most retail holders panic at ① and miss the real entry at ③.\n\n"
+            f"Most retail holders panic at Phase 1 and miss the real entry at Phase 3.\n\n"
             f"{BAIT1_CTA_ENGAGEMENT}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
     else:
         cta_tweet = (
-            f"Most retail holders panic at ① and miss the real entry at ③.\n\n"
-            f"Live RO signal + entry alerts 👇\n{GUMROAD_LINK}\n\n"
+            f"Most retail holders panic at Phase 1 and miss the real entry at Phase 3.\n\n"
+            f"Live RO signal + entry alerts:\n{GUMROAD_LINK}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
     thread_tweets = [
         hook,
         (
-            "🔴 ① N-2 Filed → LARGEST drop of the entire cycle.\n"
-            "Institutions exit immediately. Price compresses from premium high → historical low within days.\n\n"
-            "🟠 ② N-2/A (~47 days later) → Second wave.\n"
+            "Phase 1 — N-2 Filed: Largest drop of the entire cycle.\n"
+            "Institutions exit immediately. Price compresses from premium high to historical low within days.\n\n"
+            "Phase 2 — N-2/A (approx. 47 days later): Second wave.\n"
             "Confirms exact sub price. Another 1-3 day flush."
         ),
         (
-            "🟡 ③ Record Date (~day 59) → Historically the cycle LOW.\n"
+            "Phase 3 — Record Date (approx. day 59): Historically the cycle low.\n"
             "Open-market buyers who got in BELOW sub price beat RO participants.\n\n"
-            "🟢 ④ Ex-Dividend → Mechanical only.\n"
+            "Phase 4 — Ex-Dividend: Mechanical only.\n"
             "Creates 1-3 day accumulation window. Not a seller event."
         ),
         cta_tweet,
@@ -402,17 +407,17 @@ def format_bait2(data: dict) -> dict:
     if USE_ENGAGEMENT_CTA:
         cta_tweet = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
     else:
-        cta_tweet = f"Live screener + which tickers pass today 👇\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
+        cta_tweet = f"Live screener + which tickers pass today:\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
     thread_tweets = [
         hook,
         (
-            "✅ Filter 1: IVR > 35%\n"
+            "Filter 1: IVR above 35%\n"
             "IV is elevated vs its own 52-week history. The premium edge exists in the market.\n\n"
-            "✅ Filter 2: IV − HV30 ≥ 5 volatility points\n"
-            "IV must EXCEED realized vol by 5pp. If IV caught up to a past spike that normalized → edge is gone."
+            "Filter 2: IV minus HV30 at least 5 volatility points\n"
+            "IV must EXCEED realized vol by 5pp. If IV caught up to a past spike that normalized, the edge is gone."
         ),
         (
-            "✅ Filter 3: No earnings within 45 days\n"
+            "Filter 3: No earnings within 45 days\n"
             "IV crush after a report destroys the premium edge. Earnings = forced close or max-loss risk.\n\n"
             "Skip Filter 2 and you're selling into a past volatility event. Most common wheel mistake."
         ),
@@ -449,22 +454,22 @@ def format_bait3(data: dict) -> dict:
         cta_tweet = f"{BAIT3_CTA_ENGAGEMENT}\n\n{BAIT3_HASHTAGS}"
     else:
         cta_tweet = (
-            f"Full 12-signal brief + live TQQQ score ({tqqq_score}/100) 🔒\n"
+            f"Full 12-signal brief + live TQQQ score ({tqqq_score}/100) — subscribers only.\n"
             f"Subscribers see all 5 readings + today's entry threshold.\n"
-            f"Free tier → {GUMROAD_LINK}\n\n"
+            f"Free tier: {GUMROAD_LINK}\n\n"
             f"{BAIT3_HASHTAGS}"
         )
     thread_tweets = [
         hook,
         (
-            "① VIX level — below 20 = calm / above 25 = fear\n"
-            "② VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike\n"
-            "③ HY Credit Spread — FRED live; > 4.5% = credit stress bleeding into equity risk"
+            "1. VIX level — below 20 = calm / above 25 = fear\n"
+            "2. VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike\n"
+            "3. HY Credit Spread — FRED live; above 4.5% = credit stress bleeding into equity risk"
         ),
         (
-            "④ SPY vs SMA200 — above = bull regime / below = bear regime\n"
-            "⑤ Fear & Greed Index — < 25 = extreme fear = TQQQ CALL territory\n\n"
-            "All 5 → one verdict: BULLISH / NEUTRAL / BEARISH.\n"
+            "4. SPY vs SMA200 — above = bull regime / below = bear regime\n"
+            "5. Fear and Greed Index — below 25 = extreme fear = TQQQ CALL territory\n\n"
+            "All 5 lead to one verdict: BULLISH / NEUTRAL / BEARISH.\n"
             "Takes 60 seconds once you have the stack. Most people don't have the stack."
         ),
         cta_tweet,
@@ -660,12 +665,25 @@ def post_thread_to_x(tweets: list[str], label: str = "") -> bool:
 # THREADS CONTENT ADAPTER
 # ─────────────────────────────────────────────────────────────────────────────
 
+_EMOJI_RE = re.compile(
+    "[\U00010000-\U0010ffff"   # supplementary multilingual plane (most emojis)
+    "\U0001F300-\U0001F9FF"   # misc symbols, emoticons, transport
+    "\U00002600-\U000027BF"   # misc symbols (sun, moon, etc.)
+    "\U0000FE00-\U0000FE0F"   # variation selectors
+    "\U000024C2-\U0001F251"   # enclosed chars
+    "]+",
+    flags=re.UNICODE,
+)
+
+
 def _adapt_for_threads(tweets: list[str]) -> list[str]:
     """
     Adapts X thread_tweets for Threads posting:
     - Strips lines that are exclusively hashtags (Meta confirmed hashtags don't boost
       organic reach on Threads — they clutter the CTA without SEO benefit)
-    - Keeps all substantive content identical (≤280 chars, within Threads 500-char limit)
+    - Strips any remaining emoji characters as a safety net (Threads API is strict
+      about certain Unicode code points in some content categories)
+    - Keeps all substantive content identical (within Threads 500-char limit)
     """
     adapted = []
     for tweet in tweets:
@@ -676,6 +694,8 @@ def _adapt_for_threads(tweets: list[str]) -> list[str]:
             # Drop lines where every word is a hashtag
             if words and all(w.startswith("#") for w in words):
                 continue
+            # Strip any stray emoji characters
+            line = _EMOJI_RE.sub("", line).strip()
             cleaned.append(line)
         text = "\n".join(cleaned).strip()
         while "  " in text:
