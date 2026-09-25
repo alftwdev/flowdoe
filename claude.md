@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 17 2026 — Discord restructured: #announcements renamed #free-data (public bait, T-48h delayed), new #announcements channel added (manual subscriber-only ops). Content marketing strategy initiated: 3 bait templates for X, Pushover daily dispatch added to scripts-to-build. One traffic source chosen: X (#FinTwit, reply-first strategy). bit.ly tracking setup for Gumroad funnel.*
+*Last updated: Sept 24 2026 — bait_dispatcher.py + threads_client.py live: auto-posts 3 bait threads to X and Threads daily at 12:30 PM HST. Three Threads API debug rounds resolved: (1) token needed threads_content_publish scope, (2) POST body vs query string, (3) container status must reach FINISHED before publish. All content cleaned of emojis/special chars for Threads compatibility. X posting confirmed working 2026-09-25.*
 
 ---
 
@@ -1587,7 +1587,9 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `xdca.py` | ✅ Live | Tier 2 Income ETF near-bottom DCA scanner. Always-on 10-min RTH loop. Monitors XSPI, XQQI, MLPI, KQQQ for zone-based DCA signals. Zone A/B silent (DB only). Zone C/D = "BUYING OPPORTUNITY" → #dividend-ccetfs + Pushover (D only). Underlying proxies: XSPI→SPY, XQQI→QQQ, KQQQ→QQQ, MLPI→XLE. See xdca_design_notes.md for Option 2 (buffer reset date enhancement). |
 | `xdca_design_notes.md` | ✅ Live | Design notes for xdca.py. Documents Option 2 (Innovator quarterly buffer reset date seeding for XSPI/XQQI), NAV erosion hardening rationale, and future enhancements. Option 2 DB key memo also stored in DB as `xdca_option2_note`. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
-| `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY + SENTISENSE_API_KEY. |
+| `bait_dispatcher.py` | ✅ Live | Content marketing engine. AUTO-POST mode (12:30 HST, `bait_last_sent_autopost_{date}` dedup): posts 3 bait threads (4 tweets each) to X + Threads. DRAFT mode (18:00 UTC, `bait_last_sent_draft_{date}` dedup): Pushover-only with X-ready drafts. Pulls live CLM/CRF z-score + market bias from DB. USE_ENGAGEMENT_CTA flag: flip True when Tweet Hunter auto-DM is live. |
+| `threads_client.py` | ✅ Live | Meta Threads API client. Two-step post: create container → poll FINISHED → publish. Auto-refreshes 60-day token from DB (key: `threads_access_token_live`). Env: THREADS_ACCESS_TOKEN, THREADS_USER_ID, THREADS_APP_ID, THREADS_APP_SECRET, THREADS_AUTO_POST_ENABLED. Setup: `python3.10 threads_client.py --seed-expiry` after new token. |
+| `.env` | ✅ Live | All API keys + webhooks (never committed). Includes FRED_API_KEY + SENTISENSE_API_KEY + THREADS_* keys. |
 
 ---
 
@@ -1886,7 +1888,7 @@ PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scor
 - [ ] Wheel position entry still manual-only (`scheduler.py --mode wheel_position`) — no brokerage API
 
 ### Monetization
-- [x] `bait_dispatcher.py` — Pushover bait dispatch + #free-data Discord embed (built Sept 18 2026). 3 weekday Pushover notifications (one per bait, each with X-ready draft + hashtags); 1 consolidated weekend/holiday Pushover. Pulls live CLM/CRF price/NAV/z-score + market bias from DB. Rotating 4-week hook variants. Dedup via `bait_last_sent_{date}`. PA cron: `0 18 * * *` (8:00 AM HST). USE_ENGAGEMENT_CTA flag: flip True when Tweet Hunter auto-DM is live.
+- [x] `bait_dispatcher.py` + `threads_client.py` — Full auto-post pipeline live (Sept 24 2026). AUTO-POST mode: 12:30 HST daily, posts all 3 bait threads (4 tweets each = 12 tweets) to X (alftw_) AND Threads reply chains. DRAFT mode: 18:00 UTC, Pushover-only drafts. X confirmed working 2026-09-25. Threads confirmed working 2026-09-25 after 3 debug rounds (scope, POST body, container poll). Content stripped of emojis/special chars for Threads compatibility. Pulls live CLM/CRF z-score + market bias from DB. Dedup keys: `bait_last_sent_autopost_{date}` + `bait_last_sent_draft_{date}`. PA cron: AUTO-POST `30 22 * * *` UTC (12:30 HST) | DRAFT `0 18 * * *` UTC (8:00 HST). USE_ENGAGEMENT_CTA flag: flip True when Tweet Hunter auto-DM is live.
 - [ ] Accuracy scorecard backend — log predictions, grade outcomes, publish to #free-data (delayed)
 - [ ] Subscriber tier gating — lock premium channels, route free tier to #free-data only
 - [ ] bit.ly links created (cfx-ro, cfx-wheel, cfx-morning) → all point to Gumroad product page
