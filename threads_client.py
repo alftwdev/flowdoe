@@ -175,6 +175,34 @@ def _create_container(text: str, token: str, reply_to_id: str = None) -> str | N
         return None
 
 
+def _wait_for_container(container_id: str, token: str, max_secs: int = 60) -> bool:
+    """Poll container status until FINISHED before publishing. Text posts are usually ready in <5s."""
+    url    = f"{THREADS_API_BASE}/{container_id}"
+    waited = 0
+    while waited < max_secs:
+        try:
+            r = requests.get(
+                url,
+                params={"fields": "status,error_message", "access_token": token},
+                timeout=10,
+            )
+            if r.ok:
+                data   = r.json()
+                status = data.get("status", "")
+                if status == "FINISHED":
+                    return True
+                if status == "ERROR":
+                    logger.error(f"Container {container_id} errored: {data.get('error_message')}")
+                    return False
+                logger.info(f"Container {container_id} status={status} — waiting 3s...")
+        except Exception as e:
+            logger.warning(f"Container status check failed: {e}")
+        time.sleep(3)
+        waited += 3
+    logger.error(f"Container {container_id} not FINISHED after {max_secs}s")
+    return False
+
+
 def _publish_container(container_id: str, token: str) -> str | None:
     """Publishes a container. Returns published post ID or None."""
     user_id = THREADS_USER_ID
@@ -216,6 +244,9 @@ def post_thread(posts: list[str], db=None, label: str = "") -> bool:
         container_id = _create_container(text, token, reply_to_id=prev_id)
         if not container_id:
             logger.error(f"Threads post {i+1}/{len(posts)} — container failed{tag}")
+            return False
+        if not _wait_for_container(container_id, token):
+            logger.error(f"Threads post {i+1}/{len(posts)} — container not ready{tag}")
             return False
         post_id = _publish_container(container_id, token)
         if not post_id:
