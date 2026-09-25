@@ -161,11 +161,15 @@ def _create_container(text: str, token: str, reply_to_id: str = None) -> str | N
     try:
         r = requests.post(
             f"{THREADS_API_BASE}/{user_id}/threads",
-            params=params,
+            data=params,   # POST body, not query string — matches Meta curl docs
             timeout=15,
         )
+        if not r.ok:
+            logger.error(f"Threads container error {r.status_code}: {r.text}")
         r.raise_for_status()
         return r.json().get("id")
+    except requests.HTTPError:
+        return None
     except Exception as e:
         logger.error(f"Threads container creation failed: {e}")
         return None
@@ -177,11 +181,15 @@ def _publish_container(container_id: str, token: str) -> str | None:
     try:
         r = requests.post(
             f"{THREADS_API_BASE}/{user_id}/threads_publish",
-            params={"creation_id": container_id, "access_token": token},
+            data={"creation_id": container_id, "access_token": token},
             timeout=15,
         )
+        if not r.ok:
+            logger.error(f"Threads publish error {r.status_code}: {r.text}")
         r.raise_for_status()
         return r.json().get("id")
+    except requests.HTTPError:
+        return None
     except Exception as e:
         logger.error(f"Threads publish failed: {e}")
         return None
