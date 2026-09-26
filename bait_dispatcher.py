@@ -563,18 +563,14 @@ def pull_market_data() -> dict:
 # FORMAT BAITS  (returns dict with title, hook, framework, cta, hashtags, x_draft)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _week_variant() -> int:
-    """Returns 0-3 based on ISO week number, cycles every 4 weeks."""
-    return (date.today().isocalendar()[1]) % 4
-
-
 def format_bait1(data: dict) -> dict:
-    variant = _week_variant()
-    hook_template = BAIT1_HOOKS[variant]
+    hook_template = BAIT1_HOOKS[_daily_variant(len(BAIT1_HOOKS))]
     hook = hook_template.format(**data)
     cta  = BAIT1_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT1_CTA_DIRECT
 
-    # 4-tweet thread for X auto-posting (each tweet ≤ 280 chars)
+    body_v = _body_variant()
+    body = BAIT1_BODY[body_v]   # [tweet2, tweet3]
+
     if USE_ENGAGEMENT_CTA:
         cta_tweet = (
             f"Most retail holders panic at Phase 1 and miss the real entry at Phase 3.\n\n"
@@ -587,22 +583,7 @@ def format_bait1(data: dict) -> dict:
             f"Live RO signal + entry alerts:\n{GUMROAD_LINK}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
-    thread_tweets = [
-        hook,
-        (
-            "Phase 1 — N-2 Filed: Largest drop of the entire cycle.\n"
-            "Institutions exit immediately. Price compresses from premium high to historical low within days.\n\n"
-            "Phase 2 — N-2/A (approx. 47 days later): Second wave.\n"
-            "Confirms exact sub price. Another 1-3 day flush."
-        ),
-        (
-            "Phase 3 — Record Date (approx. day 59): Historically the cycle low.\n"
-            "Open-market buyers who got in BELOW sub price beat RO participants.\n\n"
-            "Phase 4 — Ex-Dividend: Mechanical only.\n"
-            "Creates 1-3 day accumulation window. Not a seller event."
-        ),
-        cta_tweet,
-    ]
+    thread_tweets = [hook, body[0], body[1], cta_tweet]
 
     x_draft = (
         f"{hook}\n\n"
@@ -624,29 +605,17 @@ def format_bait1(data: dict) -> dict:
 
 
 def format_bait2(data: dict) -> dict:
-    variant = _week_variant()
-    hook = BAIT2_HOOKS[variant]
+    hook = BAIT2_HOOKS[_daily_variant(len(BAIT2_HOOKS))]
     cta  = BAIT2_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT2_CTA_DIRECT
+
+    body_v = _body_variant()
+    body = BAIT2_BODY[body_v]
 
     if USE_ENGAGEMENT_CTA:
         cta_tweet = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
     else:
         cta_tweet = f"Live screener + which tickers pass today:\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
-    thread_tweets = [
-        hook,
-        (
-            "Filter 1: IVR above 35%\n"
-            "IV is elevated vs its own 52-week history. The premium edge exists in the market.\n\n"
-            "Filter 2: IV minus HV30 at least 5 volatility points\n"
-            "IV must EXCEED realized vol by 5pp. If IV caught up to a past spike that normalized, the edge is gone."
-        ),
-        (
-            "Filter 3: No earnings within 45 days\n"
-            "IV crush after a report destroys the premium edge. Earnings = forced close or max-loss risk.\n\n"
-            "Skip Filter 2 and you're selling into a past volatility event. Most common wheel mistake."
-        ),
-        cta_tweet,
-    ]
+    thread_tweets = [hook, body[0], body[1], cta_tweet]
 
     x_draft = (
         f"{hook}\n\n"
@@ -668,10 +637,12 @@ def format_bait2(data: dict) -> dict:
 
 
 def format_bait3(data: dict) -> dict:
-    variant = _week_variant()
-    hook_template = BAIT3_HOOKS[variant]
+    hook_template = BAIT3_HOOKS[_daily_variant(len(BAIT3_HOOKS))]
     hook = hook_template.format(**data)
     cta  = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
+
+    body_v = _body_variant()
+    body = BAIT3_BODY[body_v]
 
     tqqq_score = data.get("tqqq_score", "?")
     if USE_ENGAGEMENT_CTA:
@@ -683,21 +654,7 @@ def format_bait3(data: dict) -> dict:
             f"Free tier: {GUMROAD_LINK}\n\n"
             f"{BAIT3_HASHTAGS}"
         )
-    thread_tweets = [
-        hook,
-        (
-            "1. VIX level — below 20 = calm / above 25 = fear\n"
-            "2. VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike\n"
-            "3. HY Credit Spread — FRED live; above 4.5% = credit stress bleeding into equity risk"
-        ),
-        (
-            "4. SPY vs SMA200 — above = bull regime / below = bear regime\n"
-            "5. Fear and Greed Index — below 25 = extreme fear = TQQQ CALL territory\n\n"
-            "All 5 lead to one verdict: BULLISH / NEUTRAL / BEARISH.\n"
-            "Takes 60 seconds once you have the stack. Most people don't have the stack."
-        ),
-        cta_tweet,
-    ]
+    thread_tweets = [hook, body[0], body[1], cta_tweet]
 
     x_draft = (
         f"{hook}\n\n"
