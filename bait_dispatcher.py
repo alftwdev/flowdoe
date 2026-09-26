@@ -99,99 +99,323 @@ def is_market_closed_today() -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HOOK ROTATION  (4-week cycle per bait — rotate Mondays)
+# HOOK ROTATION  (7 variants, daily cycle — week × weekday combo prevents repetition for 7 weeks)
+# BODY ROTATION  (3 variants — different angles on the same framework)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Hooks indexed [0..3] — week_of_year % 4 selects the variant
+def _daily_variant(n_hooks: int) -> int:
+    """Selects hook index using ISO week × weekday so the same weekday never repeats the same hook.
+    With 7 hooks: cycle before exact weekday+hook repetition = LCM(7,5) = 35 weekdays = 7 weeks."""
+    iso = date.today().isocalendar()
+    return (iso[1] * 5 + iso[2]) % n_hooks
+
+
+def _body_variant() -> int:
+    """Selects body tweet variant 0-2 using a different offset from hook so they diverge."""
+    iso = date.today().isocalendar()
+    return (iso[1] + iso[2]) % 3
+
+
+# Hooks indexed [0..6]
 BAIT1_HOOKS = [
-    # Week A — personal pain / relatability
+    # 0 — personal pain / relatability
     (
         "I held CLM through the 2025 Rights Offering.\n"
         "Watched it drop 12% over 6 weeks.\n"
         "I didn't know when the bottom was.\n\n"
         "The 4-phase RO anatomy:"
     ),
-    # Week B — newsjack / specific event
+    # 1 — newsjack / EDGAR is public
     (
         "CLM filed an N-2 with the SEC on Aug 14.\n"
         "Most holders found out when the price was already down 9%.\n\n"
         "Rights Offerings are public filings. You can see them coming.\n\n"
         "The protocol:"
     ),
-    # Week C — against conventional wisdom
+    # 2 — against conventional wisdom
     (
         "Most CLM/CRF holders think the ex-dividend dip is the buy signal.\n"
         "It's not. It's the 4th catalyst. The real entry is earlier.\n\n"
         "The 4-phase anatomy:"
     ),
-    # Week D — specific number hook (live data injected)
+    # 3 — specific live data hook
     (
         "RO Risk score: {ro_display}\n"
         "CLM ${clm_price:.2f} | CRF ${crf_price:.2f}\n"
         "Premium: {clm_prem_label}\n\n"
         "This is what a live N-2 signal looks like:"
     ),
+    # 4 — income math / distribution reset hook
+    (
+        "CLM paid $0.1215/month on a $7.35 share.\n"
+        "Then the Board locked 2027 distributions based on a lower NAV.\n\n"
+        "Most retail holders didn't understand what that meant until the price had already moved.\n\n"
+        "The mechanism:"
+    ),
+    # 5 — discovery story / early warning edge
+    (
+        "The N-2 filing appeared on EDGAR.gov before market open.\n"
+        "By the time the market opened, CLM was already down 4%.\n\n"
+        "If you know what an N-2 is, you have a head start on every retail holder who doesn't.\n\n"
+        "The protocol:"
+    ),
+    # 6 — information gap hook
+    (
+        "A CLM/CRF N-2 filing on EDGAR means one thing: Rights Offering incoming.\n"
+        "Most retail holders don't know what an N-2 is.\n"
+        "By the time they find out, the price has already moved.\n\n"
+        "The 4 phases:"
+    ),
 ]
 
 BAIT2_HOOKS = [
-    # Week A — confession
+    # 0 — confession / personal failure
     (
         "I ran the wheel strategy for 6 months.\n"
         "Net premium collected: basically zero.\n\n"
         "The one filter I was skipping:"
     ),
-    # Week B — specific stat
+    # 1 — specific backtest stat
     (
         "5-year wheel backtest WITHOUT the VRP filter: ~1% CAGR.\n"
         "WITH it: 8-12%. Same stocks. Same DTE.\n\n"
         "3 filters. 60 seconds:"
     ),
-    # Week C — against convention
+    # 2 — against convention
     (
         "Most options traders screen for high IVR.\n"
         "That's the wrong starting point.\n\n"
         "IVR tells you IV is elevated vs its own history.\n"
-        "It doesn't tell you if the premium is real or a historical relic.\n\n"
+        "It doesn't tell you if the premium is real or a past-event relic.\n\n"
         "The 3-filter stack:"
     ),
-    # Week D — specific scenario
+    # 3 — specific scenario failure
     (
         "You see a CSP setup with 45% IVR. Looks great.\n"
         "Then the IV crush hits before you even get to expiry.\n\n"
         "IV vs HV30 was flat. That was the tell.\n\n"
         "The 3-filter checklist:"
     ),
+    # 4 — IVR alone is not enough
+    (
+        "I thought any IVR above 40% was a green light for the wheel.\n"
+        "Got burned 3 times before I found the second filter.\n\n"
+        "IVR tells you IV is elevated. It doesn't tell you the edge is actually there right now.\n\n"
+        "The 3-filter stack:"
+    ),
+    # 5 — earnings trap (the invisible IV destroyer)
+    (
+        "Earnings within 45 days is the most invisible IV trap.\n"
+        "The setup looks perfect. High IVR. Strong premium.\n"
+        "Then the report drops. IV crush. The premium evaporates.\n\n"
+        "Filter 3 exists for exactly this:"
+    ),
+    # 6 — simplicity / most people skip it
+    (
+        "The difference between a wheel that compounds and one that bleeds:\n"
+        "5 minutes of pre-screening.\n\n"
+        "Most people skip it because they think high IV alone is the signal.\n\n"
+        "The 3-filter stack:"
+    ),
 ]
 
 BAIT3_HOOKS = [
-    # Week A — time saved (problem-first, most universal hook)
+    # 0 — time saved / problem-first
     (
         "I used to spend 45 minutes every morning across Bloomberg, CBOE, Finviz, and Twitter.\n"
         "Now I check 5 numbers. Takes 60 seconds.\n\n"
         "Today's read: {bias_label}\n\n"
         "The stack:"
     ),
-    # Week B — specific level + actionable thresholds
+    # 1 — specific thresholds + actionable levels
     (
         "VIX above 20: stay defensive.\n"
         "VIX above 25 in backwardation: get your puts on.\n"
         "VIX drops back below 1.0 term ratio: that's the LEAP CALL entry window.\n\n"
         "5-signal morning posture — today: {bias_label}"
     ),
-    # Week C — relatable failure (missed entry due to no system)
+    # 2 — relatable failure (no system cost me real money)
     (
         "The worst setups I've taken came from skipping the morning posture.\n"
         "Entered bullish when the regime was already flipping.\n\n"
         "5 numbers. 60 seconds. Today reads {bias_label}.\n\n"
         "The stack:"
     ),
-    # Week D — scarcity + live data
+    # 3 — live data / scarcity
     (
         "Most retail analysis takes 45 minutes and still leaves you guessing.\n\n"
         "5 signals. 60 seconds. {bias_label}.\n"
         "TQQQ cycle score: {tqqq_score}/100.\n\n"
         "The stack:"
     ),
+    # 4 — worst trade story / confirmation bias
+    (
+        "The worst trade I ever placed: 4 of these 5 signals were pointing wrong.\n"
+        "I ignored them all. I thought I had a setup.\n\n"
+        "I had confirmation bias.\n\n"
+        "Today reads {bias_label}. The 5-signal stack:"
+    ),
+    # 5 — VIX term structure edge (most don't know this signal)
+    (
+        "When VIX term structure flips into backwardation, something is breaking.\n"
+        "Most people don't even know what VIX term structure is.\n\n"
+        "It's one of 5 signals in the morning posture. Today: {bias_label}"
+    ),
+    # 6 — CEF cross-signal / CLM/CRF drop tells you the type of move
+    (
+        "When CLM/CRF drops and SPY is flat, that's a CEF-specific move.\n"
+        "When both drop together, that's macro.\n\n"
+        "Knowing the difference changes what you do next.\n\n"
+        "Morning posture today: {bias_label}. The 5 signals:"
+    ),
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BODY TWEET VARIANTS  (tweets 2+3 in the thread — 3 angles per bait)
+# Rotates independently of hooks so content mix stays fresh even on repeat hooks
+# ─────────────────────────────────────────────────────────────────────────────
+
+BAIT1_BODY = [
+    # Variant 0 — clinical / factual
+    [
+        (
+            "Phase 1 — N-2 Filed: Largest drop of the entire cycle.\n"
+            "Institutions exit immediately. Price compresses from premium high to historical low within days.\n\n"
+            "Phase 2 — N-2/A (approx. 47 days later): Second wave.\n"
+            "Confirms exact sub price. Another 1-3 day flush."
+        ),
+        (
+            "Phase 3 — Record Date (approx. day 59): Historically the cycle low.\n"
+            "Open-market buyers who got in BELOW sub price beat RO participants.\n\n"
+            "Phase 4 — Ex-Dividend: Mechanical only.\n"
+            "Creates 1-3 day accumulation window. Not a seller event."
+        ),
+    ],
+    # Variant 1 — narrative / story angle
+    [
+        (
+            "Phase 1 hits on the N-2 filing day.\n"
+            "Most retail holders don't watch EDGAR. By the time they hear about it, price is already down 5-8%.\n\n"
+            "Phase 2 — 47 days later — is the second wave.\n"
+            "The exact sub price gets set. Another flush."
+        ),
+        (
+            "Phase 3, the record date, is where 2022 and 2025 both bottomed.\n"
+            "Open-market buyers at this price beat RO participants.\n\n"
+            "Phase 4 is the dividend ex-date. Mechanical drop.\n"
+            "It creates a 1-3 day window. Most people mistake it for the real dip."
+        ),
+    ],
+    # Variant 2 — live proof / numbers from the current cycle
+    [
+        (
+            "2026 cycle in real time:\n"
+            "N-2 filed Aug 14. CLM dropped $7.35 to $6.38 by Day 42.\n"
+            "Premium: 25% to 2% in 11 days.\n\n"
+            "N-2/A is next: approx. Oct 1-2. Another 1-3 day flush as the exact sub price gets locked."
+        ),
+        (
+            "Record date expected: Oct 13-16.\n"
+            "Ex-dividend confirmed: Oct 15.\n"
+            "Both catalysts land in the same week.\n\n"
+            "In 2022 and 2025, the record date was the cycle low.\n"
+            "Open-market buyers at current prices already beat RO participants."
+        ),
+    ],
+]
+
+BAIT2_BODY = [
+    # Variant 0 — clean filter explanations (clinical)
+    [
+        (
+            "Filter 1: IVR above 35%\n"
+            "IV is elevated vs its own 52-week history. The premium edge exists in the market.\n\n"
+            "Filter 2: IV minus HV30 at least 5 volatility points\n"
+            "IV must EXCEED realized vol by 5pp. If IV caught up to a past spike that normalized, the edge is gone."
+        ),
+        (
+            "Filter 3: No earnings within 45 days\n"
+            "IV crush after a report destroys the premium edge. Earnings = forced close or max-loss risk.\n\n"
+            "Skip Filter 2 and you're selling into a past volatility event. Most common wheel mistake."
+        ),
+    ],
+    # Variant 1 — consequences of skipping each filter
+    [
+        (
+            "Skip Filter 1 (IVR > 35%) and you're selling in a calm market.\n"
+            "The premium looks fine — there's just no edge. You're collecting insurance when no one needs it.\n\n"
+            "Skip Filter 2 (IV - HV30 >= 5pp) and you're selling into a past spike that already normalized."
+        ),
+        (
+            "Skip Filter 3 (no earnings within 45 days) and you're holding through a binary event.\n"
+            "IV crush after a report can cut premium collected by 60-80% overnight.\n\n"
+            "All 3 filters together: the edge is structural. Not luck."
+        ),
+    ],
+    # Variant 2 — quick scan checklist format
+    [
+        (
+            "The 60-second pre-trade checklist:\n"
+            "IVR above 35%? If no: skip it.\n"
+            "IV minus HV30 above 5 points? If no: skip it.\n"
+            "Earnings within 45 days? If yes: skip it.\n\n"
+            "All 3 green: delta 0.20, 30-45 DTE."
+        ),
+        (
+            "Why these 3 specifically:\n"
+            "Filter 1 = IV is elevated vs history.\n"
+            "Filter 2 = the premium edge is real, not a past-event relic.\n"
+            "Filter 3 = no binary event to destroy the edge.\n\n"
+            "Miss any one of them and the 5-year backtest shows ~1% CAGR."
+        ),
+    ],
+]
+
+BAIT3_BODY = [
+    # Variant 0 — plain list (signal names + what they mean)
+    [
+        (
+            "1. VIX level — below 20 = calm / above 25 = fear\n"
+            "2. VIX term structure — VIXY/VXZ ratio; backwardation = sustained fear, not a one-day spike\n"
+            "3. HY Credit Spread — FRED live; above 4.5% = credit stress bleeding into equity risk"
+        ),
+        (
+            "4. SPY vs SMA200 — above = bull regime / below = bear regime\n"
+            "5. Fear and Greed Index — below 25 = extreme fear = TQQQ CALL territory\n\n"
+            "All 5 lead to one verdict: BULLISH / NEUTRAL / BEARISH.\n"
+            "Takes 60 seconds once you have the stack. Most people don't have the stack."
+        ),
+    ],
+    # Variant 1 — how the signals interact / tell a story together
+    [
+        (
+            "VIX level tells you HOW scared the market is.\n"
+            "VIX term structure tells you HOW LONG the fear is expected to last.\n"
+            "Backwardation = not a one-day spike. Institutional hedging is entrenched.\n\n"
+            "HY credit spread connects equity fear to credit market stress."
+        ),
+        (
+            "SPY vs SMA200 tells you the regime.\n"
+            "Fear and Greed below 25 in a bearish regime = highest-conviction LEAP CALL setup.\n\n"
+            "All 5 together in 60 seconds gives you a posture.\n"
+            "One number instead of 45 minutes across 4 different sites."
+        ),
+    ],
+    # Variant 2 — what changes in your behavior based on each reading
+    [
+        (
+            "How the readings change your posture:\n"
+            "VIX above 25 + backwardation: reduce wheel delta to 0.15 or sit out.\n"
+            "HY spread above 4.5%: margin risk is elevated — don't add leverage.\n"
+            "SPY below SMA200: bear regime — LEAPs favor PUTs over CALLs."
+        ),
+        (
+            "Fear and Greed below 25 in a bearish regime: open TQQQ LEAP CALL, 9-18 month DTE.\n"
+            "Fear and Greed above 75 in a bullish regime: LEAP PUT desk activates.\n\n"
+            "All 5 signals tell you where you are in the cycle.\n"
+            "That changes everything downstream."
+        ),
+    ],
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
