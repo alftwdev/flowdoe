@@ -939,6 +939,126 @@ def _build_research_summary(research: dict) -> str:
     )
 
 
+def _build_reply_starters(bait_key: str, data: dict, research: dict) -> list[str]:
+    """
+    3 reply-bait questions to post under your own thread within 30 min of posting.
+    X Premium verified replies get boosted in threads — these seed early engagement.
+    Context-aware based on current angle and bait type.
+    """
+    angle     = research.get("angle", ANGLE_DEFAULT)
+    clm_price = data.get("clm_price", 0)
+    clm_yield = research.get("clm_yield", 0)
+    bias      = research.get("bias_label", "NEUTRAL")
+    ro        = research.get("ro_ctx", {})
+    d_n2a     = ro.get("days_to_n2a")
+    d_rec     = ro.get("days_to_record")
+
+    if bait_key == "bait1":
+        if angle == ANGLE_EDGAR_BREAKING:
+            return [
+                f"N-2 just filed for $CLM/$CRF. Have you been through one of these before? What's your plan this cycle?",
+                f"The RO cycle runs ~84 days from N-2 to expiration. Which phase worries you most — the announcement, the record date, or the subscription window?",
+                f"If you missed the N-2 alert — how did you find out? Curious how information flows for CEF holders.",
+            ]
+        if angle == ANGLE_PRE_CATALYST and d_n2a is not None:
+            return [
+                f"N-2/A is ~{d_n2a} days out. What price level would make you add $CLM here before the filing drops?",
+                f"After the N-2/A, the record date is typically 10-11 days later. Are you planning to add before or after?",
+                f"Quick check: are you tracking the $CLM sub price estimate vs open market price right now? The math is interesting.",
+            ]
+        price_str = f"${clm_price:.2f}" if clm_price > 0 else "current price"
+        yield_str = f"{clm_yield:.0f}%" if clm_yield > 0 else "~23%"
+        return [
+            f"What's your current $CLM cost basis? Curious how different people are positioned right now vs the sub price.",
+            f"$CLM at {price_str} = {yield_str} annual yield. At what yield does this become a no-brainer add for you?",
+            f"For CLM/CRF holders: are you DRIPping at NAV through the RO, holding cash, or completely sized out?",
+        ]
+
+    if bait_key == "bait2":
+        return [
+            "IVR or IV-HV spread — which do you actually check first when you're screening wheel candidates?",
+            "What's the biggest mistake you see people make with the wheel? I'll go first in the replies.",
+            "Anyone been assigned recently? Did you sell the CC or hold for the dividend? What happened?",
+        ]
+
+    # bait3 — morning posture
+    tqqq = data.get("tqqq_score", 0)
+    return [
+        f"Market bias today: {bias}. Agree or disagree? What signal am I missing?",
+        f"TQQQ cycle score: {tqqq}/100. What's your read on the next 5 sessions?",
+        "What's the first thing you check every morning before the open? Not the last — the first.",
+    ]
+
+
+def _build_grok_queries(research: dict, data: dict) -> str:
+    """
+    Context-specific Grok Premium queries for the morning intelligence session.
+    Paste these into Grok on X — Grok reads live X conversations.
+    Returns formatted text block for Pushover.
+    """
+    angle  = research.get("angle", ANGLE_DEFAULT)
+    ro     = research.get("ro_ctx", {})
+    d_n2a  = ro.get("days_to_n2a")
+    phase  = ro.get("ro_phase_label", "")
+    clm_p  = data.get("clm_price", 0)
+    bias   = research.get("bias_label", "NEUTRAL")
+
+    # Always-on: community pain + hook patterns
+    q1 = (
+        'Search X for $CLM or $CRF posts in the last 48 hours. '
+        'What are the most common emotions and specific objections people express? '
+        'Extract exact phrases — don\'t summarize.'
+    )
+    q2 = (
+        'Find 5 recent posts in #DividendInvesting or #ClosedEndFunds that got '
+        'high reply counts. What sentence structures do the hooks use? '
+        'Give me the pattern, not the topic.'
+    )
+
+    # Angle-specific query
+    if angle == ANGLE_EDGAR_BREAKING:
+        q3 = (
+            'An N-2 (rights offering) was just filed for $CLM and $CRF by Cornerstone. '
+            'Find posts reacting to this. What is the dominant sentiment? '
+            'What question is repeated most? Give me 3 reply angles that add value '
+            'without pitching anything.'
+        )
+    elif angle == ANGLE_PRE_CATALYST and d_n2a is not None:
+        q3 = (
+            f'A major SEC filing (N-2/A) is expected for $CLM/$CRF in ~{d_n2a} days. '
+            f'Write 3 reply angles I can use on large finance accounts to position '
+            f'myself as someone tracking the RO cycle in real time — specific, no fluff.'
+        )
+    elif angle in (ANGLE_RO_MID_CYCLE, ANGLE_ENTRY_SIGNAL):
+        price_str = f"${clm_p:.2f}" if clm_p > 0 else "current price"
+        q3 = (
+            f'Someone is asking: "I hold CLM at a {price_str} cost basis during an '
+            f'active rights offering — should I sell, hold, or add?" '
+            f'What are the 3 best reply angles that add real value and make them '
+            f'curious about who I am — without mentioning any product?'
+        )
+    elif angle == ANGLE_MACRO_STRESS:
+        q3 = (
+            f'Market bias is {bias} today. VIX term structure is in backwardation. '
+            f'Find posts in #FinTwit in the last 24 hours expressing fear or uncertainty. '
+            f'What specific language are they using? Give me 3 reply angles that '
+            f'reframe the fear with a concrete signal or data point.'
+        )
+    else:
+        q3 = (
+            'Find 5 accounts in #FinTwit with 5k-50k followers who post about '
+            'closed-end funds, CEF premiums, or dividend income investing. '
+            'List them with their most recent post and the best reply angle for each.'
+        )
+
+    return (
+        f"── GROK QUERIES (paste each into Grok on X) ──\n"
+        f"[1] {q1}\n\n"
+        f"[2] {q2}\n\n"
+        f"[3] {q3}"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FORMAT BAITS  (returns dict with title, hook, framework, cta, hashtags, x_draft)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -952,23 +1072,24 @@ def format_bait1(data: dict, research: dict | None = None) -> dict:
     body      = BAIT1_BODY[_body_variant()]
 
     if USE_ENGAGEMENT_CTA:
-        cta_tweet = (
+        first_reply = (
             f"Most retail holders panic at Phase 1 and miss the real entry at Phase 3.\n\n"
             f"{BAIT1_CTA_ENGAGEMENT}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
     else:
-        cta_tweet = (
+        first_reply = (
             f"Most retail holders panic at Phase 1 and miss the real entry at Phase 3.\n\n"
             f"Live RO signal + entry alerts:\n{GUMROAD_LINK}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
-    thread_tweets = [hook_seo, body[0], body[1], cta_tweet]
+    # Threads: post all 4 as reply chain. X: tweets 1-3 auto-post; first_reply posted manually.
+    thread_tweets = [hook_seo, body[0], body[1], first_reply]
 
     x_draft = (
-        f"{hook_seo}\n\n"
-        f"{BAIT1_FRAMEWORK}\n\n"
-        f"{cta}\n\n"
+        f"[T1] {hook_seo}\n\n"
+        f"[T2] {body[0]}\n\n"
+        f"[T3] {body[1]}\n\n"
         f"{BAIT1_HASHTAGS}\n\n"
         f"{NFA}"
     )
@@ -980,7 +1101,9 @@ def format_bait1(data: dict, research: dict | None = None) -> dict:
         "cta":           cta,
         "hashtags":      BAIT1_HASHTAGS,
         "x_draft":       x_draft,
+        "first_reply":   first_reply,
         "thread_tweets": thread_tweets,
+        "reply_starters": _build_reply_starters("bait1", data, research or {}),
     }
 
 
@@ -992,15 +1115,15 @@ def format_bait2(data: dict, research: dict | None = None) -> dict:
     body     = BAIT2_BODY[_body_variant()]
 
     if USE_ENGAGEMENT_CTA:
-        cta_tweet = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
+        first_reply = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
     else:
-        cta_tweet = f"Live screener + which tickers pass today:\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
-    thread_tweets = [hook, body[0], body[1], cta_tweet]
+        first_reply = f"Live screener + which tickers pass today:\n{GUMROAD_LINK}\n\n{BAIT2_HASHTAGS}"
+    thread_tweets = [hook, body[0], body[1], first_reply]
 
     x_draft = (
-        f"{hook}\n\n"
-        f"{BAIT2_FRAMEWORK}\n\n"
-        f"{cta}\n\n"
+        f"[T1] {hook}\n\n"
+        f"[T2] {body[0]}\n\n"
+        f"[T3] {body[1]}\n\n"
         f"{BAIT2_HASHTAGS}\n\n"
         f"{NFA}"
     )
@@ -1012,7 +1135,9 @@ def format_bait2(data: dict, research: dict | None = None) -> dict:
         "cta":           cta,
         "hashtags":      BAIT2_HASHTAGS,
         "x_draft":       x_draft,
+        "first_reply":   first_reply,
         "thread_tweets": thread_tweets,
+        "reply_starters": _build_reply_starters("bait2", data, research or {}),
     }
 
 
@@ -1025,20 +1150,20 @@ def format_bait3(data: dict, research: dict | None = None) -> dict:
 
     tqqq_score = data.get("tqqq_score", "?")
     if USE_ENGAGEMENT_CTA:
-        cta_tweet = f"{BAIT3_CTA_ENGAGEMENT}\n\n{BAIT3_HASHTAGS}"
+        first_reply = f"{BAIT3_CTA_ENGAGEMENT}\n\n{BAIT3_HASHTAGS}"
     else:
-        cta_tweet = (
+        first_reply = (
             f"Full 12-signal brief + live TQQQ score ({tqqq_score}/100) — subscribers only.\n"
             f"Subscribers see all 5 readings + today's entry threshold.\n"
             f"Free tier: {GUMROAD_LINK}\n\n"
             f"{BAIT3_HASHTAGS}"
         )
-    thread_tweets = [hook, body[0], body[1], cta_tweet]
+    thread_tweets = [hook, body[0], body[1], first_reply]
 
     x_draft = (
-        f"{hook}\n\n"
-        f"{BAIT3_FRAMEWORK}\n\n"
-        f"{cta}\n\n"
+        f"[T1] {hook}\n\n"
+        f"[T2] {body[0]}\n\n"
+        f"[T3] {body[1]}\n\n"
         f"{BAIT3_HASHTAGS}\n\n"
         f"{NFA}"
     )
@@ -1050,7 +1175,9 @@ def format_bait3(data: dict, research: dict | None = None) -> dict:
         "cta":           cta,
         "hashtags":      BAIT3_HASHTAGS,
         "x_draft":       x_draft,
+        "first_reply":   first_reply,
         "thread_tweets": thread_tweets,
+        "reply_starters": _build_reply_starters("bait3", data, research or {}),
     }
 
 
@@ -1082,19 +1209,31 @@ def send_pushover(title: str, message: str, priority: int = 0) -> bool:
         return False
 
 
-def build_weekday_notification(bait: dict, research_summary: str = "") -> tuple[str, str]:
+def build_weekday_notification(
+    bait: dict,
+    research_summary: str = "",
+    grok_queries: str = "",
+) -> tuple[str, str]:
     """Returns (title, message) for a single-bait Pushover.
-    research_summary is prepended to the first bait only (pass "" for subsequent baits).
+    research_summary and grok_queries are prepended to the first bait only.
     """
     title = f"[CF] {bait['emoji']} {bait['title']}"
     body  = ""
     if research_summary:
         body += f"{research_summary}\n\n"
+    if grok_queries:
+        body += f"{grok_queries}\n\n"
+
+    # Thread tweets labeled T1/T2/T3 + separate first reply
+    x_draft   = bait.get("x_draft", "")
+    f_reply   = bait.get("first_reply", "")
+    starters  = bait.get("reply_starters", [])
+
     body += (
-        f"── HOOK ──\n{bait['hook']}\n\n"
-        f"── FRAMEWORK ──\n{bait['framework']}\n\n"
-        f"── CTA ──\n{bait['cta']}\n\n"
-        f"── X DRAFT (copy/paste) ──\n{bait['x_draft']}"
+        f"── X THREAD (auto-posts) ──\n{x_draft}\n\n"
+        f"── FIRST REPLY (post manually ~2 min after thread) ──\n{f_reply}\n\n"
+        f"── REPLY STARTERS (post within 30 min — X Premium boost) ──\n"
+        + "\n\n".join(f"[{i+1}] {s}" for i, s in enumerate(starters))
     )
     return title, body
 
@@ -1308,9 +1447,10 @@ def main():
         logger.info(f"Already sent today ({mode}) — skipping.")
         return
 
-    data     = pull_market_data()
-    research = _gather_research_context(data)   # research step — before any content generation
+    data             = pull_market_data()
+    research         = _gather_research_context(data)
     research_summary = _build_research_summary(research)
+    grok_queries     = _build_grok_queries(research, data)
 
     logger.info(
         f"DB data: CLM={data['clm_price']:.2f} CRF={data['crf_price']:.2f} "
@@ -1337,8 +1477,12 @@ def main():
                 "X_AUTO_POST_ENABLED=false — set it to 'true' in .env to activate. "
                 "Sending silent Pushover drafts instead."
             )
-            for bait in baits:
-                t, b = build_weekday_notification(bait)
+            for i, bait in enumerate(baits):
+                t, b = build_weekday_notification(
+                    bait,
+                    research_summary if i == 0 else "",
+                    grok_queries     if i == 0 else "",
+                )
                 send_pushover(t, f"[X AUTO-POST NOT ENABLED — copy/paste manually]\n\n{b}", priority=-1)
         else:
             logger.info("Auto-posting 3 threads to X + Threads (8:30 AM ET peak)...")
@@ -1361,10 +1505,14 @@ def main():
                 elif THREADS_AUTO_POST_ENABLED and _post_threads is None:
                     th_status  = "❌ threads_client.py missing"
 
-                t, b = build_weekday_notification(bait, research_summary if i == 0 else "")
+                t, b = build_weekday_notification(
+                    bait,
+                    research_summary if i == 0 else "",
+                    grok_queries     if i == 0 else "",
+                )
                 send_pushover(t, f"{x_status} · {th_status}\n\n{b}", priority=-1)  # silent
                 if i < len(baits) - 1:
-                    logger.info("Waiting 5 min before next thread (natural cadence)...")
+                    logger.info("Waiting 5 min between threads (natural cadence)...")
                     time.sleep(300)
 
             # #free-data Discord embed
@@ -1379,7 +1527,11 @@ def main():
         else:
             logger.info("Market open — sending 3 bait draft notifications.")
             for i, bait in enumerate(baits):
-                t, b = build_weekday_notification(bait, research_summary if i == 0 else "")
+                t, b = build_weekday_notification(
+                    bait,
+                    research_summary if i == 0 else "",
+                    grok_queries     if i == 0 else "",
+                )
                 send_pushover(t, b)
 
             # #free-data Discord embed (weekdays only)
