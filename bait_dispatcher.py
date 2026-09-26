@@ -68,6 +68,9 @@ TWITTER_API_KEY             = os.getenv("TWITTER_API_KEY", "")
 TWITTER_API_SECRET          = os.getenv("TWITTER_API_SECRET", "")
 TWITTER_ACCESS_TOKEN        = os.getenv("TWITTER_ACCESS_TOKEN", "")
 TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET", "")
+# Read-only bearer token for X search (separate from write credentials).
+# Optional — add TWITTER_BEARER_TOKEN to .env to enable trend research.
+TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 
 # ── Threads (Instagram) auto-post credentials ──────────────────────────────────
 # Fires alongside X in auto-post mode. See threads_client.py for one-time setup.
@@ -484,6 +487,40 @@ BAIT2_HASHTAGS = "#OptionsTrading #TheWheel #CashSecuredPuts #PassiveIncome #Fin
 BAIT3_HASHTAGS = "#TQQQ #PreMarket #IncomeInvesting #DividendInvesting #FinTwit"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RO / DISTRIBUTION CONSTANTS  (mirrors CLAUDE.md §0-B — update each cycle)
+# ─────────────────────────────────────────────────────────────────────────────
+CLM_ANNUAL_DIST   = 1.458     # $0.1215/month × 12 — 2026 confirmed
+CRF_ANNUAL_DIST   = 1.4112    # $0.1176/month × 12 — 2026 confirmed
+CLM_FAIR_VALUE    = 7.67      # annual_dist / 0.19
+CRF_FAIR_VALUE    = 7.43
+CLM_SUB_PRICE_EST = 6.56      # 104% × CLM NAV ~$6.31 — update after 424B3 sets exact price
+CRF_SUB_PRICE_EST = 6.37      # 104% × CRF NAV ~$6.12
+N2_FILED_DATE     = "2026-08-14"  # update to actual N-2 date each new cycle
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTENT ANGLES  (drive hook selection + framing — set by research engine)
+# ─────────────────────────────────────────────────────────────────────────────
+ANGLE_EDGAR_BREAKING = "EDGAR_BREAKING"   # new N-2/N-2/A/424B3 in last 3 days
+ANGLE_PRE_CATALYST   = "PRE_CATALYST"     # ≤7 days to N-2/A or record date
+ANGLE_RO_MID_CYCLE   = "RO_MID_CYCLE"    # active RO, phase B/C (Day 15-55)
+ANGLE_ENTRY_SIGNAL   = "ENTRY_SIGNAL"     # open-market price ≤ sub price
+ANGLE_MACRO_STRESS   = "MACRO_STRESS"     # HY spread >4.5% or VIX backwardation
+ANGLE_YIELD_COMPARE  = "YIELD_COMPARE"    # yield >20% at current price
+ANGLE_TREND_RESPONSE = "TREND_RESPONSE"   # X community talking about CLM/CRF pain
+ANGLE_DEFAULT        = "DEFAULT"          # fallback: date-based rotation
+
+# Angle → preferred hook index per bait (None = fall back to _daily_variant)
+ANGLE_HOOK_MAP = {
+    ANGLE_EDGAR_BREAKING: {"bait1": 1, "bait2": None, "bait3": None},
+    ANGLE_PRE_CATALYST:   {"bait1": 2, "bait2": None, "bait3": None},
+    ANGLE_RO_MID_CYCLE:   {"bait1": 5, "bait2": None, "bait3": 6},
+    ANGLE_ENTRY_SIGNAL:   {"bait1": 3, "bait2": None, "bait3": 3},
+    ANGLE_MACRO_STRESS:   {"bait1": 0, "bait2": None, "bait3": 1},
+    ANGLE_YIELD_COMPARE:  {"bait1": 4, "bait2": None, "bait3": 0},
+    ANGLE_TREND_RESPONSE: {"bait1": 6, "bait2": None, "bait3": 2},
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # NFA FOOTER
 # ─────────────────────────────────────────────────────────────────────────────
 NFA = "Not financial advice. Educational signals only. Always do your own research."
@@ -560,16 +597,359 @@ def pull_market_data() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# RESEARCH ENGINE  (runs before content generation — drives angle + template selection)
+# Sources: EDGAR EFTS, X search, DB state (FRED/SentiSense cached by other scripts)
+# All external calls cached to DB per-day; fails gracefully on any source outage.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_edgar_today() -> dict | None:
+    """
+    Searches EDGAR EFTS for new CLM/CRF N-2/N-2/A/424B3 filings in the last 3 days.
+    Cached to DB as bait_edgar_check_{date} so EDGAR is never hit more than once/day.
+    Returns {ticker, type, date, url} or None.
+    """
+    today_str = date.today().isoformat()
+    cache_key = f"bait_edgar_check_{today_str}"
+    cached = db.get_state(cache_key)
+    if cached is not None:
+        try:
+            return json.loads(cached) if cached and cached != "null" else None
+        except Exception:
+            pass
+
+    since = (date.today() - timedelta(days=3)).isoformat()
+    found = None
+
+    for ticker, cik in [("CLM", "0000814083"), ("CRF", "0000033934")]:
+        try:
+            r = requests.get(
+                "https://efts.sec.gov/LATEST/search-index",
+                params={
+                    "q": f'"{ticker.lower()}"',
+                    "forms": "N-2,N-2/A,424B3",
+                    "dateRange": "custom",
+                    "startdt": since,
+                    "enddt": today_str,
+                },
+                timeout=10,
+                headers={"User-Agent": "CornerFlowstate/1.0 alwinalmazan@gmail.com"},
+            )
+            if r.ok:
+                hits = r.json().get("hits", {}).get("hits", [])
+                for h in hits:
+                    src  = h.get("_source", {})
+                    form = src.get("form_type", "")
+                    if form in ("N-2", "N-2/A", "424B3"):
+                        found = {
+                            "ticker": ticker,
+                            "type":   form,
+                            "date":   src.get("file_date", ""),
+                            "url":    (
+                                f"https://www.sec.gov/cgi-bin/browse-edgar"
+                                f"?action=getcompany&CIK={cik}&type=N-2&dateb=&owner=include&count=5"
+                            ),
+                        }
+                        break
+            if found:
+                break
+            time.sleep(1)
+        except Exception as e:
+            logger.warning(f"EDGAR check failed for {ticker}: {e}")
+
+    db.update_state(cache_key, json.dumps(found))
+    if found:
+        logger.info(f"EDGAR: {found['type']} found for {found['ticker']} ({found['date']})")
+    return found
+
+
+def _get_x_trending() -> list[str]:
+    """
+    Searches recent X posts for CLM/CRF community sentiment themes.
+    Uses bearer token (read-only) — add TWITTER_BEARER_TOKEN to .env to enable.
+    Themes returned: price_pain, buy_signal, yield_focus, ro_awareness, nav_premium.
+    Fails gracefully — empty list if no token or search fails.
+    """
+    if not TWITTER_BEARER_TOKEN:
+        return []
+    today_str = date.today().isoformat()
+    cache_key = f"bait_x_trends_{today_str}"
+    cached = db.get_state(cache_key)
+    if cached is not None:
+        try:
+            return json.loads(cached) or []
+        except Exception:
+            pass
+
+    themes = []
+    try:
+        import tweepy
+        client  = tweepy.Client(bearer_token=TWITTER_BEARER_TOKEN)
+        results = client.search_recent_tweets(
+            query=(
+                '($CLM OR $CRF OR "closed end fund" OR "rights offering" CLM) '
+                'lang:en -is:retweet'
+            ),
+            max_results=10,
+            tweet_fields=["public_metrics", "text"],
+        )
+        if results.data:
+            for tweet in results.data:
+                t = tweet.text.lower()
+                if any(w in t for w in ["drop", "fell", "down", "loss", "bag"]):
+                    themes.append("price_pain")
+                if any(w in t for w in ["buy", "accumulate", "dip", "add"]):
+                    themes.append("buy_signal")
+                if any(w in t for w in ["dividend", "yield", "income", "distribution"]):
+                    themes.append("yield_focus")
+                if any(w in t for w in ["rights", "n-2", "offering", "dilut", "ro"]):
+                    themes.append("ro_awareness")
+                if any(w in t for w in ["nav", "premium", "discount"]):
+                    themes.append("nav_premium")
+            themes = list(set(themes))
+    except Exception as e:
+        logger.info(f"X trending search skipped: {e}")
+
+    db.update_state(cache_key, json.dumps(themes))
+    return themes
+
+
+def _get_ro_cycle_context() -> dict:
+    """
+    Computes RO cycle timing, phase labels, catalyst ETAs, and per-ticker value math.
+    Pure calculation from CLAUDE.md constants — zero API calls.
+    """
+    today = date.today()
+    days_since_n2 = 0
+    try:
+        n2_date       = date.fromisoformat(N2_FILED_DATE)
+        days_since_n2 = (today - n2_date).days
+        n2a_est       = n2_date + timedelta(days=47)
+        record_est    = n2_date + timedelta(days=59)
+        expiry_est    = n2_date + timedelta(days=84)
+        days_to_n2a    = (n2a_est - today).days
+        days_to_record = (record_est - today).days
+        days_to_expiry = (expiry_est - today).days
+    except Exception:
+        n2a_est = record_est = expiry_est = None
+        days_to_n2a = days_to_record = days_to_expiry = None
+
+    if days_since_n2 < 14:
+        ro_phase, ro_phase_label = "A", "Post-filing panic (0-14d)"
+    elif days_since_n2 < 40:
+        ro_phase, ro_phase_label = "B", "Consolidation window (15-40d)"
+    elif days_since_n2 < 55:
+        ro_phase, ro_phase_label = "C", "Pre-N2/A watch (41-55d)"
+    elif days_since_n2 < 70:
+        ro_phase, ro_phase_label = "D", "N-2/A + record date approach (56-70d)"
+    elif days_since_n2 < 90:
+        ro_phase, ro_phase_label = "E", "Subscription window / clearing (71-90d)"
+    else:
+        ro_phase, ro_phase_label = "F", "Post-RO recovery"
+
+    return {
+        "days_since_n2":   days_since_n2,
+        "ro_phase":        ro_phase,
+        "ro_phase_label":  ro_phase_label,
+        "n2a_est":         n2a_est.isoformat()    if n2a_est    else "TBD",
+        "record_est":      record_est.isoformat() if record_est else "TBD",
+        "expiry_est":      expiry_est.isoformat() if expiry_est else "TBD",
+        "days_to_n2a":     days_to_n2a,
+        "days_to_record":  days_to_record,
+        "days_to_expiry":  days_to_expiry,
+        "clm_sub_price":   CLM_SUB_PRICE_EST,
+        "crf_sub_price":   CRF_SUB_PRICE_EST,
+    }
+
+
+def _gather_research_context(data: dict) -> dict:
+    """
+    Orchestrates all pre-post research. Returns enriched context dict.
+    The 'angle' key drives hook selection and post framing for the day.
+    Call once per run — results cached to DB so repeat calls are free.
+    """
+    logger.info("Research engine running...")
+
+    edgar  = _check_edgar_today()
+    x_trends = _get_x_trending()
+    ro_ctx = _get_ro_cycle_context()
+
+    # Macro signals already cached to DB by monitor.py / market_analysis.py
+    hy_spread  = _safe_float(db.get_state("hy_spread_cached"),     0.0)
+    vix_slope  = _safe_float(db.get_state("vix_term_slope"),       1.0)
+    fred_yield = _safe_float(db.get_state("fred_yield_spread"),    0.0)
+
+    # Per-ticker live yield at current price
+    clm_yield = (CLM_ANNUAL_DIST / data["clm_price"] * 100) if data["clm_price"] > 0 else 0.0
+    crf_yield = (CRF_ANNUAL_DIST / data["crf_price"] * 100) if data["crf_price"] > 0 else 0.0
+
+    # Open-market vs RO sub price comparison
+    clm_vs_sub       = (data["clm_price"] - ro_ctx["clm_sub_price"]) if data["clm_price"] > 0 else None
+    crf_vs_sub       = (data["crf_price"] - ro_ctx["crf_sub_price"]) if data["crf_price"] > 0 else None
+    open_market_wins = (clm_vs_sub is not None and clm_vs_sub < 0)
+
+    research = {
+        **data,
+        "edgar_event":      edgar,
+        "x_trends":         x_trends,
+        "ro_ctx":           ro_ctx,
+        "hy_spread":        hy_spread,
+        "vix_slope":        vix_slope,
+        "fred_yield":       fred_yield,
+        "clm_yield":        clm_yield,
+        "crf_yield":        crf_yield,
+        "clm_vs_sub":       clm_vs_sub,
+        "crf_vs_sub":       crf_vs_sub,
+        "open_market_wins": open_market_wins,
+    }
+
+    research["angle"] = _select_angle(research)
+
+    logger.info(
+        f"Research complete — angle={research['angle']} edgar={'YES:'+edgar['type'] if edgar else 'None'} "
+        f"x_trends={x_trends} ro_phase={ro_ctx['ro_phase']} "
+        f"clm_yield={clm_yield:.1f}% open_market_wins={open_market_wins}"
+    )
+    return research
+
+
+def _select_angle(research: dict) -> str:
+    """Priority-ordered angle selection. Drives hook choice and post framing."""
+    ro = research.get("ro_ctx", {})
+
+    # P1 — breaking EDGAR event (last 3 days)
+    if research.get("edgar_event"):
+        return ANGLE_EDGAR_BREAKING
+
+    # P2 — within 7 days of a major RO catalyst
+    if research.get("ro_active"):
+        d_n2a    = ro.get("days_to_n2a")
+        d_record = ro.get("days_to_record")
+        if (d_n2a    is not None and 0 <= d_n2a    <= 7) or \
+           (d_record is not None and 0 <= d_record <= 7):
+            return ANGLE_PRE_CATALYST
+
+    # P3 — active RO mid-cycle (phases B or C — where we are Day 42)
+    if research.get("ro_active") and ro.get("ro_phase") in ("B", "C"):
+        return ANGLE_RO_MID_CYCLE
+
+    # P4 — open-market buyer beating RO sub price (active RO)
+    if research.get("open_market_wins") and research.get("ro_active"):
+        return ANGLE_ENTRY_SIGNAL
+
+    # P5 — macro stress (HY spread elevated or VIX in backwardation)
+    if research.get("hy_spread", 0) > 4.5 or research.get("vix_slope", 1.0) < 1.0:
+        return ANGLE_MACRO_STRESS
+
+    # P6 — X community expressing CLM/CRF pain = teachable moment
+    if "price_pain" in research.get("x_trends", []) or \
+       "ro_awareness" in research.get("x_trends", []):
+        return ANGLE_TREND_RESPONSE
+
+    # P7 — yield compelling at current price
+    if research.get("clm_yield", 0) > 20:
+        return ANGLE_YIELD_COMPARE
+
+    return ANGLE_DEFAULT
+
+
+def _get_hook_idx(angle: str, bait_key: str, n_hooks: int) -> int:
+    """Returns angle-preferred hook index, falling back to date rotation."""
+    preferred = ANGLE_HOOK_MAP.get(angle, {}).get(bait_key)
+    if preferred is not None and preferred < n_hooks:
+        return preferred
+    return _daily_variant(n_hooks)
+
+
+def _seo_add_cashtags(tweet: str) -> str:
+    """
+    Ensures $CLM and $CRF cashtags appear in tweet 1 for X topic indexing.
+    X algorithm uses cashtags for finance topic discovery (separate from hashtags).
+    Appended to first line only if not already present — never breaks mid-sentence.
+    """
+    has_clm = "$CLM" in tweet or "CLM" in tweet.split("\n")[0]
+    has_crf = "$CRF" in tweet or "CRF" in tweet.split("\n")[0]
+    if has_clm and has_crf:
+        return tweet
+    tags = ""
+    if not has_clm:
+        tags += " $CLM"
+    if not has_crf:
+        tags += " $CRF"
+    lines = tweet.split("\n", 1)
+    lines[0] = lines[0].rstrip() + tags
+    return "\n".join(lines)
+
+
+def _build_research_summary(research: dict) -> str:
+    """
+    Human-readable research brief for Pushover draft notifications.
+    Shows what was found today and WHY this angle/hook was selected.
+    Appears once at the top of the first bait notification.
+    """
+    ro      = research.get("ro_ctx", {})
+    edgar   = research.get("edgar_event")
+    x_tr    = research.get("x_trends", [])
+    angle   = research.get("angle", ANGLE_DEFAULT)
+
+    edgar_line   = (
+        f"EDGAR: {edgar['type']} filed {edgar['date']} ({edgar['ticker']}) — BREAKING"
+        if edgar else "EDGAR: No new filing in last 3 days"
+    )
+    trends_line  = (
+        f"X search: themes found — {', '.join(x_tr)}"
+        if x_tr else "X search: no bearer token / no results"
+    )
+    macro_line   = (
+        f"HY spread {research['hy_spread']:.2f}% | "
+        f"VIX slope {research['vix_slope']:.3f} "
+        f"({'backwardation' if research['vix_slope'] < 1.0 else 'contango'})"
+    ) if research.get("hy_spread") else ""
+
+    days   = ro.get("days_since_n2", 0)
+    phase  = ro.get("ro_phase_label", "—")
+    d_n2a  = ro.get("days_to_n2a")
+    d_rec  = ro.get("days_to_record")
+    cats   = []
+    if d_n2a  is not None and d_n2a  >= 0: cats.append(f"N-2/A in ~{d_n2a}d ({ro.get('n2a_est','?')})")
+    if d_rec  is not None and d_rec  >= 0: cats.append(f"Record date in ~{d_rec}d ({ro.get('record_est','?')})")
+
+    vs_sub = ""
+    if research.get("clm_vs_sub") is not None:
+        direction = "WINS vs RO sub" if research["open_market_wins"] else "above sub price"
+        vs_sub = (
+            f"CLM ${research['clm_price']:.2f} vs sub ~${CLM_SUB_PRICE_EST:.2f} "
+            f"— open-market buyer {direction} (${abs(research['clm_vs_sub']):.2f})\n"
+        )
+
+    yield_line = ""
+    if research.get("clm_yield", 0) > 0:
+        yield_line = f"Yield at price: CLM {research['clm_yield']:.1f}% | CRF {research['crf_yield']:.1f}%\n"
+
+    return (
+        f"── RESEARCH [{date.today().isoformat()}] ──\n"
+        f"{edgar_line}\n"
+        f"{trends_line}\n"
+        f"Angle: {angle}\n"
+        f"RO: Day {days} — {phase}"
+        + (f" | Upcoming: {' | '.join(cats)}" if cats else "")
+        + f"\n{vs_sub}"
+        + f"{yield_line}"
+        + (f"{macro_line}\n" if macro_line else "")
+        + f"Bias: {research.get('bias_label','?')} | TQQQ: {research.get('tqqq_score',0)}/100"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FORMAT BAITS  (returns dict with title, hook, framework, cta, hashtags, x_draft)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_bait1(data: dict) -> dict:
-    hook_template = BAIT1_HOOKS[_daily_variant(len(BAIT1_HOOKS))]
-    hook = hook_template.format(**data)
-    cta  = BAIT1_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT1_CTA_DIRECT
-
-    body_v = _body_variant()
-    body = BAIT1_BODY[body_v]   # [tweet2, tweet3]
+def format_bait1(data: dict, research: dict | None = None) -> dict:
+    angle     = (research or {}).get("angle", ANGLE_DEFAULT)
+    hook_idx  = _get_hook_idx(angle, "bait1", len(BAIT1_HOOKS))
+    hook      = BAIT1_HOOKS[hook_idx].format(**data)
+    hook_seo  = _seo_add_cashtags(hook)   # X: ensures $CLM $CRF on tweet 1
+    cta       = BAIT1_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT1_CTA_DIRECT
+    body      = BAIT1_BODY[_body_variant()]
 
     if USE_ENGAGEMENT_CTA:
         cta_tweet = (
@@ -583,10 +963,10 @@ def format_bait1(data: dict) -> dict:
             f"Live RO signal + entry alerts:\n{GUMROAD_LINK}\n\n"
             f"{BAIT1_HASHTAGS}"
         )
-    thread_tweets = [hook, body[0], body[1], cta_tweet]
+    thread_tweets = [hook_seo, body[0], body[1], cta_tweet]
 
     x_draft = (
-        f"{hook}\n\n"
+        f"{hook_seo}\n\n"
         f"{BAIT1_FRAMEWORK}\n\n"
         f"{cta}\n\n"
         f"{BAIT1_HASHTAGS}\n\n"
@@ -594,8 +974,8 @@ def format_bait1(data: dict) -> dict:
     )
     return {
         "emoji":         "🚨",
-        "title":         "Bait 1 — CLM/CRF Rights Offering",
-        "hook":          hook,
+        "title":         f"Bait 1 — CLM/CRF RO [{angle}]",
+        "hook":          hook_seo,
         "framework":     BAIT1_FRAMEWORK,
         "cta":           cta,
         "hashtags":      BAIT1_HASHTAGS,
@@ -604,12 +984,12 @@ def format_bait1(data: dict) -> dict:
     }
 
 
-def format_bait2(data: dict) -> dict:
-    hook = BAIT2_HOOKS[_daily_variant(len(BAIT2_HOOKS))]
-    cta  = BAIT2_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT2_CTA_DIRECT
-
-    body_v = _body_variant()
-    body = BAIT2_BODY[body_v]
+def format_bait2(data: dict, research: dict | None = None) -> dict:
+    angle    = (research or {}).get("angle", ANGLE_DEFAULT)
+    hook_idx = _get_hook_idx(angle, "bait2", len(BAIT2_HOOKS))
+    hook     = BAIT2_HOOKS[hook_idx]
+    cta      = BAIT2_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT2_CTA_DIRECT
+    body     = BAIT2_BODY[_body_variant()]
 
     if USE_ENGAGEMENT_CTA:
         cta_tweet = f"{BAIT2_CTA_ENGAGEMENT}\n\n{BAIT2_HASHTAGS}"
@@ -626,7 +1006,7 @@ def format_bait2(data: dict) -> dict:
     )
     return {
         "emoji":         "📋",
-        "title":         "Bait 2 — Options Wheel 3-Filter",
+        "title":         f"Bait 2 — Wheel 3-Filter [{angle}]",
         "hook":          hook,
         "framework":     BAIT2_FRAMEWORK,
         "cta":           cta,
@@ -636,13 +1016,12 @@ def format_bait2(data: dict) -> dict:
     }
 
 
-def format_bait3(data: dict) -> dict:
-    hook_template = BAIT3_HOOKS[_daily_variant(len(BAIT3_HOOKS))]
-    hook = hook_template.format(**data)
-    cta  = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
-
-    body_v = _body_variant()
-    body = BAIT3_BODY[body_v]
+def format_bait3(data: dict, research: dict | None = None) -> dict:
+    angle     = (research or {}).get("angle", ANGLE_DEFAULT)
+    hook_idx  = _get_hook_idx(angle, "bait3", len(BAIT3_HOOKS))
+    hook      = BAIT3_HOOKS[hook_idx].format(**data)
+    cta       = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
+    body      = BAIT3_BODY[_body_variant()]
 
     tqqq_score = data.get("tqqq_score", "?")
     if USE_ENGAGEMENT_CTA:
@@ -665,7 +1044,7 @@ def format_bait3(data: dict) -> dict:
     )
     return {
         "emoji":         "📊",
-        "title":         "Bait 3 — 60-Second Morning Posture",
+        "title":         f"Bait 3 — Morning Posture [{angle}]",
         "hook":          hook,
         "framework":     BAIT3_FRAMEWORK,
         "cta":           cta,
@@ -703,10 +1082,15 @@ def send_pushover(title: str, message: str, priority: int = 0) -> bool:
         return False
 
 
-def build_weekday_notification(bait: dict) -> tuple[str, str]:
-    """Returns (title, message) for a single-bait Pushover."""
+def build_weekday_notification(bait: dict, research_summary: str = "") -> tuple[str, str]:
+    """Returns (title, message) for a single-bait Pushover.
+    research_summary is prepended to the first bait only (pass "" for subsequent baits).
+    """
     title = f"[CF] {bait['emoji']} {bait['title']}"
-    body  = (
+    body  = ""
+    if research_summary:
+        body += f"{research_summary}\n\n"
+    body += (
         f"── HOOK ──\n{bait['hook']}\n\n"
         f"── FRAMEWORK ──\n{bait['framework']}\n\n"
         f"── CTA ──\n{bait['cta']}\n\n"
@@ -924,15 +1308,19 @@ def main():
         logger.info(f"Already sent today ({mode}) — skipping.")
         return
 
-    data = pull_market_data()
+    data     = pull_market_data()
+    research = _gather_research_context(data)   # research step — before any content generation
+    research_summary = _build_research_summary(research)
+
     logger.info(
         f"DB data: CLM={data['clm_price']:.2f} CRF={data['crf_price']:.2f} "
-        f"bias={data['bias_label']} tqqq={data['tqqq_score']} ro={data['ro_display']}"
+        f"bias={data['bias_label']} tqqq={data['tqqq_score']} ro={data['ro_display']} "
+        f"angle={research['angle']}"
     )
 
-    bait1 = format_bait1(data)
-    bait2 = format_bait2(data)
-    bait3 = format_bait3(data)
+    bait1 = format_bait1(data, research)
+    bait2 = format_bait2(data, research)
+    bait3 = format_bait3(data, research)
     baits = [bait1, bait2, bait3]
 
     closed = is_market_closed_today()
@@ -973,7 +1361,7 @@ def main():
                 elif THREADS_AUTO_POST_ENABLED and _post_threads is None:
                     th_status  = "❌ threads_client.py missing"
 
-                t, b = build_weekday_notification(bait)
+                t, b = build_weekday_notification(bait, research_summary if i == 0 else "")
                 send_pushover(t, f"{x_status} · {th_status}\n\n{b}", priority=-1)  # silent
                 if i < len(baits) - 1:
                     logger.info("Waiting 5 min before next thread (natural cadence)...")
@@ -990,8 +1378,8 @@ def main():
             send_pushover(title, body)
         else:
             logger.info("Market open — sending 3 bait draft notifications.")
-            for bait in baits:
-                t, b = build_weekday_notification(bait)
+            for i, bait in enumerate(baits):
+                t, b = build_weekday_notification(bait, research_summary if i == 0 else "")
                 send_pushover(t, b)
 
             # #free-data Discord embed (weekdays only)
