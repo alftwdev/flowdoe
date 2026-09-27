@@ -878,21 +878,15 @@ def _enforce_hook_length(tweet: str) -> str:
 
 def _seo_add_cashtags(tweet: str) -> str:
     """
-    Ensures $CLM and $CRF cashtags appear in tweet 1 for X topic indexing.
-    X algorithm uses cashtags for finance topic discovery (separate from hashtags).
+    Ensures $CLM appears in tweet 1 for X topic indexing.
+    X enforces a one-cashtag-per-tweet limit — only $CLM appended (primary ticker).
     Appended to first line only if not already present — never breaks mid-sentence.
     """
     has_clm = "$CLM" in tweet or "CLM" in tweet.split("\n")[0]
-    has_crf = "$CRF" in tweet or "CRF" in tweet.split("\n")[0]
-    if has_clm and has_crf:
+    if has_clm:
         return tweet
-    tags = ""
-    if not has_clm:
-        tags += " $CLM"
-    if not has_crf:
-        tags += " $CRF"
     lines = tweet.split("\n", 1)
-    lines[0] = lines[0].rstrip() + tags
+    lines[0] = lines[0].rstrip() + " $CLM"
     return "\n".join(lines)
 
 
@@ -972,7 +966,7 @@ def _build_reply_starters(bait_key: str, data: dict, research: dict) -> list[str
     if bait_key == "bait1":
         if angle == ANGLE_EDGAR_BREAKING:
             return [
-                f"N-2 just filed for $CLM/$CRF. Have you been through one of these before? What's your plan this cycle?",
+                f"N-2 just filed for $CLM. Have you been through one of these before? What's your plan this cycle?",
                 f"The RO cycle runs ~84 days from N-2 to expiration. Which phase worries you most — the announcement, the record date, or the subscription window?",
                 f"If you missed the N-2 alert — how did you find out? Curious how information flows for CEF holders.",
             ]
