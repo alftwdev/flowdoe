@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 24 2026 — bait_dispatcher.py + threads_client.py live: auto-posts 3 bait threads to X and Threads daily at 12:30 PM HST. Three Threads API debug rounds resolved: (1) token needed threads_content_publish scope, (2) POST body vs query string, (3) container status must reach FINISHED before publish. All content cleaned of emojis/special chars for Threads compatibility. X posting confirmed working 2026-09-25.*
+*Last updated: Sept 27 2026 — Weekend audit: snippet queue + bait_dispatcher.py weekend posting live (7 days/week). monitor.py log_ro_daily_snapshot() now cross-writes to ro_cycle_events for structured timeline analysis. ro_cycle_log cycle_low corrected (CLM $6.23 / CRF $6.05, Day 34). ro_cycle_events backfilled for Sept 14-27. EDGAR confirmed: NO N-2/A filed as of Day 44 — expected Oct 1-2.*
 
 ---
 
@@ -674,6 +674,15 @@ Sept 25 (Day 42):        CLM $6.38 | CRF $6.15 — recovering from post-ex-div l
                          Both still BELOW sub price (CLM $6.38 < $6.56 est. | CRF $6.15 < $6.37 est.)
                          Both generating ~23% yield at current prices (above 19% FV threshold)
                          RESERVE PLAN (unchanged): 2/3 still held — deploy at N-2/A + Oct 15 window
+Sept 27 (Day 44):        CLM $6.58 | CRF $6.36 — continued recovery toward sub price level
+                         EDGAR VERIFIED (Sept 27 audit): NO N-2/A filed for 2026 cycle.
+                           Most recent N-2/A for both CLM + CRF is 2025-04-08 (prior cycle).
+                           N-2/A is IMMINENT — expected Monday Oct 1 or Tuesday Oct 2 (Day 48-49).
+                         DB AUDIT DONE (Sept 27): ro_cycle_log cycle_low corrected (CLM $6.23/CRF $6.05).
+                           ro_cycle_events backfilled for Sept 14-27 (12 events added).
+                           monitor.py log_ro_daily_snapshot() now cross-writes to ro_cycle_events table.
+                         CLM still below sub price ($6.58 vs ~$6.56 est.) — barely. CRF below sub ($6.36 < $6.37).
+                         WATCH THIS WEEK: N-2/A on Oct 1-2 → expect 1-3 day selling pressure (Tranche 2 window).
 N-2/A expected:          ~Oct 1-2, 2026 (46-47 day historical gap from Aug 14 N-2)
                          → Finalizes sub price; press release follows 2 days later
                          → NEXT PRIMARY CATALYST: watch for 1-3 day selling pressure

@@ -499,6 +499,23 @@ def log_ro_daily_snapshot(ticker: str, price: float, nav: float) -> None:
             "phase":           phase,
         }
         db.update_state(log_key, json.dumps(record))
+        # Cross-write to structured ro_cycle_events for queryable timeline analysis
+        cycle_year = datetime.now().year
+        desc = (
+            f"Day {days_since_n2}: price={price:.3f} premium={premium_pct:.1f}% "
+            f"sub≈{sub_price:.2f} beat_ro={beat_ro} yield={yield_at_mkt:.1f}% phase={phase}"
+        )
+        db.log_ro_event(
+            ticker=ticker,
+            cycle_year=cycle_year,
+            event_date=today_str,
+            event_type="DAILY_SNAPSHOT",
+            price=round(price, 4),
+            nav=round(nav, 4),
+            premium_pct=premium_pct,
+            description=desc,
+            signal_source="monitor.py",
+        )
         logger.info(
             f"[RO Log] {ticker} day {days_since_n2}: price={price:.3f} "
             f"premium={premium_pct:.1f}% sub≈{sub_price:.2f} beat_ro={beat_ro} phase={phase}"
