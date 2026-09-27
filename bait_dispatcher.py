@@ -80,8 +80,22 @@ db = EcosystemDatabase()
 
 # ── Snippet queue (TheStreet-style — one focused post per slot, 5 slots/day) ─
 # No URLs in snippet posts — spam detection. CTA points readers to the bio only.
-SNIPPET_BIO_CTA_X       = "Free Discord invite — link in bio."
-SNIPPET_BIO_CTA_THREADS = "Full playbook + Discord in bio."
+# CTA pool — rotates by variant index so the same phrase doesn't repeat every post.
+# No URLs in post body (spam risk). Bio link does the converting.
+SNIPPET_BIO_CTAS_X = [
+    "More in bio.",
+    "Full breakdown → link in bio.",
+    "Free Discord in bio.",
+    "Full playbook in bio.",
+    "Link in bio.",
+]
+SNIPPET_BIO_CTAS_THREADS = [
+    "More in bio.",
+    "Full breakdown + Discord in bio.",
+    "Free Discord → link in bio.",
+    "Full playbook in bio.",
+    "More context in bio.",
+]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NYSE HOLIDAYS  (source: NYSE.com — confirmed 2026-2027)
@@ -1440,41 +1454,35 @@ def _adapt_for_threads(tweets: list[str]) -> list[str]:
 # ── 5 buckets × 5 variants = 25 unique snippets (pure {bio_cta} interpolation) ──
 
 _SNIPPETS_RO_CYCLE = [
-    # v0 — 4 catalysts frame
+    # v0 — 4 catalysts (most holders know one)
     (
-        "Most CLM/CRF holders notice one catalyst in a rights offering cycle — the initial drop.\n\n"
-        "There are four. Each creates a different window.\n\n"
-        "The calendar matters more than the price.\n\n"
+        "Most CLM/CRF holders track one catalyst in a rights offering cycle.\n"
+        "There are four. Each creates a different entry window.\n\n"
         "{bio_cta}"
     ),
     # v1 — record date is historically the low
     (
-        "In the last two CLM/CRF rights offering cycles, the lowest price landed at the record "
-        "date — not at the N-2 announcement and not at the ex-dividend dip.\n\n"
-        "Most retail holders had already exited or panicked by then.\n\n"
+        "In both recent CLM/CRF RO cycles, the cycle low landed at the record date —\n"
+        "not at the N-2 filing. Most holders had already sold by then.\n\n"
         "{bio_cta}"
     ),
     # v2 — open market beats RO participants
     (
-        "When CLM's open-market price falls below the estimated rights offering subscription "
-        "price, buyers here are getting a better deal than the rights offering participants.\n\n"
-        "That's a structural math edge most holders don't track.\n\n"
+        "When CLM's market price falls below the estimated sub price,\n"
+        "open-market buyers are paying less than rights offering participants.\n"
+        "Most holders never track this.\n\n"
         "{bio_cta}"
     ),
     # v3 — RO overhang mechanic
     (
-        "CLM/CRF rights offering overhang clears when the subscription window closes.\n\n"
-        "Until then, income buyers stay sidelined. After that, they return — "
-        "and the premium begins its recovery.\n\n"
-        "Knowing which phase you're in changes what you do.\n\n"
+        "CLM/CRF price pressure from a rights offering clears when the overhang does —\n"
+        "not at expiration. Knowing which phase you're in changes the decision.\n\n"
         "{bio_cta}"
     ),
     # v4 — EDGAR early warning
     (
-        "An N-2 filing on EDGAR is the earliest possible signal that a CLM/CRF rights "
-        "offering is incoming.\n\n"
-        "It appears before the press release. Before the price move. "
-        "Before most retail holders know anything.\n\n"
+        "An N-2 filing on EDGAR is the first signal a CLM/CRF rights offering is coming.\n"
+        "Before the press release. Before the price move.\n\n"
         "{bio_cta}"
     ),
 ]
@@ -1482,167 +1490,132 @@ _SNIPPETS_RO_CYCLE = [
 _SNIPPETS_PRICE_MATH = [
     # v0 — yield floor mechanism
     (
-        "CLM and CRF target a specific annual yield based on NAV.\n\n"
-        "When the market price falls well below that target yield, "
-        "income buyers structurally return.\n\n"
-        "That math is the floor. Not a prediction — a mechanism.\n\n"
+        "CLM and CRF have a yield floor built into their structure.\n"
+        "When price falls far enough below it, income buyers structurally return.\n"
+        "It's a mechanism, not a forecast.\n\n"
         "{bio_cta}"
     ),
     # v1 — DRIP at NAV = built-in alpha
     (
-        "CLM and CRF offer DRIP at NAV — shares issued at intrinsic value, not market premium.\n\n"
-        "On a fund trading above NAV, that's built-in alpha every single month.\n\n"
-        "Most holders don't use it.\n\n"
+        "CLM and CRF offer DRIP at NAV — new shares at intrinsic value, not market premium.\n"
+        "On a fund trading above NAV, that's built-in alpha every month.\n\n"
         "{bio_cta}"
     ),
     # v2 — October NAV lock
     (
-        "The CLM/CRF distribution amount is set once a year, based on October NAV.\n\n"
-        "What the NAV is when the Board meets this October determines "
-        "next year's income per share.\n\n"
-        "October is the most important month in the annual cycle.\n\n"
+        "The CLM/CRF distribution rate is locked once a year, based on October NAV.\n"
+        "One month sets the income per share for the next twelve.\n\n"
         "{bio_cta}"
     ),
     # v3 — positive carry structure
     (
-        "Borrowing at margin rates to hold a closed-end fund yielding significantly more "
-        "creates positive carry — the fund's monthly distributions cover the loan cost.\n\n"
-        "Structured correctly, the debt funds itself.\n\n"
+        "Borrowing to hold a fund yielding significantly more than the loan rate creates positive carry.\n"
+        "The distributions cover the interest. The loan funds itself.\n\n"
         "{bio_cta}"
     ),
-    # v4 — formula drives the thesis
+    # v4 — 21% formula
     (
-        "CLM's distribution is set at 21% of its October NAV.\n\n"
-        "When the market price falls well below that NAV, "
-        "you're buying income at a discount to the fund's own formula.\n\n"
-        "The yield math at a discount is the entire thesis.\n\n"
+        "CLM targets a 21% yield on its October NAV.\n"
+        "When market price falls below NAV, the yield you're buying exceeds the formula — at a discount.\n\n"
         "{bio_cta}"
     ),
 ]
 
 _SNIPPETS_WHEEL_CONCEPT = [
-    # v0 — VRP filter is the edge (backtest stat)
+    # v0 — VRP filter is the edge (published backtest)
     (
-        "A 5-year options wheel backtest without a volatility premium filter "
-        "returned roughly 1% CAGR — less than a savings account.\n\n"
-        "The same strategy with the filter: meaningfully better.\n\n"
+        "A 5-year options wheel backtest without a volatility premium filter returned ~1% CAGR.\n"
         "Same stocks. Same DTE. One filter is the entire difference.\n\n"
         "{bio_cta}"
     ),
     # v1 — earnings trap
     (
-        "The most invisible options wheel trap: earnings within 45 days of expiry.\n\n"
-        "IV looks elevated. The premium looks attractive.\n"
-        "Then the report drops — IV collapses before expiration.\n\n"
-        "Most screeners don't flag this automatically.\n\n"
+        "The most invisible wheel trap: selling puts within 45 days of earnings.\n"
+        "IV looks elevated. Then the report drops — IV collapses before expiry.\n\n"
         "{bio_cta}"
     ),
     # v2 — IVR alone isn't enough
     (
-        "High IVR tells you implied volatility is elevated vs its own recent history.\n\n"
-        "It doesn't tell you the premium edge is real today.\n\n"
-        "IV could be elevated because a spike already happened and normalized. "
-        "You'd be selling yesterday's fear at today's price.\n\n"
+        "High IVR means IV is elevated vs its own history — not that the premium edge is real today.\n"
+        "A past spike can inflate IVR for weeks after it normalizes.\n\n"
         "{bio_cta}"
     ),
     # v3 — defined risk vs naked CSP
     (
-        "When a wheel candidate is above $100 per share, a naked cash-secured put "
-        "ties up significant capital for one position.\n\n"
-        "A defined-risk spread captures similar premium with a fraction of the margin.\n\n"
-        "Same edge. Different capital structure.\n\n"
+        "Above $100/share, a naked cash-secured put ties up significant margin for one position.\n"
+        "A defined-risk spread captures similar premium with a fraction of the capital.\n\n"
         "{bio_cta}"
     ),
-    # v4 — Kelly sizing in elevated VIX regimes
+    # v4 — Kelly sizing in elevated VIX
     (
-        "Position sizing on the options wheel matters as much as entry.\n\n"
-        "When VIX is elevated above its historical range, most people size up — "
-        "seeing rich premium as opportunity.\n\n"
-        "Peer-reviewed research says size down in elevated VIX regimes. "
-        "The premium is real. The regime risk is also real.\n\n"
+        "In elevated VIX regimes, most sellers size up — rich premium looks like opportunity.\n"
+        "Peer-reviewed research says size down. The regime risk is also real.\n\n"
         "{bio_cta}"
     ),
 ]
 
 _SNIPPETS_MACRO_POSTURE = [
-    # v0 — calm market, loud calendar
+    # v0 — calm market + active catalyst can coexist (evergreen — no "this week")
     (
-        "Low VIX and a significant upcoming catalyst can both be true at the same time.\n\n"
-        "The broad market is calm. "
-        "The CLM/CRF rights offering calendar this week is not.\n\n"
+        "A calm VIX and an active market catalyst can exist at the same time.\n"
+        "The broad market being quiet doesn't mean every setup is quiet.\n\n"
         "{bio_cta}"
     ),
-    # v1 — VIX term structure (educational)
+    # v1 — VIX term structure shape vs single number
     (
-        "Most retail investors track the VIX as a single number.\n\n"
-        "Institutions track the shape of the VIX term structure — "
-        "whether near-term contracts are priced above or below long-term ones.\n\n"
-        "That shape tells you something the number alone doesn't.\n\n"
+        "Most investors track the VIX as a single number.\n"
+        "Institutions track the shape — near-term priced above long-term tells a different story.\n\n"
         "{bio_cta}"
     ),
-    # v2 — HY spread as canary
+    # v2 — HY spread as earliest macro canary
     (
-        "High-yield credit spreads tend to widen before equity markets react to credit stress.\n\n"
-        "It's one of the earliest macro signals available — "
-        "and most retail investors never check it.\n\n"
+        "High-yield credit spreads tend to widen before equity markets react to credit stress.\n"
+        "It's one of the earliest macro signals — most retail investors never check it.\n\n"
         "{bio_cta}"
     ),
     # v3 — CEF vs SPY divergence diagnostic
     (
-        "When CLM or CRF drops and SPY is flat, that's a CEF-specific event.\n\n"
-        "When both drop together, that's macro.\n\n"
-        "Diagnosing the type of move before reacting is what separates "
-        "a systematic response from a panic response.\n\n"
+        "When CLM drops and SPY is flat — that's a CEF-specific event, not macro.\n"
+        "Diagnosing the type of move before reacting changes everything.\n\n"
         "{bio_cta}"
     ),
-    # v4 — Treasury yield as income baseline
+    # v4 — 10Y yield as income baseline
     (
-        "The 10-year Treasury yield is the baseline rate every income investor "
-        "compares everything else against.\n\n"
-        "It sets the floor for what counts as a compelling yield — "
-        "and it's higher now than it's been in over a decade.\n\n"
+        "The 10-year Treasury yield is the baseline every income investor compares everything against.\n"
+        "Higher rates set a higher bar for what counts as a compelling yield.\n\n"
         "{bio_cta}"
     ),
 ]
 
 _SNIPPETS_PREMIUM_Z = [
-    # v0 — October tells you which path (recovery vs cut)
+    # v0 — October tells you recovery vs distribution cut
     (
-        "CLM and CRF trade at a premium to NAV because income investors value "
-        "the managed monthly distribution above intrinsic price.\n\n"
-        "When that premium compresses significantly, one of two things follows: "
-        "recovery or a distribution cut.\n\n"
-        "October tells you which.\n\n"
+        "When the CLM/CRF premium compresses sharply, two paths follow: recovery or a distribution cut.\n"
+        "October NAV tells you which one.\n\n"
         "{bio_cta}"
     ),
     # v1 — mean reversion mechanism
     (
-        "The CLM/CRF premium has averaged near 19% over the long term.\n\n"
-        "At compression extremes, the historical pattern has been mean reversion — "
-        "not because the price has to recover, but because income buyers return "
-        "when the yield becomes compelling.\n\n"
+        "The CLM/CRF premium has historically mean-reverted after compression extremes.\n"
+        "Not because it has to — because income buyers return when the yield becomes compelling.\n\n"
         "{bio_cta}"
     ),
-    # v2 — why premiums compress in ROs
+    # v2 — why premiums compress in ROs (structural)
     (
-        "During a CLM/CRF rights offering, new shares are issued near NAV — "
-        "diluting the existing market premium.\n\n"
-        "This is the structural reason premiums compress during the offering window.\n\n"
-        "Once the window closes, the dilution is priced in. And buyers return.\n\n"
+        "New CLM/CRF shares issued near NAV during a rights offering dilute the existing premium.\n"
+        "Once the window closes, the dilution is priced in. Then buyers return.\n\n"
         "{bio_cta}"
     ),
-    # v3 — premium/yield are mechanically linked
+    # v3 — premium/yield inverse link
     (
-        "CLM's premium to NAV and its current yield are mechanically linked — opposite direction.\n\n"
+        "CLM's premium to NAV and its yield move in opposite directions by design.\n"
         "Lower premium = higher yield on the same distribution.\n\n"
-        "When the premium is near cycle lows, the income buyer math becomes most compelling.\n\n"
         "{bio_cta}"
     ),
-    # v4 — DRIP advantage widens at low premium
+    # v4 — DRIP advantage at low premium
     (
-        "When CLM's premium is near historical lows and you hold DRIP at NAV, "
-        "new shares are issued at intrinsic value while the market underprices the fund.\n\n"
-        "The gap between your DRIP price and the market price works in your favor.\n\n"
+        "Holding CLM/CRF DRIP at NAV when the premium is near lows means new shares below market price.\n"
+        "The gap between DRIP cost and market price works in your favor.\n\n"
         "{bio_cta}"
     ),
 ]
@@ -1695,12 +1668,13 @@ def _build_snippet_text(bucket: str, platform: str = "x") -> str:
     """
     Builds a single snippet post for the given bucket and platform.
     Rotates through 5 variants per bucket using the same _daily_variant() logic as hooks.
-    X: ≤ 270 chars (leaves room for line breaks to breathe without hard truncation).
-    Threads: ≤ 490 chars (under 500-char API limit; strips any stray emojis).
+    CTA rotates by variant index — same phrase never repeats across consecutive posts.
+    X: ≤ 270 chars. Threads: ≤ 490 chars (strips any stray emojis).
     """
     variants = _SNIPPETS_BY_BUCKET[bucket]
     idx  = _daily_variant(len(variants))
-    cta  = SNIPPET_BIO_CTA_X if platform == "x" else SNIPPET_BIO_CTA_THREADS
+    pool = SNIPPET_BIO_CTAS_X if platform == "x" else SNIPPET_BIO_CTAS_THREADS
+    cta  = pool[idx % len(pool)]
     text = variants[idx].format(bio_cta=cta)
 
     if platform == "threads":
