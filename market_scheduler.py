@@ -131,14 +131,15 @@ SCHEDULE = [
     # Silent Pushover recap fires even when X_AUTO_POST_ENABLED=false (no credentials yet).
     # Deduped via DB key bait_last_sent_autopost_{date}.
     (12, 30, "bait_autopost",           "bait_dispatcher", ["--auto-post"], False),
-    # TheStreet-style snippet queue — 5 slots/day, 90-min intervals, ET market hours.
+    # TheStreet-style snippet queue — 5 slots/day, 90-min intervals, 7 days/week.
+    # Weekdays: equity/wheel/RO content. Weekends: macro/crypto/world-catalyst content.
     # Each posts one unsent bucket to X + Threads; deduped per bucket per day in DB.
-    # weekdays_only=True keeps them off weekends.
-    (14, 30, "snippet_930",  "bait_dispatcher", ["--mode", "snippet"], True),   # 9:30 AM ET
-    (16,  0, "snippet_1100", "bait_dispatcher", ["--mode", "snippet"], True),   # 11:00 AM ET
-    (17, 30, "snippet_1230", "bait_dispatcher", ["--mode", "snippet"], True),   # 12:30 PM ET
-    (19,  0, "snippet_1400", "bait_dispatcher", ["--mode", "snippet"], True),   # 2:00 PM ET
-    (20, 30, "snippet_1530", "bait_dispatcher", ["--mode", "snippet"], True),   # 3:30 PM ET
+    # weekdays_only=False — crypto/futures/world news runs Sat+Sun too.
+    (14, 30, "snippet_930",  "bait_dispatcher", ["--mode", "snippet"], False),  # 9:30 AM ET
+    (16,  0, "snippet_1100", "bait_dispatcher", ["--mode", "snippet"], False),  # 11:00 AM ET
+    (17, 30, "snippet_1230", "bait_dispatcher", ["--mode", "snippet"], False),  # 12:30 PM ET
+    (19,  0, "snippet_1400", "bait_dispatcher", ["--mode", "snippet"], False),  # 2:00 PM ET
+    (20, 30, "snippet_1530", "bait_dispatcher", ["--mode", "snippet"], False),  # 3:30 PM ET
     # weekly_scorecard fires Friday only — gated here, not inside the script.
     # weekdays_only=True keeps it off weekends; Friday check is the tuple's 7th element.
     # TQQQ sniper sweep — every 30 min during RTH (14:00–20:30 UTC).

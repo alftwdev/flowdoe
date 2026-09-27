@@ -1655,9 +1655,12 @@ _SNIPPETS_BY_BUCKET = {
     "premium_z":     _SNIPPETS_PREMIUM_Z,
 }
 
-# Priority order depends on whether an active RO is in progress
-_BUCKET_PRIORITY_RO   = ["ro_cycle", "price_math", "premium_z", "wheel_concept", "macro_posture"]
-_BUCKET_PRIORITY_CALM = ["macro_posture", "wheel_concept", "price_math", "ro_cycle", "premium_z"]
+# Priority order depends on market day + whether an active RO is in progress.
+# Weekends: lead with macro/world catalysts (crypto/futures/rates/geopolitical) and
+# CEF premium context — wheel_concept moves last (no market open, no CSP entries).
+_BUCKET_PRIORITY_RO      = ["ro_cycle", "price_math", "premium_z", "wheel_concept", "macro_posture"]
+_BUCKET_PRIORITY_CALM    = ["macro_posture", "wheel_concept", "price_math", "ro_cycle", "premium_z"]
+_BUCKET_PRIORITY_WEEKEND = ["macro_posture", "premium_z", "ro_cycle", "price_math", "wheel_concept"]
 
 
 def _snippet_db_key(bucket: str) -> str:
@@ -1674,7 +1677,14 @@ def _snippet_mark_sent(bucket: str):
 
 def _next_snippet_bucket(data: dict):
     """Returns highest-priority unsent bucket for today, or None if all exhausted."""
-    priority = _BUCKET_PRIORITY_RO if data.get("ro_active") else _BUCKET_PRIORITY_CALM
+    from datetime import date as _date
+    is_weekend = _date.today().weekday() >= 5
+    if is_weekend:
+        priority = _BUCKET_PRIORITY_WEEKEND
+    elif data.get("ro_active"):
+        priority = _BUCKET_PRIORITY_RO
+    else:
+        priority = _BUCKET_PRIORITY_CALM
     for bucket in priority:
         if not _snippet_sent_today(bucket):
             return bucket
