@@ -78,6 +78,11 @@ THREADS_AUTO_POST_ENABLED = os.getenv("THREADS_AUTO_POST_ENABLED", "false").lowe
 
 db = EcosystemDatabase()
 
+# ── Snippet queue (TheStreet-style — one focused post per slot, 5 slots/day) ─
+# No URLs in snippet posts — spam detection. CTA points readers to the bio only.
+SNIPPET_BIO_CTA_X       = "Free Discord invite — link in bio."
+SNIPPET_BIO_CTA_THREADS = "Full playbook + Discord in bio."
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NYSE HOLIDAYS  (source: NYSE.com — confirmed 2026-2027)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1421,6 +1426,424 @@ def _adapt_for_threads(tweets: list[str]) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SNIPPET QUEUE  (TheStreet-style — 1 punchy post per 90-min slot, 5 slots/day)
+#
+# 5 content buckets, each posted once per calendar day.  Priority order adapts to
+# live data (RO-active = CLM/CRF content first; quiet day = macro/wheel first).
+# Dedup key per bucket: snippet_last_{bucket}_{YYYY-MM-DD} → DB.
+#
+# Threads community targeting: Threads API has no community parameter.
+# We rely on investing/trading vocabulary in the text so Meta's NLP serves to
+# the "Investing" audience naturally.  No hashtags (Meta confirmed no reach boost).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 5 buckets × 5 variants = 25 unique snippets (pure {bio_cta} interpolation) ──
+
+_SNIPPETS_RO_CYCLE = [
+    # v0 — 4 catalysts frame
+    (
+        "Most CLM/CRF holders notice one catalyst in a rights offering cycle — the initial drop.\n\n"
+        "There are four. Each creates a different window.\n\n"
+        "The calendar matters more than the price.\n\n"
+        "{bio_cta}"
+    ),
+    # v1 — record date is historically the low
+    (
+        "In the last two CLM/CRF rights offering cycles, the lowest price landed at the record "
+        "date — not at the N-2 announcement and not at the ex-dividend dip.\n\n"
+        "Most retail holders had already exited or panicked by then.\n\n"
+        "{bio_cta}"
+    ),
+    # v2 — open market beats RO participants
+    (
+        "When CLM's open-market price falls below the estimated rights offering subscription "
+        "price, buyers here are getting a better deal than the rights offering participants.\n\n"
+        "That's a structural math edge most holders don't track.\n\n"
+        "{bio_cta}"
+    ),
+    # v3 — RO overhang mechanic
+    (
+        "CLM/CRF rights offering overhang clears when the subscription window closes.\n\n"
+        "Until then, income buyers stay sidelined. After that, they return — "
+        "and the premium begins its recovery.\n\n"
+        "Knowing which phase you're in changes what you do.\n\n"
+        "{bio_cta}"
+    ),
+    # v4 — EDGAR early warning
+    (
+        "An N-2 filing on EDGAR is the earliest possible signal that a CLM/CRF rights "
+        "offering is incoming.\n\n"
+        "It appears before the press release. Before the price move. "
+        "Before most retail holders know anything.\n\n"
+        "{bio_cta}"
+    ),
+]
+
+_SNIPPETS_PRICE_MATH = [
+    # v0 — yield floor mechanism
+    (
+        "CLM and CRF target a specific annual yield based on NAV.\n\n"
+        "When the market price falls well below that target yield, "
+        "income buyers structurally return.\n\n"
+        "That math is the floor. Not a prediction — a mechanism.\n\n"
+        "{bio_cta}"
+    ),
+    # v1 — DRIP at NAV = built-in alpha
+    (
+        "CLM and CRF offer DRIP at NAV — shares issued at intrinsic value, not market premium.\n\n"
+        "On a fund trading above NAV, that's built-in alpha every single month.\n\n"
+        "Most holders don't use it.\n\n"
+        "{bio_cta}"
+    ),
+    # v2 — October NAV lock
+    (
+        "The CLM/CRF distribution amount is set once a year, based on October NAV.\n\n"
+        "What the NAV is when the Board meets this October determines "
+        "next year's income per share.\n\n"
+        "October is the most important month in the annual cycle.\n\n"
+        "{bio_cta}"
+    ),
+    # v3 — positive carry structure
+    (
+        "Borrowing at margin rates to hold a closed-end fund yielding significantly more "
+        "creates positive carry — the fund's monthly distributions cover the loan cost.\n\n"
+        "Structured correctly, the debt funds itself.\n\n"
+        "{bio_cta}"
+    ),
+    # v4 — formula drives the thesis
+    (
+        "CLM's distribution is set at 21% of its October NAV.\n\n"
+        "When the market price falls well below that NAV, "
+        "you're buying income at a discount to the fund's own formula.\n\n"
+        "The yield math at a discount is the entire thesis.\n\n"
+        "{bio_cta}"
+    ),
+]
+
+_SNIPPETS_WHEEL_CONCEPT = [
+    # v0 — VRP filter is the edge (backtest stat)
+    (
+        "A 5-year options wheel backtest without a volatility premium filter "
+        "returned roughly 1% CAGR — less than a savings account.\n\n"
+        "The same strategy with the filter: meaningfully better.\n\n"
+        "Same stocks. Same DTE. One filter is the entire difference.\n\n"
+        "{bio_cta}"
+    ),
+    # v1 — earnings trap
+    (
+        "The most invisible options wheel trap: earnings within 45 days of expiry.\n\n"
+        "IV looks elevated. The premium looks attractive.\n"
+        "Then the report drops — IV collapses before expiration.\n\n"
+        "Most screeners don't flag this automatically.\n\n"
+        "{bio_cta}"
+    ),
+    # v2 — IVR alone isn't enough
+    (
+        "High IVR tells you implied volatility is elevated vs its own recent history.\n\n"
+        "It doesn't tell you the premium edge is real today.\n\n"
+        "IV could be elevated because a spike already happened and normalized. "
+        "You'd be selling yesterday's fear at today's price.\n\n"
+        "{bio_cta}"
+    ),
+    # v3 — defined risk vs naked CSP
+    (
+        "When a wheel candidate is above $100 per share, a naked cash-secured put "
+        "ties up significant capital for one position.\n\n"
+        "A defined-risk spread captures similar premium with a fraction of the margin.\n\n"
+        "Same edge. Different capital structure.\n\n"
+        "{bio_cta}"
+    ),
+    # v4 — Kelly sizing in elevated VIX regimes
+    (
+        "Position sizing on the options wheel matters as much as entry.\n\n"
+        "When VIX is elevated above its historical range, most people size up — "
+        "seeing rich premium as opportunity.\n\n"
+        "Peer-reviewed research says size down in elevated VIX regimes. "
+        "The premium is real. The regime risk is also real.\n\n"
+        "{bio_cta}"
+    ),
+]
+
+_SNIPPETS_MACRO_POSTURE = [
+    # v0 — calm market, loud calendar
+    (
+        "Low VIX and a significant upcoming catalyst can both be true at the same time.\n\n"
+        "The broad market is calm. "
+        "The CLM/CRF rights offering calendar this week is not.\n\n"
+        "{bio_cta}"
+    ),
+    # v1 — VIX term structure (educational)
+    (
+        "Most retail investors track the VIX as a single number.\n\n"
+        "Institutions track the shape of the VIX term structure — "
+        "whether near-term contracts are priced above or below long-term ones.\n\n"
+        "That shape tells you something the number alone doesn't.\n\n"
+        "{bio_cta}"
+    ),
+    # v2 — HY spread as canary
+    (
+        "High-yield credit spreads tend to widen before equity markets react to credit stress.\n\n"
+        "It's one of the earliest macro signals available — "
+        "and most retail investors never check it.\n\n"
+        "{bio_cta}"
+    ),
+    # v3 — CEF vs SPY divergence diagnostic
+    (
+        "When CLM or CRF drops and SPY is flat, that's a CEF-specific event.\n\n"
+        "When both drop together, that's macro.\n\n"
+        "Diagnosing the type of move before reacting is what separates "
+        "a systematic response from a panic response.\n\n"
+        "{bio_cta}"
+    ),
+    # v4 — Treasury yield as income baseline
+    (
+        "The 10-year Treasury yield is the baseline rate every income investor "
+        "compares everything else against.\n\n"
+        "It sets the floor for what counts as a compelling yield — "
+        "and it's higher now than it's been in over a decade.\n\n"
+        "{bio_cta}"
+    ),
+]
+
+_SNIPPETS_PREMIUM_Z = [
+    # v0 — October tells you which path (recovery vs cut)
+    (
+        "CLM and CRF trade at a premium to NAV because income investors value "
+        "the managed monthly distribution above intrinsic price.\n\n"
+        "When that premium compresses significantly, one of two things follows: "
+        "recovery or a distribution cut.\n\n"
+        "October tells you which.\n\n"
+        "{bio_cta}"
+    ),
+    # v1 — mean reversion mechanism
+    (
+        "The CLM/CRF premium has averaged near 19% over the long term.\n\n"
+        "At compression extremes, the historical pattern has been mean reversion — "
+        "not because the price has to recover, but because income buyers return "
+        "when the yield becomes compelling.\n\n"
+        "{bio_cta}"
+    ),
+    # v2 — why premiums compress in ROs
+    (
+        "During a CLM/CRF rights offering, new shares are issued near NAV — "
+        "diluting the existing market premium.\n\n"
+        "This is the structural reason premiums compress during the offering window.\n\n"
+        "Once the window closes, the dilution is priced in. And buyers return.\n\n"
+        "{bio_cta}"
+    ),
+    # v3 — premium/yield are mechanically linked
+    (
+        "CLM's premium to NAV and its current yield are mechanically linked — opposite direction.\n\n"
+        "Lower premium = higher yield on the same distribution.\n\n"
+        "When the premium is near cycle lows, the income buyer math becomes most compelling.\n\n"
+        "{bio_cta}"
+    ),
+    # v4 — DRIP advantage widens at low premium
+    (
+        "When CLM's premium is near historical lows and you hold DRIP at NAV, "
+        "new shares are issued at intrinsic value while the market underprices the fund.\n\n"
+        "The gap between your DRIP price and the market price works in your favor.\n\n"
+        "{bio_cta}"
+    ),
+]
+
+_SNIPPETS_BY_BUCKET = {
+    "ro_cycle":      _SNIPPETS_RO_CYCLE,
+    "price_math":    _SNIPPETS_PRICE_MATH,
+    "wheel_concept": _SNIPPETS_WHEEL_CONCEPT,
+    "macro_posture": _SNIPPETS_MACRO_POSTURE,
+    "premium_z":     _SNIPPETS_PREMIUM_Z,
+}
+
+# Priority order depends on whether an active RO is in progress
+_BUCKET_PRIORITY_RO   = ["ro_cycle", "price_math", "premium_z", "wheel_concept", "macro_posture"]
+_BUCKET_PRIORITY_CALM = ["macro_posture", "wheel_concept", "price_math", "ro_cycle", "premium_z"]
+
+
+def _snippet_db_key(bucket: str) -> str:
+    return f"snippet_last_{bucket}_{date.today().isoformat()}"
+
+
+def _snippet_sent_today(bucket: str) -> bool:
+    return bool(db.get_state(_snippet_db_key(bucket)))
+
+
+def _snippet_mark_sent(bucket: str):
+    db.update_state(_snippet_db_key(bucket), datetime.utcnow().isoformat())
+
+
+def _next_snippet_bucket(data: dict):
+    """Returns highest-priority unsent bucket for today, or None if all exhausted."""
+    priority = _BUCKET_PRIORITY_RO if data.get("ro_active") else _BUCKET_PRIORITY_CALM
+    for bucket in priority:
+        if not _snippet_sent_today(bucket):
+            return bucket
+    return None
+
+
+def _build_snippet_text(bucket: str, platform: str = "x") -> str:
+    """
+    Builds a single snippet post for the given bucket and platform.
+    Rotates through 5 variants per bucket using the same _daily_variant() logic as hooks.
+    X: ≤ 270 chars (leaves room for line breaks to breathe without hard truncation).
+    Threads: ≤ 490 chars (under 500-char API limit; strips any stray emojis).
+    """
+    variants = _SNIPPETS_BY_BUCKET[bucket]
+    idx  = _daily_variant(len(variants))
+    cta  = SNIPPET_BIO_CTA_X if platform == "x" else SNIPPET_BIO_CTA_THREADS
+    text = variants[idx].format(bio_cta=cta)
+
+    if platform == "threads":
+        text = _EMOJI_RE.sub("", text).strip()
+        if len(text) > 490:
+            text = text[:487].rsplit("\n", 1)[0].rstrip() + "\n\n" + cta
+    else:
+        # X: keep well under 280 so the post has visual breathing room
+        if len(text) > 270:
+            text = text[:267].rsplit("\n", 1)[0].rstrip() + "\n\n" + cta
+
+    return text
+
+
+def _get_threads_token() -> str:
+    """DB (auto-refreshed live token) > .env fallback."""
+    try:
+        t = db.get_state("threads_access_token_live")
+        if t:
+            return t
+    except Exception:
+        pass
+    return os.getenv("THREADS_ACCESS_TOKEN", "")
+
+
+def _post_single_tweet(text: str) -> bool:
+    """Post one standalone tweet (not a thread)."""
+    try:
+        import tweepy
+    except ImportError:
+        logger.warning("tweepy not installed — run: pip3.10 install tweepy")
+        return False
+
+    if not all([TWITTER_API_KEY, TWITTER_API_SECRET,
+                TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
+        logger.warning("X credentials missing — skipping snippet tweet")
+        return False
+
+    client = tweepy.Client(
+        consumer_key=TWITTER_API_KEY,
+        consumer_secret=TWITTER_API_SECRET,
+        access_token=TWITTER_ACCESS_TOKEN,
+        access_token_secret=TWITTER_ACCESS_TOKEN_SECRET,
+    )
+    try:
+        resp = client.create_tweet(text=text[:280])
+        logger.info(f"Snippet posted to X (id={resp.data['id']})")
+        return True
+    except Exception as e:
+        logger.error(f"X snippet post failed: {e}")
+        return False
+
+
+def _post_single_threads(text: str) -> bool:
+    """
+    Post one text post to Threads.
+    Inlined (no threads_client import) so it works on Python 3.9 locally.
+    On PA (python3.10) threads_client also works, but this avoids the dependency.
+    """
+    token   = _get_threads_token()
+    user_id = os.getenv("THREADS_USER_ID", "")
+    if not token or not user_id:
+        logger.warning("THREADS_ACCESS_TOKEN or THREADS_USER_ID missing — skipping Threads snippet")
+        return False
+
+    base = "https://graph.threads.net/v1.0"
+
+    # Step 1 — create container
+    r = requests.post(
+        f"{base}/{user_id}/threads",
+        data={"media_type": "TEXT", "text": text[:500], "access_token": token},
+        timeout=15,
+    )
+    if not r.ok:
+        logger.error(f"Threads snippet container {r.status_code}: {r.text}")
+        return False
+    container_id = r.json().get("id")
+    logger.info(f"Threads snippet container: {container_id}")
+
+    # Step 2 — poll FINISHED (text posts typically <10 s)
+    for _ in range(20):
+        time.sleep(3)
+        pr = requests.get(
+            f"{base}/{container_id}",
+            params={"fields": "status,error_message", "access_token": token},
+            timeout=10,
+        )
+        if pr.ok:
+            s = pr.json().get("status", "")
+            if s == "FINISHED":
+                break
+            if s == "ERROR":
+                logger.error(f"Threads container error: {pr.json().get('error_message')}")
+                return False
+    else:
+        logger.error("Threads snippet container not FINISHED after 60s")
+        return False
+
+    # Step 3 — publish
+    pub = requests.post(
+        f"{base}/{user_id}/threads_publish",
+        data={"creation_id": container_id, "access_token": token},
+        timeout=15,
+    )
+    if not pub.ok:
+        logger.error(f"Threads snippet publish {pub.status_code}: {pub.text}")
+        return False
+
+    logger.info(f"Snippet posted to Threads (id={pub.json().get('id')})")
+    return True
+
+
+def run_snippet_queue(data: dict, research: dict) -> bool:
+    """
+    Posts the next unsent snippet bucket for today to X and Threads.
+    Called by market_scheduler.py every 90 min during ET market hours.
+    Returns True when a snippet was posted, False when all 5 buckets are exhausted.
+    """
+    bucket = _next_snippet_bucket(data)
+    if bucket is None:
+        logger.info("Snippet queue: all buckets sent today — nothing to post.")
+        return False
+
+    logger.info(f"Snippet queue: bucket={bucket}")
+
+    x_ok  = False
+    th_ok = False
+
+    if X_AUTO_POST_ENABLED:
+        x_text = _build_snippet_text(bucket, platform="x")
+        x_ok   = _post_single_tweet(x_text)
+        logger.info(f"Snippet X: {'ok' if x_ok else 'failed'} — {len(x_text)} chars")
+
+    if THREADS_AUTO_POST_ENABLED:
+        th_text = _build_snippet_text(bucket, platform="threads")
+        th_ok   = _post_single_threads(th_text)
+        logger.info(f"Snippet Threads: {'ok' if th_ok else 'failed'} — {len(th_text)} chars")
+
+    if x_ok or th_ok:
+        _snippet_mark_sent(bucket)
+        send_pushover(
+            f"Snippet posted — {bucket}",
+            f"X: {'ok' if x_ok else 'off/fail'} · Threads: {'ok' if th_ok else 'off/fail'}\n\n"
+            + _build_snippet_text(bucket, platform="x"),
+            priority=-1,
+        )
+    else:
+        logger.warning(f"Snippet bucket={bucket}: both platforms disabled or failed — not marking sent")
+
+    return x_ok or th_ok
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DEDUP  (separate keys for draft vs auto-post modes)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1446,7 +1869,21 @@ def main():
         help="Post threads directly to X (Twitter API v2). Fires at 12:30 UTC (8:30 AM ET). "
              "Requires X_AUTO_POST_ENABLED=true + Twitter credentials in .env."
     )
+    parser.add_argument(
+        "--mode", default=None, choices=["snippet"],
+        help="snippet: TheStreet-style single post for the next unsent bucket today. "
+             "Fired by market_scheduler.py every 90 min during ET market hours (5 slots)."
+    )
     args = parser.parse_args()
+
+    # ── SNIPPET mode — independent of bait-thread flow ───────────────────────
+    if args.mode == "snippet":
+        today_str = date.today().strftime("%Y-%m-%d")
+        logger.info(f"bait_dispatcher snippet mode — {today_str}")
+        data     = pull_market_data()
+        research = _gather_research_context(data)
+        run_snippet_queue(data, research)
+        return
 
     # Mode determines dedup key + behavior
     mode = "autopost" if args.auto_post else "draft"
