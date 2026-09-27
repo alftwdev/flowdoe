@@ -860,6 +860,22 @@ def _get_hook_idx(angle: str, bait_key: str, n_hooks: int) -> int:
     return _daily_variant(n_hooks)
 
 
+_HOOK_CHAR_LIMIT = 240  # X preview cap — longer tweets show "Show more" and kill engagement
+
+
+def _enforce_hook_length(tweet: str) -> str:
+    """Warns and trims hook tweet to 240 chars. See CONTENT_PLAYBOOK.md §1."""
+    if len(tweet) > _HOOK_CHAR_LIMIT:
+        logger.warning(
+            f"Hook tweet is {len(tweet)} chars (limit {_HOOK_CHAR_LIMIT}) — "
+            "trimming to avoid X preview truncation. Shorten the hook template."
+        )
+        trimmed = tweet[:_HOOK_CHAR_LIMIT]
+        last_break = trimmed.rfind("\n")
+        tweet = trimmed[:last_break].rstrip() if last_break > 180 else trimmed.rstrip()
+    return tweet
+
+
 def _seo_add_cashtags(tweet: str) -> str:
     """
     Ensures $CLM and $CRF cashtags appear in tweet 1 for X topic indexing.
@@ -1067,7 +1083,7 @@ def format_bait1(data: dict, research: dict | None = None) -> dict:
     angle     = (research or {}).get("angle", ANGLE_DEFAULT)
     hook_idx  = _get_hook_idx(angle, "bait1", len(BAIT1_HOOKS))
     hook      = BAIT1_HOOKS[hook_idx].format(**data)
-    hook_seo  = _seo_add_cashtags(hook)   # X: ensures $CLM $CRF on tweet 1
+    hook_seo  = _enforce_hook_length(_seo_add_cashtags(hook))  # cashtags then hard 240-char cap
     cta       = BAIT1_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT1_CTA_DIRECT
     body      = BAIT1_BODY[_body_variant()]
 
@@ -1110,7 +1126,7 @@ def format_bait1(data: dict, research: dict | None = None) -> dict:
 def format_bait2(data: dict, research: dict | None = None) -> dict:
     angle    = (research or {}).get("angle", ANGLE_DEFAULT)
     hook_idx = _get_hook_idx(angle, "bait2", len(BAIT2_HOOKS))
-    hook     = BAIT2_HOOKS[hook_idx]
+    hook     = _enforce_hook_length(BAIT2_HOOKS[hook_idx])
     cta      = BAIT2_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT2_CTA_DIRECT
     body     = BAIT2_BODY[_body_variant()]
 
@@ -1144,7 +1160,7 @@ def format_bait2(data: dict, research: dict | None = None) -> dict:
 def format_bait3(data: dict, research: dict | None = None) -> dict:
     angle     = (research or {}).get("angle", ANGLE_DEFAULT)
     hook_idx  = _get_hook_idx(angle, "bait3", len(BAIT3_HOOKS))
-    hook      = BAIT3_HOOKS[hook_idx].format(**data)
+    hook      = _enforce_hook_length(BAIT3_HOOKS[hook_idx].format(**data))
     cta       = BAIT3_CTA_ENGAGEMENT if USE_ENGAGEMENT_CTA else BAIT3_CTA_DIRECT
     body      = BAIT3_BODY[_body_variant()]
 
