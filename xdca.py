@@ -105,7 +105,7 @@ ZONE_CONFIG = {
         "near_52w_low_pct":   3.0,
         "color":              0xB71C1C,
         "pushover":           True,
-        "discord":            True,
+        "discord":            False,
         "cooldown_hours":     4,
     },
     "C": {
@@ -115,8 +115,8 @@ ZONE_CONFIG = {
         "vixy_z_min":         0.8,
         "near_52w_low_pct":   6.0,
         "color":              0xFF4500,
-        "pushover":           False,
-        "discord":            True,
+        "pushover":           True,
+        "discord":            False,
         "cooldown_hours":     6,
     },
     "B": {
@@ -431,7 +431,7 @@ def build_alert_embed(sym, price, rsi, zone_key, zone_result, vixy_z, ul_price):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def dispatch_eod_summary(vixy_z):
-    """Send a compact EOD status card for all 4 DCA tickers to #dividend-ccetfs."""
+    """Personal EOD DCA status — Pushover only (not Discord). Personal watchlist data."""
     today = datetime.now().strftime("%Y-%m-%d")
     key   = f"xdca_eod_summary_{today}"
     if db.get_state(key):
@@ -446,39 +446,30 @@ def dispatch_eod_summary(vixy_z):
         draw   = db.get_state(f"xdca_{sym}_drawdown_pct") or "—"
 
         if zone in ("C", "D"):
-            zone_display = f"🔴 {zone} — {ZONE_CONFIG[zone]['label']}"
+            badge = f"{zone} ALERT"
             any_signal = True
         elif zone == "B":
-            zone_display = "⚠️ B — ACCUMULATE"
+            badge = "B ACCUMULATE"
             any_signal = True
         elif zone == "A":
-            zone_display = "🟡 A — WATCH"
+            badge = "A WATCH"
             any_signal = True
         else:
-            zone_display = "🟢 No signal"
+            badge = "—"
 
-        ul  = DCA_TICKERS[sym]["underlying"]
-        lines.append(f"**{sym}** — ${price} | RSI {rsi} | {ul} -{draw}% | {zone_display}")
+        ul = DCA_TICKERS[sym]["underlying"]
+        lines.append(f"{sym} ${price} RSI {rsi} | {ul} -{draw}% | {badge}")
 
     if not any_signal:
         db.update_state(key, "snoozed")
-        logger.info("[EOD] All tickers at no-signal — EOD summary snoozed")
+        logger.info("[EOD] All tickers no-signal — snoozed")
         return
 
-    vixy_str = f"{vixy_z:+.2f}σ" if vixy_z is not None else "n/a"
-    body = "\n".join(lines) + f"\n\nVIXY fear: `{vixy_str}` | Monthly distributions → CLM/CRF margin paydown"
-
-    payload = {
-        "embeds": [{
-            "title":       "Tier 2 DCA — EOD Status",
-            "description": body,
-            "color":       0x2ecc71,
-            "footer":      {"text": f"MLPI · XBCI · CHPY | {today} | Not financial advice. Educational purposes only."},
-        }]
-    }
-    _send_discord(payload)
+    vixy_str = f"{vixy_z:+.2f}s" if vixy_z is not None else "n/a"
+    msg = "\n".join(lines) + f"\nVIXY: {vixy_str}"
+    _send_pushover("Tier 2 DCA — EOD", msg)
     db.update_state(key, "fired")
-    logger.info("[EOD] Daily DCA status summary dispatched")
+    logger.info("[EOD] DCA status -> Pushover only")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -526,7 +517,8 @@ def run_scan():
             continue
 
         embed = build_alert_embed(sym, price, rsi, zone_key, zone_result, vixy_z, ul_p)
-        _send_discord(embed)
+        if ZONE_CONFIG[zone_key].get("discord", False):
+            _send_discord(embed)
 
         if ZONE_CONFIG[zone_key]["pushover"]:
             _send_pushover(
