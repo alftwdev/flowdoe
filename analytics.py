@@ -6150,3 +6150,171 @@ class HighFidelityAnalyticsEngine:
 
         return results
 
+    # ── Income Machine: Premium Seller's Climate ──────────────────────────────
+
+    def generate_premium_seller_climate(self):
+        """
+        Zero-API-call assessment of current premium selling conditions.
+        Synthesizes 4 signals already written to DB by other always-on scripts:
+          - fred_vixcls          (tqqq.py — FRED VIXCLS actual VIX)
+          - vix_term_slope       (tqqq.py — VIXY/VXZ ratio; contango=safe, backwardation=fear)
+          - tqqq_breadth_cache   (tqqq.py — % stocks above 50D SMA)
+          - hy_spread_cached     (monitor.py — FRED BAMLH0A0HYM2 HY credit spread)
+        Returns a dict used by scheduler.py --mode income_machine.
+        """
+        # ── VIX level ─────────────────────────────────────────────────────────
+        vix = None
+        try:
+            raw = self.db.get_state("fred_vixcls")
+            if raw and raw not in ("None", ""):
+                vix = float(raw)
+        except Exception:
+            pass
+
+        # ── VIX term structure ────────────────────────────────────────────────
+        slope = None
+        try:
+            raw = self.db.get_state("vix_term_slope")
+            if raw and raw not in ("None", ""):
+                slope = float(raw)
+        except Exception:
+            pass
+
+        # ── Market breadth ────────────────────────────────────────────────────
+        breadth = None
+        try:
+            raw = self.db.get_state("tqqq_breadth_cache")
+            if raw and raw not in ("None", ""):
+                breadth = float(raw)
+        except Exception:
+            pass
+
+        # ── HY credit spread ─────────────────────────────────────────────────
+        hy = None
+        try:
+            raw = self.db.get_state("hy_spread_cached")
+            if raw and raw not in ("None", ""):
+                # stored as JSON dict or bare float
+                import json as _j
+                hy_val = _j.loads(raw) if isinstance(raw, str) and raw.strip().startswith("{") else raw
+                hy = float(hy_val.get("spread", 0)) if isinstance(hy_val, dict) else float(hy_val)
+        except Exception:
+            pass
+
+        # ── Market bias label ─────────────────────────────────────────────────
+        bias_label = "NEUTRAL"
+        try:
+            import json as _j
+            raw = self.db.get_state("market_analysis_bias")
+            if raw:
+                b = _j.loads(raw) if isinstance(raw, str) else raw
+                bias_label = b.get("label", "NEUTRAL")
+        except Exception:
+            pass
+
+        # ── Score the environment (max ~80 pts) ───────────────────────────────
+        score = 0
+        reasons = []
+        signals_available = 0
+
+        if vix is not None:
+            signals_available += 1
+            if vix < 15:
+                score += 30
+                reasons.append(f"VIX {vix:.1f} — low vol, IV structurally rich vs HV")
+            elif vix < 20:
+                score += 20
+                reasons.append(f"VIX {vix:.1f} — moderate, standard CSP conditions")
+            elif vix < 25:
+                score += 5
+                reasons.append(f"VIX {vix:.1f} — elevated, reduce sizing to 75%")
+            elif vix < 35:
+                score -= 10
+                reasons.append(f"VIX {vix:.1f} — high, use defined-risk spreads only")
+            else:
+                score -= 25
+                reasons.append(f"VIX {vix:.1f} — PANIC level, wait for VIX resolution")
+
+        if slope is not None:
+            signals_available += 1
+            if slope > 0:
+                score += 20
+                reasons.append(f"Term structure: contango ({slope:.2f}) — normal, vol sustainable")
+            else:
+                score -= 20
+                reasons.append(f"Term structure: backwardation ({slope:.2f}) — sustained fear, no new CSPs")
+
+        if breadth is not None:
+            signals_available += 1
+            # tqqq.py stores breadth as a 0–1 decimal fraction; normalize to percentage
+            breadth_pct = breadth * 100 if breadth <= 1.0 else breadth
+            if breadth_pct >= 65:
+                score += 15
+                reasons.append(f"Breadth {breadth_pct:.0f}% above 50D SMA — broad participation")
+            elif breadth_pct >= 45:
+                score += 5
+                reasons.append(f"Breadth {breadth_pct:.0f}% — mixed, favor income names")
+            else:
+                score -= 10
+                reasons.append(f"Breadth {breadth_pct:.0f}% — narrow, avoid cyclicals + high-beta")
+
+        if hy is not None:
+            signals_available += 1
+            if hy < 3.5:
+                score += 15
+                reasons.append(f"HY spread {hy:.2f}% — credit calm, low systemic risk")
+            elif hy < 5.0:
+                score += 5
+                reasons.append(f"HY spread {hy:.2f}% — moderate credit stress, watch for widening")
+            elif hy < 7.0:
+                score -= 10
+                reasons.append(f"HY spread {hy:.2f}% — credit stress, reduce wheel exposure")
+            else:
+                score -= 20
+                reasons.append(f"HY spread {hy:.2f}% — CREDIT CRUNCH, suspend new CSPs")
+
+        if bias_label == "BULLISH":
+            score += 8
+        elif bias_label == "BEARISH":
+            score -= 8
+
+        # ── Verdict ───────────────────────────────────────────────────────────
+        if signals_available == 0:
+            verdict = "UNKNOWN"
+            color   = 0x95A5A6
+            action  = "DB signals not populated — restart monitor.py and tqqq.py on PA"
+        elif score >= 55:
+            verdict = "OPTIMAL"
+            color   = 0x27AE60
+            action  = "Full size CSPs. Standard 0.20Δ, 30–45 DTE. Full wheel universe eligible."
+        elif score >= 25:
+            verdict = "FAVORABLE"
+            color   = 0x2ECC71
+            action  = "75% size. Income/dividend names preferred. Widen strikes on high-beta."
+        elif score >= 0:
+            verdict = "NEUTRAL"
+            color   = 0xF39C12
+            action  = "50% size. Income names only (IVR ≥40%). Hold off on growth/high-IV."
+        elif score >= -20:
+            verdict = "CAUTION"
+            color   = 0xE67E22
+            action  = "25% size or defined-risk spreads only. Exit challenged positions early."
+        else:
+            verdict = "AVOID"
+            color   = 0xE74C3C
+            action  = "No new CSPs. Manage existing. Wait for VIX resolution signal (+7pts bonus)."
+
+        return {
+            "verdict":           verdict,
+            "score":             score,
+            "action":            action,
+            "reasons":           reasons,
+            "color":             color,
+            "bias":              bias_label,
+            "signals_available": signals_available,
+            "vix":               vix,
+            "slope":             slope,
+            "breadth":           breadth,
+            "hy_spread":         hy,
+        }
+

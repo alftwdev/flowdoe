@@ -93,6 +93,7 @@ SCHEDULE = [
     # market_intraday removed — market_analysis.py always-on handles intraday pulse at 17:00 UTC.
     # spx_income removed — not part of active strategy.
     (14, 30, "strangle_scan",      "scheduler",    ["--mode", "strangle_scan"],   True),  # 04:30 HST — after US cash open
+    (13,  0, "income_machine",     "scheduler",    ["--mode", "income_machine"],  True),  # 3:00 AM HST — pre-market subscriber snapshot (Premium Climate + ETF Pulse + Ex-Div Hunt)
     (18, 12, "income",             "scheduler",    ["--mode", "income"],          True),  # shifted 18:05→18:12 — avoids 429 collision with monitor loop's 18:04 tick
     (18, 22, "iv_crush",           "scheduler",    ["--mode", "iv_crush"],        True),  # shifted 18:15→18:22 — stays between monitor ticks
     (20, 14, "post_market",        "scheduler",    ["--mode", "post_market"],     True),

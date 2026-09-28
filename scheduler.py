@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "iv_crush", "post_market", "macro", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "income_machine", "iv_crush", "post_market", "macro", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
     parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -613,6 +613,107 @@ def main():
                     logger.info("Dividend Hunt: no quality ex-div events in next 14 days.")
             except Exception as e:
                 logger.error(f"Dividend Hunt segment failed: {e}")
+
+        # ── INCOME MACHINE — subscriber-facing pre-market snapshot ──────────────
+        # 3 segments dispatched to WEBHOOK_INCOME (#income-machine / #dividend-ccetfs):
+        #   Seg 1: Premium Seller's Climate (DB only — zero API calls)
+        #   Seg 2: Income ETF Pulse — CC ETF yield + next est. ex-div (TD cached)
+        #   Seg 3: Ex-Div Hunt — upcoming ex-dates via Nasdaq free API (once/day dedup)
+        # Fires pre-market at 13:00 UTC (3:00 AM HST).
+        # Personal financial data stays on Pushover — this channel is public-safe.
+        elif args.mode == "income_machine":
+            logger.info("Executing Income Machine: 3-segment subscriber snapshot...")
+
+            # ── SEGMENT 1: PREMIUM SELLER'S CLIMATE (zero API calls) ─────────
+            try:
+                climate = engine.generate_premium_seller_climate()
+                verdict  = climate["verdict"]
+                score    = climate["score"]
+                action   = climate["action"]
+                reasons  = climate["reasons"]
+                color    = climate["color"]
+                bias     = climate["bias"]
+                n_sigs   = climate["signals_available"]
+
+                if reasons:
+                    body = f"**{verdict}** | Score `{score}` | Bias: `{bias}`\n\n"
+                    for i, r in enumerate(reasons):
+                        prefix = "┗" if i == len(reasons) - 1 else "┣"
+                        body += f"{prefix} {r}\n"
+                    body += f"\n**Guidance:** {action}"
+                else:
+                    body = f"**{verdict}** — {action}\n\n*Signals available: {n_sigs}/4*"
+
+                if WEBHOOK_INCOME:
+                    send_essentials_embed(
+                        WEBHOOK_INCOME,
+                        "PREMIUM SELLER'S CLIMATE | Options Environment",
+                        body,
+                        color,
+                    )
+                    logger.info(f"[income_machine] Climate dispatched: {verdict} (score {score})")
+            except Exception as e:
+                logger.error(f"[income_machine] Climate segment failed: {e}")
+
+            # ── SEGMENT 2: INCOME ETF PULSE (CC ETF yield + next ex-div) ─────
+            try:
+                pulse = engine.generate_income_etf_pulse()
+                if pulse:
+                    lines = []
+                    for etf in pulse[:8]:
+                        yield_str = f"`{etf['ann_yield']:.1f}%`" if etf["ann_yield"] > 0 else "`n/a`"
+                        div_str   = f"`${etf['div_amount']:.4f}`" if etf["div_amount"] > 0 else "`n/a`"
+                        prefix    = "┗" if etf == pulse[:8][-1] else "┣"
+                        lines.append(
+                            f"{prefix} {etf['urgency']} **{etf['symbol']}** "
+                            f"`${etf['spot']:.2f}` · Yield {yield_str} · Div {div_str} · "
+                            f"Ex-div: `{etf['ex_date']}`"
+                        )
+                    if WEBHOOK_INCOME:
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            "INCOME ETF PULSE | Yield + Ex-Div Tracker",
+                            "\n".join(lines),
+                            0x2E86AB,
+                        )
+                        logger.info(f"[income_machine] ETF pulse dispatched: {len(pulse)} ETFs")
+            except Exception as e:
+                logger.error(f"[income_machine] ETF pulse segment failed: {e}")
+
+            # ── SEGMENT 3: EX-DIV HUNT (Nasdaq free API — once per day) ──────
+            _hunt_key = f"income_machine_exdiv_hunt_{datetime.now().strftime('%Y-%m-%d')}"
+            try:
+                if not engine.db.get_state(_hunt_key):
+                    hunt = engine.generate_exdiv_hunt()
+                    if hunt and WEBHOOK_INCOME:
+                        hunt_lines = []
+                        for i, h in enumerate(hunt):
+                            prefix    = "┗" if i == len(hunt) - 1 else "┣"
+                            wheel_tag = "🎯 Wheel" if h["wheel"] else "💰 Div"
+                            yield_str = f" · `{h['yield_pct']:.1f}%` yield" if h["yield_pct"] else ""
+                            hunt_lines.append(
+                                f"{prefix} **{h['symbol']}** — ex `{h['ex_date']}` ({h['days_away']}d)"
+                                f" · `${h['ann_div']:.2f}` ann{yield_str} · {wheel_tag}"
+                            )
+                        window_label = (
+                            "Ex-Div This Week"
+                            if all(h["days_away"] <= 7 for h in hunt)
+                            else "Ex-Div Radar (14-Day)"
+                        )
+                        send_essentials_embed(
+                            WEBHOOK_INCOME,
+                            f"EX-DIVIDEND RADAR | {window_label}",
+                            "\n".join(hunt_lines),
+                            0x8E44AD,
+                        )
+                        engine.db.update_state(_hunt_key, True)
+                        logger.info(f"[income_machine] Ex-div hunt dispatched: {len(hunt)} events")
+                    else:
+                        logger.info("[income_machine] Ex-div hunt: no events this window")
+                else:
+                    logger.info("[income_machine] Ex-div hunt already fired today — skipped")
+            except Exception as e:
+                logger.error(f"[income_machine] Ex-div hunt segment failed: {e}")
 
         # ── EX-DIV REACTION CHECK — post-close daily (20:35 UTC) ─────────────
         # Checks two things every evening:
