@@ -683,12 +683,27 @@ Sept 27 (Day 44):        CLM $6.58 | CRF $6.36 — continued recovery toward sub
                            monitor.py log_ro_daily_snapshot() now cross-writes to ro_cycle_events table.
                          CLM still below sub price ($6.58 vs ~$6.56 est.) — barely. CRF below sub ($6.36 < $6.37).
                          WATCH THIS WEEK: N-2/A on Oct 1-2 → expect 1-3 day selling pressure (Tranche 2 window).
-N-2/A expected:          ~Oct 1-2, 2026 (46-47 day historical gap from Aug 14 N-2)
+N-2/A expected:          Day 46-47 from Aug 14 N-2 = SEPT 29 (Tue) or SEPT 30 (Wed)
+                         CORRECTED Sept 27: prior estimate "Oct 1-2" was wrong — those are Day 48-49.
+                         Historical window (46-47 calendar days):
+                           Day 46 = Sept 29 (Tuesday) ← 2025 cycle matched here
+                           Day 47 = Sept 30 (Wednesday) ← 2022 cycle matched here
+                           Day 48 = Oct 1 (Thursday) — possible if filing delayed
+                           Day 49 = Oct 2 (Friday) — possible but outside historical range
+                         Oct 1 = Thursday, Oct 2 = Friday (confirmed). Live watch starts Mon Sept 28.
                          → Finalizes sub price; press release follows 2 days later
-                         → NEXT PRIMARY CATALYST: watch for 1-3 day selling pressure
-Record date estimated:   ~Oct 13-16, 2026 (corrected from single-cycle Oct 12 estimate)
-                         → DEPLOY REMAINING RESERVE: use 2/3 reserve around this date
-Expiration estimated:    ~Nov 7-10, 2026 (record + 25 subscription days)
+                         → NEXT PRIMARY CATALYST: 1-3 day selling pressure = TRANCHE 2 DEPLOY WINDOW
+Record date estimated:   ~Oct 12-16, 2026
+                         Depends on N-2/A filing date (effective +2d, then record date +10-11d):
+                           N-2/A Sept 29 → record date ~Oct 12 (Monday)
+                           N-2/A Sept 30 → record date ~Oct 13 (Tuesday)
+                           N-2/A Oct 1   → record date ~Oct 14 (Wednesday)
+                           N-2/A Oct 2   → record date ~Oct 15 (Thursday) ← DOUBLE CATALYST if ex-div same day
+                         TRANCHE 3 DEPLOY: around record date regardless of exact date
+Expiration estimated:    ~Nov 6-9, 2026 (record + 25 subscription days)
+                           N-2/A Sept 29 → expiration ~Nov 6 (Friday)
+                           N-2/A Sept 30 → expiration ~Nov 7 (Saturday) → effective Friday Nov 6
+                           N-2/A Oct 2   → expiration ~Nov 9 (Monday)
                          → RO overhang clears; premium mean-reversion begins
 Oct NAV lock:            End of October 2026 — Board sets 2027 distribution rate
 2027 FV estimate:        CLM ~$6.97 | CRF ~$6.74  (based on July NAV; actual locked end Oct)
