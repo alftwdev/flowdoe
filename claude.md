@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 27 2026 — Weekend audit: snippet queue + bait_dispatcher.py weekend posting live (7 days/week). monitor.py log_ro_daily_snapshot() now cross-writes to ro_cycle_events for structured timeline analysis. ro_cycle_log cycle_low corrected (CLM $6.23 / CRF $6.05, Day 34). ro_cycle_events backfilled for Sept 14-27. EDGAR confirmed: NO N-2/A filed as of Day 44 — expected Oct 1-2.*
+*Last updated: Sept 30 2026 — RO consistency pass: fair-value, distribution, NAV and catalyst-date references aligned to §0-B and the corrected N-2/A window (Sept 29-30, Day 46-47). Sept 24-27 price entries corrected against Twelve Data closes. 2027 preview NAV labels corrected (21% × Oct 31 NAV rule). EDGAR Sept 30 07:17 HST (Day 47): NO N-2/A filed yet. Cycle lows: CLM $6.23 / CRF $6.05 (Sept 17, Day 34).*
 
 ---
 
@@ -56,10 +56,15 @@ CLM_FAIR_VALUE  = 7.67     # $1.458 / 0.19  (was 7.51 — understated by $0.16)
 CRF_FAIR_VALUE  = 7.43     # $1.4112 / 0.19 (was 7.28 — understated by $0.15)
 
 # 2027 distribution PREVIEW (Board confirmed 21% continues; actual locked end of October 2026)
-# Example based on July 31, 2026 NAV. Higher Oct NAV → higher 2027 dist; lower Oct NAV → lower.
-# Market is pricing CLM/CRF toward these 2027 example FV levels (both hit 52w lows Aug 24 2026).
-CLM_DIST_2027_EXAMPLE = 1.3236   # $0.1103/month × 12 — if Oct NAV stays near July NAV (~$6.94)
-CRF_DIST_2027_EXAMPLE = 1.2816   # $0.1068/month × 12 — if Oct NAV stays near July NAV (~$6.72)
+# Rule: annual distribution = 21% × NAV at Oct 31 of the prior year.
+#   Check: 2026 CLM 1.458 / 0.21 = $6.94 (Oct 31 2025 NAV) | CRF 1.4112 / 0.21 = $6.72
+# The 2027 examples below imply July 31 2026 NAV ≈ $6.30 CLM / $6.10 CRF (1.3236/0.21, 1.2816/0.21).
+# CORRECTED Sept 30 2026: labels previously said "July NAV ~$6.94/$6.72" — those were Oct 2025 NAVs.
+# Oct 15 ex-div lands BEFORE the Oct 31 lock → flat market implies lock NAV ≈ $6.17 CLM / $5.98 CRF
+#   → 2027 dist ≈ $1.30 CLM / $1.26 CRF → FV ≈ $6.82 CLM / $6.61 CRF (slightly below examples).
+# Sensitivity: each 1% NAV move before Oct 31 moves CLM 2027 FV by ~$0.07.
+CLM_DIST_2027_EXAMPLE = 1.3236   # $0.1103/month × 12 — 21% × ~$6.30 NAV (July 31 2026)
+CRF_DIST_2027_EXAMPLE = 1.2816   # $0.1068/month × 12 — 21% × ~$6.10 NAV (July 31 2026)
 CLM_FV_2027_EXAMPLE   = 6.97     # CLM_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
 CRF_FV_2027_EXAMPLE   = 6.74     # CRF_DIST_2027_EXAMPLE / 0.19 — market pricing toward this
 
@@ -233,7 +238,7 @@ $500/wk auto-deposit + monthly W2 surplus (Simplifi by Quicken monitors leftover
 - Live HY credit spread from FRED (not hardcoded — reacts to real credit stress)
 - **NAV Determination Month gate** (October = Cornerstone Board locks next year's distribution rate; heightened sensitivity all month)
 - **CEF institutional exit detector** (high lit-market volume + SPY flat = institutions exiting the distribution reset — the Feb 2026 crash pattern)
-- **Distribution yield floor** (fair value = annual_dist / 0.19; price > FV×1.10 = overvalued at new rate; price ≤ FV = accumulate zone. CLM 2026 FV: $7.51 | CRF 2026 FV: $7.28)
+- **Distribution yield floor** (fair value = annual_dist / 0.19; price > FV×1.10 = overvalued at new rate; price ≤ FV = accumulate zone. CLM 2026 FV: $7.67 | CRF 2026 FV: $7.43 — see §0-B)
 
 **Distribution reset cycle — what to watch (learned from Jan–Feb 2026 CLM -15% crash while SPY +3.6%):**
 ```
@@ -241,8 +246,8 @@ Phase 1 — NAV Peak (Oct 8): market priced CLM at premium before Board locked l
 Phase 2 — Quiet Signal (Oct 14, Nov 13-17): 5–6M vol spikes on flat SPY = inst. distribution
 Phase 3 — Trap Rally (Jan 2–14): new-year income buyers push to NEW HIGH ($8.51) on old rate
 Phase 4 — Capitulation (Feb 13–19): 9.8M shares Feb 18 while SPY +0.5% — CEF-specific flush
-Bottom = $7.23 = fair value at 19% yield on new $0.1189/mo distribution
-Rebuy zone: price ≤ $7.51 (CLM) / $7.28 (CRF) → yield ≥ 19% → structural income buyer support
+Bottom = $7.23 (≈20% yield on the 2026 $0.1215/mo distribution — below the $7.67 FV floor)
+Rebuy zone: price ≤ $7.67 (CLM) / $7.43 (CRF) → yield ≥ 19% → structural income buyer support
 ```
 All three new signals in monitor.py fire as conditional lines in the #cornerstone pulse embed.
 
@@ -273,7 +278,7 @@ Sell CSP (0.20 delta, 30–45 DTE) on high-IV names
 
 **Dividend bonus rule:** When screening wheel candidates, prefer names that pay
 dividends. If assigned, premium income + dividend income while running the CC.
-Examples: SOFI (growing dividend), MAIN (if ever wheeled), O (monthly REIT).
+Examples: MAIN (if ever wheeled), O (monthly REIT). Note: SOFI pays NO dividend as of Sept 2026 — wheel it for premium only, no dividend bonus.
 
 **Defined Risk Mode (put credit spread as wheel substitute — NOT a 4th strategy):**
 Credit spreads are NOT a standalone strategy. They are a capital-efficiency toggle
@@ -609,7 +614,7 @@ The 25-day subscription window saw price APPRECIATION, not continuation of selli
 
 ---
 
-### 2026 RO — Live Data (Updated Sept 15, 2026)
+### 2026 RO — Live Data (Updated Sept 29, 2026)
 
 ```
 Ticker: CLM + CRF (concurrent cycle, both active)
@@ -627,7 +632,7 @@ PRIMARY CATALYST EVENTS — WHAT DROPS CLM/CRF PRICE DURING EVERY RO CYCLE:
      SEC effectiveness declaration confirms exact dilution terms. Market re-prices
      the final sub price formula and record date. Any holders who waited to sell
      at the N-2 use the N-2/A as their exit point.
-     Expected 2026: ~Oct 1-2. Watch for 1-3 day price pressure after filing.
+     Expected 2026: Sept 29-30 (Day 46-47); Oct 1-2 only if delayed. Watch for 1-3 day price pressure after filing.
      Premium already near historical lows → limited incremental downside,
      but can create the final flush that sets the true cycle low.
 
@@ -654,35 +659,61 @@ Sept 14 LIVE (Day 31):   CLM $6.455 (–1.90%) | CRF $6.260 (–1.73%) — NEW 5
                          CLM premium: 2.30% | CRF premium: 2.29% — NEW all-cycle low premiums
                          CLM BELOW Tier 2 zone ($6.50–$6.65) — already in Tier 2/3 overlap
                          Both below 2027 FV already (CLM FV $6.97 / CRF FV $6.74)
-Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × NAV; both prices now BELOW sub price)
-                         → Open-market buyer BEATS RO participants at current price
+Sub price estimate:      CLM ~$6.56 | CRF ~$6.37  (104% × Aug 21 NAV — refresh from CEFConnect;
+                         actual sub price = 104% × NAV at expiration close)
+                         → Open-market buyer beats RO participants whenever price ≤ sub price
 Sept 15 (Day 32):        Ex-dividend day. CLM –$0.1215 | CRF –$0.1176 (mechanical drop).
                          Ex-div dip created short-term accumulation window as expected.
                          ACTION TAKEN: 1/3 of DCA capital deployed at ex-div dip prices
                            (Tier 3 zone: CLM ~$6.33 / CRF ~$6.14 area).
                          Into close: prices began recovering — market broadly red today
                            (macro drag, not CEF-specific). Partial recovery, not full reversal.
-                         RESERVE: 2/3 of DCA capital held for N-2/A (~Oct 1-2) and
-                           record date (~Oct 13-16) catalysts.
-Sept 25 (Day 42):        CLM $6.38 | CRF $6.15 — recovering from post-ex-div lows
+                         RESERVE: 2/3 of DCA capital held for N-2/A (Sept 29-30) and
+                           record date (~Oct 12-15) catalysts.
+Sept 25 (Day 42):        CLM $6.43 | CRF $6.19 close — recovering from post-ex-div lows
+                           (CORRECTED Sept 30: $6.38/$6.15 originally logged here were the Sept 24 closes)
                          CONFIRMED 52w lows (Yahoo Finance): CLM $6.23 | CRF $6.05
                            — dip ran deeper into Tier 4 territory post Sept 15 before recovery
                          EDGAR verified: NO N-2/A filed yet for CLM or CRF as of Sept 25
                          Next ex-dividend CONFIRMED: Oct 15, 2026 — CLM $0.122/share (announced)
-                           → Oct 15 ex-div coincides with estimated RO record date window (Oct 13-16)
-                           → DOUBLE catalyst in same week: record date selling + mechanical ex-div drop
-                         Both still BELOW sub price (CLM $6.38 < $6.56 est. | CRF $6.15 < $6.37 est.)
+                           → Oct 15 ex-div falls in the same week as the estimated record date (~Oct 12-15)
+                           → DOUBLE catalyst week: record date selling + mechanical ex-div drop
+                         Both still BELOW sub price (CLM $6.43 < $6.56 est. | CRF $6.19 < $6.37 est.)
                          Both generating ~23% yield at current prices (above 19% FV threshold)
                          RESERVE PLAN (unchanged): 2/3 still held — deploy at N-2/A + Oct 15 window
-Sept 27 (Day 44):        CLM $6.58 | CRF $6.36 — continued recovery toward sub price level
+Sept 27 (Day 44, Sun):   No trading. Last close Sept 25: CLM $6.43 | CRF $6.19.
+                           (CORRECTED Sept 30: $6.58/$6.36 originally logged here matched no real close)
                          EDGAR VERIFIED (Sept 27 audit): NO N-2/A filed for 2026 cycle.
                            Most recent N-2/A for both CLM + CRF is 2025-04-08 (prior cycle).
-                           N-2/A is IMMINENT — expected Monday Oct 1 or Tuesday Oct 2 (Day 48-49).
+                           N-2/A is IMMINENT — expected Tue Sept 29 or Wed Sept 30 (Day 46-47).
                          DB AUDIT DONE (Sept 27): ro_cycle_log cycle_low corrected (CLM $6.23/CRF $6.05).
                            ro_cycle_events backfilled for Sept 14-27 (12 events added).
                            monitor.py log_ro_daily_snapshot() now cross-writes to ro_cycle_events table.
-                         CLM still below sub price ($6.58 vs ~$6.56 est.) — barely. CRF below sub ($6.36 < $6.37).
-                         WATCH THIS WEEK: N-2/A on Oct 1-2 → expect 1-3 day selling pressure (Tranche 2 window).
+                         Both remain BELOW est. sub price (CLM $6.43 < ~$6.56 | CRF $6.19 < ~$6.37).
+                         WATCH THIS WEEK: N-2/A on Sept 29-30 → expect 1-3 day selling pressure (Tranche 2 window).
+Sept 29 (Day 46):        EDGAR checked (AM): NO N-2/A yet for CLM or CRF. Latest filings: N-CSRS/N-PX Aug 27, Form 4 Sept 1.
+                         Watch window: Tue Sept 29 – Wed Sept 30; slip to Oct 1-2 possible.
+                         Close: CLM $6.39 | CRF $6.13. No filing by end of day.
+Sept 30 (Day 47):        EDGAR 07:17 HST: NO N-2/A yet. Cornerstone files after the close
+                           (accept times 20:20–21:10 UTC) → Day 47 filing would land ~10:30–11:00 HST.
+                           No filing by Fri Oct 2 (Day 49) = outside all 3 prior cycles (2014 had none).
+                         Midday: CLM $6.44 (+0.78%) | CRF $6.176 (+0.75%) — highest close in 12 sessions.
+                         NAV proxy (XCLMX/XCRFX, Sept 25): CLM $6.29 | CRF $6.10 (weekly, lags ~1 wk).
+                         Premium: CLM +2.4% | CRF +1.2% (NEW cycle-low CRF premium).
+                         Sub price est (104% × NAV): CLM $6.54 | CRF $6.34 → price 1.5% / 2.6% BELOW.
+                         Yield: 22.6% / 22.8% on 2026 rate; ~20.1% / 20.3% on projected 2027 rate.
+                         Projected 2027 FV (lock NAV after Oct ex-div): CLM ~$6.82 | CRF ~$6.61
+                           → price 5.6% / 6.6% below FV. Still inside accumulate zone on value.
+                         Volume fading: CLM 76% / CRF 66% of avg; 2-week range CLM $6.28–$6.44 = base.
+                         Macro: HY spread 3.08% (+40bp w/w), HYG at 52w low, 10Y 5.24% (+28bp w/w),
+                           VIX 16.0, SPY/QQQ green. Credit/rates tightening = slower premium recovery.
+                         Catalyst zones (projected):
+                           N-2/A reaction (−1–2%):   CLM $6.31–$6.38 | CRF $6.05–$6.12
+                           Oct 15 ex-div + record:   CLM $6.19–$6.28 | CRF $5.95–$6.03 (retest Sept 17 lows)
+                           Floor = post-ex-div NAV:  CLM ~$6.17 | CRF ~$5.98 (Path C Tier 1)
+                         Caveats: rights are out of the money (price < 104% NAV) → no RO arb short/
+                           subscribe flow → N-2/A + record-date selling likely muted. Ex-div "dip" is
+                           mostly the distribution itself; real discount = drift beyond it (~$0.05 in Sept).
 N-2/A expected:          Day 46-47 from Aug 14 N-2 = SEPT 29 (Tue) or SEPT 30 (Wed)
                          CORRECTED Sept 27: prior estimate "Oct 1-2" was wrong — those are Day 48-49.
                          Historical window (46-47 calendar days):
@@ -693,12 +724,12 @@ N-2/A expected:          Day 46-47 from Aug 14 N-2 = SEPT 29 (Tue) or SEPT 30 (W
                          Oct 1 = Thursday, Oct 2 = Friday (confirmed). Live watch starts Mon Sept 28.
                          → Finalizes sub price; press release follows 2 days later
                          → NEXT PRIMARY CATALYST: 1-3 day selling pressure = TRANCHE 2 DEPLOY WINDOW
-Record date estimated:   ~Oct 12-16, 2026
+Record date estimated:   ~Oct 12-15, 2026
                          Depends on N-2/A filing date (effective +2d, then record date +10-11d):
                            N-2/A Sept 29 → record date ~Oct 12 (Monday)
                            N-2/A Sept 30 → record date ~Oct 13 (Tuesday)
                            N-2/A Oct 1   → record date ~Oct 14 (Wednesday)
-                           N-2/A Oct 2   → record date ~Oct 15 (Thursday) ← DOUBLE CATALYST if ex-div same day
+                           N-2/A Oct 2   → record date ~Oct 15 (Thursday) ← same day as Oct 15 ex-div
                          TRANCHE 3 DEPLOY: around record date regardless of exact date
 Expiration estimated:    ~Nov 6-9, 2026 (record + 25 subscription days)
                            N-2/A Sept 29 → expiration ~Nov 6 (Friday)
@@ -725,10 +756,10 @@ Tiered re-entry zones (updated Sept 15, 2026):
   Tier 3 (Sept 15–Oct 16): CLM $6.30–$6.55 | CRF $6.00–$6.25 [ACTIVE — 1/3 deployed Sept 15]
   Tier 4 (peak fear):      CLM $6.00–$6.30 | CRF $5.75–$6.00 [Reserve — N-2/A or record date flush]
   RESERVE PLAN: 2/3 of DCA capital held. Deploy in 1-2 additional tranches:
-    Tranche 2: on N-2/A filing date (~Oct 1-2) if price dips further
-    Tranche 3: at/around record date (~Oct 13-16) which is historically the cycle low
+    Tranche 2: on N-2/A filing (Sept 29-30 expected) — CLM $6.20–$6.35 / CRF $5.90–$6.10
+    Tranche 3: at/around record date (~Oct 12-15) + Oct 15 ex-div — historically the cycle low
     If neither causes meaningful dip: deploy remaining reserve across Oct as income buyer
-    support builds heading into subscription window expiration (~Nov 7-10).
+    support builds heading into subscription window expiration (~Nov 6-9).
 
 UPDATE THIS BLOCK when the 424B3 is filed (actual record date + sub price),
 when expiration occurs, and when the post-expiration recovery level is known.
@@ -743,11 +774,11 @@ when expiration occurs, and when the post-expiration recovery level is known.
 open_market_price <= sub_price  # buying below 104%×NAV = definitively cheaper than rights
 
 # Below these levels = premium at/near historical lows — near-certain mean reversion:
-CLM_PREMIUM_LOW_HISTORICAL = 6.08   # 52w low premium (percent) as of Aug 2026
-CRF_PREMIUM_LOW_HISTORICAL = 4.66   # 52w low premium (percent) as of Aug 2026
+CLM_PREMIUM_LOW_HISTORICAL = 2.30   # 52w low premium (percent) — set Sept 14 2026 (was 6.08 in Aug)
+CRF_PREMIUM_LOW_HISTORICAL = 2.29   # 52w low premium (percent) — set Sept 14 2026 (was 4.66 in Aug)
 
 # If price is near/at 52w low premium AND below 2027 FV → highest-conviction accumulate zone
-# Recovery driver: premium mean-reversion from 6% back toward 19% avg = structural tailwind
+# Recovery driver: premium mean-reversion from ~2% back toward 19% avg = structural tailwind
 # Independent of the RO outcome — income buyers see >21% yield and return.
 
 # September ex-div window (both tickers, typically Sept 15):
@@ -763,8 +794,8 @@ CRF_PREMIUM_LOW_HISTORICAL = 4.66   # 52w low premium (percent) as of Aug 2026
 |-------|---------|----------|-----------|-------------|-----------|----------|-----------|--------------|
 | 2022 CLM | 112%×NAV or 65%×mkt | 47d | — | Apr 18 | ~$6.92 | ~Record date | ~$6.61 | ~$7.88 (10% prem) |
 | 2025 CLM | 112%×NAV or 80%×mkt | 46d | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
-| 2026 CLM | 104%×NAV flat | 46-47d est. | $7.35 | ~Oct 13-16 est. | ~$6.33 (post ex-div Sept 15) | Sept 15+ | ~$6.56 est. | TBD |
-| 2026 CRF | 104%×NAV flat | 46-47d est. | ~$7.12 | ~Oct 13-16 est. | ~$6.14 (post ex-div Sept 15) | Sept 15+ | ~$6.37 est. | TBD |
+| 2026 CLM | 104%×NAV flat | 46-47d est. (pending Day 46) | $7.35 | ~Oct 12-15 est. | $6.23 (52w low) | Sept 17 (Day 34) | ~$6.56 est. | TBD |
+| 2026 CRF | 104%×NAV flat | 46-47d est. (pending Day 46) | ~$7.12 | ~Oct 12-15 est. | $6.05 (52w low) | Sept 17 (Day 34) | ~$6.37 est. | TBD |
 
 **Key cross-cycle insight:** In 2022 and 2025, the low landed AT the record date. In 2026, prices
 broke below sub price by Day 31 (pre-ex-div) due to the concurrent distribution reset announcement.
@@ -782,14 +813,15 @@ The 2026 cycle is front-loaded — premium collapsed at announcement, not gradua
   position. Confirms pattern: ex-div day + 1-2 days is an extended accumulation window,
   not a single-session spike. Income buyers re-enter gradually, not all at once.
   Post-ex-div lows confirmed: CLM $6.23 | CRF $6.05 (52w lows per Yahoo Finance Sept 25).
-- Sept 25: Prices recovering to CLM $6.38 / CRF $6.15. Do NOT chase — N-2/A is ~6 days away.
+- Sept 25: Prices recovering to CLM $6.43 / CRF $6.19. Do NOT chase — N-2/A is ~4 days away.
+- Sept 30: CLM $6.44 / CRF $6.18 midday, no N-2/A yet. Reserve still held (see §0-G Sept 30 entry for zones).
   Hold 2/3 reserve for the two remaining catalysts.
-- Oct 1-2 (est.): N-2/A filing — DEPLOY Tranche 2 if CLM dips $6.20–$6.35 / CRF $5.90–$6.10
-- Oct 15 (confirmed): Ex-dividend ($0.122 CLM announced) + estimated RO record date
+- Sept 29-30 (est.; Oct 1-2 if delayed): N-2/A filing — DEPLOY Tranche 2 if CLM dips $6.20–$6.35 / CRF $5.90–$6.10
+- Oct 15 (confirmed): Ex-dividend ($0.122 CLM announced) + estimated RO record date window (~Oct 12-15)
   → DOUBLE catalyst window — DEPLOY Tranche 3 here regardless of price level
   → Historically the cycle low in 2022 and 2025; doubly important with ex-div coinciding
 - Oct 16+: If neither catalyst creates a dip below today's levels, begin deploying remaining
-  reserve gradually — RO overhang clears at expiration (~Nov 7-10), premium recovery follows
+  reserve gradually — RO overhang clears at expiration (~Nov 6-9), premium recovery follows
 
 *Update TBD fields after 424B3 filing and post-expiration settlement.*
 
@@ -812,7 +844,7 @@ N-2 Filed      N-2/A Filed   Gap to next N-2    Notes
 2021-02-19     (2021-04-01)  →  364d (~12mo)   Annual
 2022-02-18     (2022-04-06)  → 1098d (~37mo)  Long gap — another 3yr pause
 2025-02-21     (2025-04-08)  →  539d (~18mo)   Short gap — driven by distribution reset
-2026-08-14     (pending ~Oct 1-2)              ← CURRENT CYCLE
+2026-08-14     (pending — Sept 29-30 exp.)     ← CURRENT CYCLE (none filed as of Sept 29 AM)
 ```
 
 **Inter-cycle gap statistics (9 measured gaps):**
@@ -874,7 +906,7 @@ Weekend maintenance sweep. Work through each checkpoint in order and report find
    dark_pool_session_hist_CLM/CRF · ro_dodge_active_CLM/CRF · ro_n2_detected_CLM/CRF
    Flag any key that is None when it should have a value. Flag market_analysis_bias if stale.
 
-2. STRATEGY STATUS — CLM/CRF prices vs fair value floors ($7.51 / $7.28). Active RO? Path A/B/C
+2. STRATEGY STATUS — CLM/CRF prices vs fair value floors ($7.67 / $7.43). Active RO? Path A/B/C
    re-entry signals fired? Carry spread ≥ 5% (Tier 2 blended yield − 7.25% margin rate)?
    Open wheel positions: DTE countdown, any earnings within 21 days? LEAP desk: was VIXY elevated
    this week? Did any CALL/PUT signal fire?
@@ -1018,13 +1050,13 @@ tail -50 ~/scripts/logs/tqqq.log
 **CLM/CRF position math (run each week):**
 ```
 Fair value check:
-  CLM: annual_dist / 0.19 = $1.4268 / 0.19 = $7.51 (accumulate at or below)
-  CRF: annual_dist / 0.19 = $1.3824 / 0.19 = $7.28 (accumulate at or below)
+  CLM: annual_dist / 0.19 = $1.458 / 0.19 = $7.67 (accumulate at or below)
+  CRF: annual_dist / 0.19 = $1.4112 / 0.19 = $7.43 (accumulate at or below)
 
 Active RO check:
   ro_dodge_active_CLM/CRF set? → RO in progress; Paths A/B/C active
-  If set + price ≤ NAV ($6.73 CLM / $6.18 CRF) → Path C Tier 1 (NAV entry) should have fired
-  If set + price ≤ FV ($7.51/$7.28) → Path C Tier 2 (FV entry) should have fired
+  If set + price ≤ NAV (live; fallback $6.31 CLM / $6.12 CRF) → Path C Tier 1 (NAV entry) should have fired
+  If set + price ≤ FV ($7.67/$7.43) → Path C Tier 2 (FV entry) should have fired
   If set + 30+ days since N-2 → Path A active (premium collapse + price off 60D high)
   If set + 45+ days since N-2 → Path B active (yield floor re-entry)
 ```
@@ -1133,7 +1165,10 @@ python -m py_compile monitor.py market_analysis.py scheduler.py tqqq.py stream.p
 | Deployment parity check | PA git SHA == local git SHA — no silent divergence |
 | Log triage | PA task logs weekly — find silent exceptions before they become outages |
 
-#### H. Known DB State as of Aug 23 2026 (baseline for future audits)
+#### H. Known DB State as of Aug 23 2026 (HISTORICAL snapshot — superseded)
+
+*Kept for audit history only. Price/FV lines below predate the Aug 24 distribution correction —
+the current floors are $7.67 CLM / $7.43 CRF (§0-B). Current RO state lives in §0-G.*
 
 ```
 market_analysis_bias: STALE (2026-07-15) → resolves on market_analysis.py PA restart after SyntaxError fix
@@ -1143,8 +1178,8 @@ signal_ledger: 4 PENDING (clm_floor CLM+CRF × 2 dates: Jul 23, Aug 13)
   → run python db_tools.py --purge-stale to grade any whose target_date has passed
 cef_premium_log: 4 entries (Jul 23 + Aug 13 for CLM and CRF)
 ro_dodge_active_CLM/CRF: 2026-08-14 (active RO, 9 days elapsed as of this writing)
-  → Path C Tier 2 eligible: CRF $7.175 ≤ FV $7.28 → re-entry signal should fire on next monitor tick
-CLM at exactly $7.51 = fair value floor (Path C Tier 2 eligible if price ticks below)
+  → [then] CRF $7.175 vs old FV $7.28 (now $7.43) → Path C Tier 2 eligible
+[then] CLM ~$7.51 = old FV floor (now $7.67) → both have been below FV since Aug 24
 global_state: 228 rows — healthy
 ```
 
@@ -1205,8 +1240,9 @@ Simplifi is the bridge — it surfaces monthly investable surplus for manual dep
 - **DRIP at NAV:** shares issued below market price = built-in alpha
 - **Rights Offering dodge:** Sell 99% on N-2 detection → buy back post-offering dip → net more shares than participants
 - **Timed DCA months:** March and September (seasonal weakness = accumulation zones)
-- **Annual distributions:** CLM $0.1189/share | CRF $0.1152/share (2026 reset — decreased from $0.1224/$0.1176 due to lower Oct 2025 NAV lock)
-- **2026 fair-value floor:** CLM $7.51 | CRF $7.28 (at 19% yield target — accumulate at or below these prices)
+- **Monthly distributions (2026):** CLM $0.1215/share | CRF $0.1176/share (confirmed Aug 17 2026 press release — see §0-B)
+- **2026 fair-value floor:** CLM $7.67 | CRF $7.43 (at 19% yield target — accumulate at or below these prices)
+- **2027 preview FV:** CLM ~$6.97 | CRF ~$6.74 (actual 2027 rate locked end of Oct 2026 on Oct NAV)
 
 ### Tier 2 — Margin Accelerators (cash dividends only, NO DRIP)
 | Ticker | Type | Yield | Frequency | Role |
@@ -1889,23 +1925,15 @@ Quick reference — the 6 mandatory checks:
 2. **Carry spread ≥ 5%?** — Sunday Pushover (personal_scorecard) surfaces this automatically
 3. **Open wheel positions** — DTE countdown, earnings within 21 days?
 4. **LEAP scorer** — Any CALL/PUT signal fire? Was VIXY z ≥ +1.5σ? VIX resolution bonus fire?
-5. **CLM/CRF vs fair value** — CLM ≤ $7.51 / CRF ≤ $7.28 = accumulate zone (both active Aug 23 2026)
+5. **CLM/CRF vs fair value** — CLM ≤ $7.67 / CRF ≤ $7.43 = accumulate zone (both deep inside it through the 2026 RO)
 6. **October approaching?** — NAV lock month; heighten all CLM/CRF sensitivity; watch institutional exit detector
 
-### Deployment Checklist (current — Aug 2026)
-```bash
-cd ~/scripts && git pull origin main
-```
-Restart in this order (after the Aug 23 2026 commit batch):
-1. **`market_analysis.py` first** — critical SyntaxError fix restores morning brief + `market_analysis_bias` DB key
-2. `monitor.py` — Path C intra-RO entry zone now live (active RO: CLM/CRF dodge active since Aug 14)
-3. `market_scheduler.py` — GEX comment clarified; no functional changes
-4. `tqqq.py` — VIX resolution bonus + P/C weight reduction from Aug 11
+### Deployment Checklist
+Follow **§0-A** (pull → kill → restart in order → verify). The Aug 23 2026 restart batch
+(market_analysis.py SyntaxError fix, Path C entry zone) is done — no special ordering is pending.
+**During the RO catalyst windows (N-2/A Sept 29-30, record date ~Oct 12-15), avoid deploying
+changes that restart monitor.py unless they fix a bug.** Every restart is a gap in the EDGAR watch.
 
-One-time (if not already done on PA):
-```bash
-python db_tools.py --seed-premiums   # CLM/CRF z-score mu/sigma
-```
 Env var (if not set):
 ```
 PORTFOLIO_VALUE_APPROX=<your_value>  # required for Kelly sizing + personal scorecard
