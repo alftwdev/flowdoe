@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 30 2026 — RO consistency pass: fair-value, distribution, NAV and catalyst-date references aligned to §0-B and the corrected N-2/A window (Sept 29-30, Day 46-47). Sept 24-27 price entries corrected against Twelve Data closes. 2027 preview NAV labels corrected (21% × Oct 31 NAV rule). EDGAR Sept 30 07:17 HST (Day 47): NO N-2/A filed yet. Cycle lows: CLM $6.23 / CRF $6.05 (Sept 17, Day 34).*
+*Last updated: Sept 30 2026 — RO consistency pass: fair-value, distribution, NAV and catalyst-date references aligned to §0-B and the corrected N-2/A window (Sept 29-30, Day 46-47). Sept 24-27 price entries corrected against Twelve Data closes. 2027 preview NAV labels corrected (21% × Oct 31 NAV rule). EDGAR Sept 30 after close (Day 47): NO N-2/A filed — window now Oct 1-2 (Day 48-49). Cycle lows: CLM $6.23 / CRF $6.05 (Sept 17, Day 34).*
 
 ---
 
@@ -714,6 +714,9 @@ Sept 30 (Day 47):        EDGAR 07:17 HST: NO N-2/A yet. Cornerstone files after 
                          Caveats: rights are out of the money (price < 104% NAV) → no RO arb short/
                            subscribe flow → N-2/A + record-date selling likely muted. Ex-div "dip" is
                            mostly the distribution itself; real discount = drift beyond it (~$0.05 in Sept).
+                         Close: CLM $6.40 (+0.16%, 2.11M vol) | CRF $6.16 (+0.49%, 1.40M vol) — faded from midday highs.
+                         EDGAR after-close watch (20:10–22:31 UTC): NO N-2/A or 424B3. Day 47 passed.
+                         → Now outside both prior-cycle matches (46d/47d). Oct 1-2 = Day 48-49 (delay window).
 N-2/A expected:          Day 46-47 from Aug 14 N-2 = SEPT 29 (Tue) or SEPT 30 (Wed)
                          CORRECTED Sept 27: prior estimate "Oct 1-2" was wrong — those are Day 48-49.
                          Historical window (46-47 calendar days):
