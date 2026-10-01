@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 30 2026 — RO consistency pass: fair-value, distribution, NAV and catalyst-date references aligned to §0-B and the corrected N-2/A window (Sept 29-30, Day 46-47). Sept 24-27 price entries corrected against Twelve Data closes. 2027 preview NAV labels corrected (21% × Oct 31 NAV rule). EDGAR Sept 30 after close (Day 47): NO N-2/A filed — window now Oct 1-2 (Day 48-49). Cycle lows: CLM $6.23 / CRF $6.05 (Sept 17, Day 34).*
+*Last updated: Sept 30 2026 — §0-G rebuilt from full SEC EDGAR history (2012–2026) + daily closes: RO Capital-Protection Playbook, RO Imminence Checklist (pre-N-2 warning), filing-timing table, per-cycle price/RSI stats, RO terms, corrected 2025 forensics, logging checklist. Key corrections: N-2→N-2/A is 27–47d (median ~38), not a consistent 46–47d; cycle lows come ~Day 76 / ~10d after expiration in 7 of 9 cycles, not at the record date. EDGAR Sept 30 after close (Day 47): NO N-2/A filed.*
 
 ---
 
@@ -533,88 +533,184 @@ Channel routing (locked — never change):
 
 ## 0-G. CLM/CRF RO Historical Patterns (Institutional Memory)
 
-*Updated Aug 25, 2026. Add a new subsection for each completed RO cycle.*
+*Rebuilt Sept 30 2026 from SEC EDGAR filing history (2012–2026, both CIKs) + Twelve Data daily
+closes (split-adjusted, NOT dividend-adjusted). Add a row to every table below for each new cycle.*
+
+**Rule: this section is the source of truth for RO timing. Never plan a tranche off a single
+cycle or an un-sourced estimate. Every number here is from EDGAR or a recorded close.**
 
 ---
 
-### General RO Anatomy (applies to every cycle)
+### The CLM/CRF RO Capital-Protection Playbook (the strategy, end to end)
 
 ```
-Phase 1 — N-2 Filed:
-  First public signal. monitor.py EDGAR watcher fires CRITICAL.
-  ro_dodge_active set. Execute sell (keep ≥3 shares to preserve DRIP permanently).
-  Sub price is UNKNOWN at this point — it is 104%×NAV at expiration close.
+PHASE 0 — PRE-N-2 WARNING   (protect capital BEFORE the filing)
+  The N-2 always lands Friday after the close (8/8 since 2014). Monday opens with the gap
+  (median −6.9% since 2016). monitor.py's EDGAR watcher can only react AFTER that gap.
+  → The only way to capture the gap is to trim BEFORE the filing, at the top of the range.
+  → Use the RO Imminence Checklist below. 4+ of 6 aligned = trim into strength on the Friday.
 
-Phase 2 — SEC Review (~20 business days):
-  Market digests the filing. RO arbitrageurs and institutional holders reduce positions.
-  Price typically drifts lower during this window.
+PHASE 1 — N-2 FILED (Day 0)  → SELL
+  EDGAR watcher fires CRITICAL → sell 99% at Monday open (keep ≥3 shares = DRIP stays enrolled).
+  ro_dodge_active_{ticker} set. Proceeds → margin paydown (no idle cash).
+  Log: N-2 timestamp, sell price, shares sold, CLM/CRF premium, NAV, SPY, VIX, HY spread.
 
-Phase 3 — N-2/A Effectiveness:
-  SEC declares registration effective. Pricing window opens.
-  424B3 filing imminent (sets record date + start of 25-day subscription window).
+PHASE 2 — SEC REVIEW (Day 0 → N-2/A, 27–47 days, median ~38)
+  Price drifts lower. Do NOT re-enter early — median low is Day 76, not Day 30.
+  Log daily: close, volume, NAV, premium, RSI14 (monitor.py log_ro_daily_snapshot()).
 
-Phase 4 — 424B3 / Record Date:
-  Sub price formula applied to NAV at record date close.
-  Open-market buyers who got in below this price beat RO participants.
-  HISTORICAL PATTERN: Record date has been the cycle low in 2025 (see below).
+PHASE 3 — N-2/A → EFFECTIVE → FINAL PROSPECTUS (record date)
+  N-2/A filed Tue–Fri after close. Effective posts 1–7 days later at 00:15 ET.
+  Final prospectus (497 / 424B3) 6–15 days after N-2/A = record date, sub-price terms set.
+  N-2/A day itself is a WEAK signal (median 3-day move −2.3%; 2 of 6 cycles went up).
+  The real drift is N-2/A → record (median −6.7% vs SPY).
 
-Phase 5 — 25-Day Subscription Window:
-  Rights trade on exchange. Price tends to RISE toward or above sub price
-  as rights-holders subscribe and new income buyers see the yield opportunity.
+PHASE 4 — SUBSCRIPTION WINDOW → EXPIRATION (~25 days after record)
+  2025/2026 rights are NON-TRANSFERABLE: no rights trading, no rights-selling pressure.
+  New shares issued at the formula price on expiration close.
 
-Phase 6 — Expiration (~25 days after record date):
-  New shares issued at 104%×NAV at expiration close.
-  Volume spike as rights expire. Post-expiration = RO overhang clears.
+PHASE 5 — RE-ENTRY (the cycle low)
+  Historical low: median Day 76 after N-2 (6 of 9 cycles between Day 70 and 89).
+  In 7 of 9 cycles the low came AFTER the final prospectus, by a median ~35 days
+  (≈ 10 days after expiration). Record date was the low only in 2025 (tariff crash).
+  Confirmation: RSI14 ≤ 35 at every cycle low (range 16–35, median ~28).
+  Buy back in tranches across the record date → expiration → +2 weeks window.
+  Median bounce in the 20 sessions after the low: +7.6% (range +3.3% to +15.0%).
 
-Phase 7 — Recovery:
-  Premium mean-reverts toward historical average over the following 4–8 weeks.
-  Resume DRIP at NAV. Re-enter full position if not already done.
+PHASE 6 — RECOVERY + LOG
+  Clear ro_dodge_active. Resume DRIP at NAV. Fill in every TBD in the tables below.
+  Price regained the N-2 close within ~10 months in only 2 of 9 cycles → the dodge
+  produced more shares in 9 of 9 cycles.
 ```
 
-**3-cycle forensic timeline (2022 + 2025 + 2026 — use these, not single-cycle estimates):**
-```
-N-2 → N-2/A:          ~46-47 days (~6.7 weeks) — consistent across all 3 cycles
-N-2/A → Effective:    ~2 days (SEC declares effective, press release same day or next)
-Effective → Record:   ~10-11 days (424B3 sets concrete record date and sub price)
-Record → Expiration:  ~25 days (2025) or ~53 days (2022) — 25 days is now the norm
-─────────────────────────────────────────────────────────────────────────────────
-N-2 → Record date:    ~59 days total  (46 + 2 + 11)
-N-2 → Expiration:     ~84 days total  (59 + 25)
-```
-**N-2/A is NOT the buy trigger** — it finalizes terms but the price already moved on the N-2.
-**"Near bottom" historically clusters at record date through expiration** — not at N-2 announcement.
-**Most premium compression happens at N-2 filing, not N-2/A** — 2026 confirmed: ~25%→~6% by Day 11.
-**The N-2/A + 424B3 is when market gets exact dilution math** and may re-price a second time (smaller move).
-**Sub price formula (2026):** flat 104% NAV only — no market-price floor. Less dilution than 2022/2025.
-**Open-market buyer beats RO** when market price ≤ sub price (= ≤ 104% NAV). Track this daily.
+**Why the dodge works (measured, 9 completed cycles):** median N-2 → low drawdown is **−19.9%**
+(range −14.4% to −43.9%; −18.7% excluding the 2022 bear market and 2025 tariff crash).
+Cost of dodging: forgone distributions during a ~76-day exit ≈ 2.5 × ~1.75%/mo ≈ **4.4%**.
+Median net edge ≈ **+15% more shares per cycle**, before taxes on the sale.
 
 ---
 
-### 2025 RO — Forensic Data
+### RO Imminence Checklist (Phase 0 — pre-N-2 warning, from 10 cycles of data)
+
+| # | Signal | Historical evidence | Threshold |
+|---|--------|--------------------|-----------|
+| 1 | **Calendar window** | Feb 18–21 (2021, 2022, 2025); May–Jun (2017, 2018); Aug–Oct (2012, 2013, 2014, 2016, 2026) | Inside a window |
+| 2 | **Friday** | 8 of 8 N-2s since 2014 filed on a Friday, 4:14–5:23 pm ET | Risk peaks Friday close |
+| 3 | **Time since last N-2** | Shortest gap 307d; clusters of 2–3 annual ROs then 3-yr pauses | ≥ ~10 months |
+| 4 | **CLM near 60-day high** | 8 of 9 within 4.5% of 60d high at filing (median −3.2%) | ≤ 4% below 60d high |
+| 5 | **SPY near 52-week high** | 7 of 9 within 2.1% (2026: −0.2%; 2014/2016: filed 0–1 days after SPY high) | ≤ 2% below 52w high |
+| 6 | **Premium elevated** | Prior cycles 15–30% (inferred); 2026 filed at ~9% ($7.35 vs $6.73 NAV) | ≥ 8% |
+
+Not predictive: RSI14 at the N-2 ranged 40–84 (median ~47). Do not use RSI as a pre-N-2 signal.
+Trade-off: a false positive costs distributions + taxes on the sale. Trim (not exit) on 4/6,
+full exit only on the filing itself.
+
+---
+
+### SEC EDGAR Filing History — every Cornerstone RO since 2012 (verified Sept 30 2026)
+
+CLM CIK 0000814083 | CRF CIK 0000033934. **Both funds file the same day, minutes apart, every cycle.**
+Times ET. "Effective" always posts 00:15 ET. Final prospectus = 497 (≤2021) or 424B3 (2022+).
+
+| Cycle | N-2 filed | N-2/A filed | N-2→N-2/A | N-2/A→Effective | N-2/A→Final prosp. | Final prosp. (Day) |
+|-------|-----------|-------------|-----------|-----------------|--------------------|--------------------|
+| 2012 | Wed Oct 17, 6:19 pm | Fri Nov 16 (10:07 am + 4:31 pm) | 30d | 3d | 7d | Nov 23 (D37) |
+| 2013 | Thu Sep 12, 2:15 pm | Fri Oct 18, 5:12 pm | 36d | 7d | 11d | Oct 29 (D47) |
+| **2014** | **Fri Sep 19, 4:14 pm** | **CLM: none — effective Apr 9 2015 (D202). CRF: 5 amendments Jul 6–14 2015 (D290)** | **202d+** | — | — | **Apr 10 2015 (D203)** |
+| 2016 | Fri Aug 5, 4:41 pm | Wed Sep 14, 3:37 pm | 40d | 2d | 6d | Sep 20 (D46) |
+| 2017 | Fri Jun 9, 4:48 pm | Fri Jul 7, 4:41 pm | 28d | 3d | 10d | Jul 17 (D38) |
+| 2018 | Fri May 11, 4:44 pm | Thu Jun 7, 4:45 pm | 27d | 1d | 11d | Jun 18 (D38) |
+| 2021 | Fri Feb 19, 4:49 pm | Thu Apr 1, 6:39 pm | 41d | 7d | 15d | Apr 16 (D56) |
+| 2022 | Fri Feb 18, 5:23 pm | Wed Apr 6, 5:28 pm | 47d | 2d | 7d | Apr 13 (D54) |
+| 2025 | Fri Feb 21, 4:50 pm | Tue Apr 8, 4:29 pm | 46d | 3d | 13d | Apr 21 (D59) |
+| **2026** | **Fri Aug 14, 4:43 pm** | **PENDING (none through Day 47, Sept 30)** | **≥48d** | | | |
+
+**Timing statistics (8 normal cycles, excluding 2014):**
+- N-2 → N-2/A: **27–47 days, median ~38.** Gaps have lengthened over time (27–30d in 2012–2018 → 41–47d in 2021–2025).
+- N-2/A weekday: Tue–Fri, **never Monday**. 6 of 8 after the close → market reacts next session.
+- N-2/A → Effective: 1–7 days (median 3). N-2/A → final prospectus: 6–15 days (median ~10.5).
+- N-2 → final prospectus (≈ record date): 37–59 days (median 46.5).
+- Press release with record date follows the N-2/A by ~2 days (2025: N-2/A Apr 8 → PR Apr 10).
+- **2014 is the only delayed cycle** — also a September filing. If no N-2/A by ~Day 56,
+  treat 2026 as a 2014-style delay: overhang persists for months, low comes much later.
+- No SEC shutdown risk through Dec 11 2026 (CR passed Sept 2026).
+
+---
+
+### Price Behavior by Cycle (CLM; CRF tracks within ~1–3 pts every cycle)
+
+| Cycle | CLM @ N-2 | vs 60d high | SPY vs 52w high | Day+1 | @ final prosp. | Cycle low (Day) | Max DD | RSI14 @ low | +20 sess. after low | Regained N-2 close? |
+|-------|-----------|-------------|-----------------|-------|----------------|-----------------|--------|-------------|---------------------|---------------------|
+| 2012 | $29.76* | −7.2% | −0.7% | −0.1% | −17.5% | $23.84 Dec 27 (D71) | −19.9% | 31 | +14.1% | Yes, 162d after low |
+| 2013 | $28.68* | −3.8% | −1.2% | 0.0% | −0.6% | $24.56 Dec 5 (D84) | −14.4% | 29 | +7.3% | No |
+| 2014 | $24.12* | −3.2% | −0.6% | −3.6% | — | $17.64 Oct 15 (D26)† | −26.9% | 16 | +15.0% | No |
+| 2016 | $18.27* | 0.0% | 0.0% | −7.1% | −17.9% | $14.04 Oct 14 (D70) | −23.2% | 23 | +7.6% | No |
+| 2017 | $17.20* | 0.0% | −0.3% | −6.6% | −12.4% | $13.98 Aug 24 (D76) | −18.7% | 26 | +5.1% | No |
+| 2018 | $15.96* | −0.1% | −4.8% | −8.6% | −12.0% | $13.66 Jul 26 (D76) | −14.4% | 35 | +3.7% | No |
+| 2021 | $13.13* | −2.5% | −0.7% | −2.5% | −8.7% | $10.90 May 19 (D89) | −17.0% | 29 | +3.3% | Yes, 111d after low |
+| 2022 | $13.92* | −4.5% | −9.1% | −3.2% | −1.7% | $7.81 Jun 16 (D118)‡ | −43.9% | 22 | +14.5% | No |
+| 2025 | $8.87 | −3.7% | −2.1% | −7.9% | −24.9% | $6.66 Apr 21 (D59)‡ | −24.9% | 33 | +11.9% | No |
+| **2026** | **$7.35** | **−4.0%** | **−0.2%** | **−5.6%** | pending | **$6.28 close Sept 16 (D33)** / $6.23 intraday Sept 17 | **−14.6% so far** | **23** | pending | — |
+
+\* Split-adjusted closes (CLM reverse splits). Percentages are the comparable figures.
+† 2014 window covers only the first ~4 months of a 7-month delayed cycle; low was an Oct 2014 market dip.
+‡ Low amplified by a market crash: 2022 bear market (SPY −15.7%), 2025 tariff crash (SPY −17.2%).
+2026 CRF: N-2 close $7.04, Day+1 −5.4%, low $6.06 close Sept 16 / $6.05 intraday (−13.9%).
+
+**N-2/A reaction (CLM vs SPY, 6 cycles with data):**
+
+| Cycle | CLM 3 days after N-2/A | SPY 3 days | CLM at record | CLM vs SPY at record |
+|-------|------------------------|-----------|---------------|----------------------|
+| 2016 | −4.2% | +0.1% | −5.2% | −5.3% |
+| 2017 | −1.7% | +0.8% | −6.8% | −8.2% |
+| 2018 | −2.9% | +0.6% | −8.3% | −8.0% |
+| 2021 | +2.2% | +1.5% | −10.2% | −14.4% |
+| 2022 | −5.0% | −1.5% | −4.8% | −4.1% |
+| 2025 | +6.8% | +7.5% (tariff-pause rally) | −0.9% | −4.4% |
+| **Median** | **−2.3%** | | **−6%** | **−6.7%** |
+
+**Cross-cycle rules derived from the tables:**
+1. The largest single-session drop is the **Monday after the N-2** (since 2016: −2.5% to −8.6%, median −6.9%).
+2. The N-2/A day is a weak signal. The drift happens **N-2/A → record → expiration**.
+3. **The cycle low usually comes AFTER the record date** (7 of 9), ~Day 70–90, around/after expiration.
+4. RSI14 ≤ 35 at every cycle low → required confirmation for re-entry tranches.
+5. Historical drawdowns started from 15–30% premiums. **When the premium is already ~0–2%
+   (2026), the remaining downside is capped near NAV** unless the broad market falls.
+
+---
+
+### RO Terms by Cycle (verify against each new N-2 / final prospectus)
+
+| Cycle | Ratio | Formula | Rights | Sub price | Notes |
+|-------|-------|---------|--------|-----------|-------|
+| 2025 | 1-for-3 | 112% × NAV (CLM) / 104% × NAV (CRF) at expiration | **Non-transferable** | **CLM $7.30** (final) | CLM requests ≈ $173M; expired May 16 2025 |
+| 2026 | 1-for-3 + up to 100% over-subscription | **104% × NAV at expiration close (both)** | **Non-transferable** | TBD (est. CLM ~$6.54 / CRF ~$6.34 at current NAV) | Price < sub price since Day 31 → subscribing is irrational; issuance at 104% NAV is NAV-accretive |
+
+---
+
+### 2025 RO — Forensic Data (corrected Sept 30 2026 against EDGAR + daily closes)
 
 ```
-Ticker: CLM (CRF runs identical concurrent cycle)
-Formula: CLM = 112% × NAV | CRF = 104% × NAV (CLM more aggressive in 2025)
+Ticker: CLM (CRF concurrent, same dates)
+Formula: CLM 112% × NAV | CRF 104% × NAV (at expiration) — rights NON-transferable
 
-N-2 filed:               ~Mar 2025
-Record date:              Apr 21, 2025
-CLM price at record date: ~$6.92  ← CYCLE LOW (bottom was HERE, not at expiration)
-Sub price (112% × ~$5.90 NAV): ~$6.61
+N-2 filed:            Fri Feb 21 2025, 4:50 pm ET   CLM close $8.87 | CRF $8.88
+Day+1 (Feb 24):       CLM $8.17 (−7.9%) | CRF $8.03 (−9.6%)
+N-2/A:                Tue Apr 8 2025 (Day 46)      CLM $6.72 — tariff crash (SPY −17% from N-2)
+Tariff-pause rally:   Apr 9: CLM $7.29 (+8.5%) | CRF $7.00
+Record date (424B3):  Mon Apr 21 2025 (Day 59)     CLM $6.66 | CRF $6.45  ← CYCLE LOW (close)
+Expiration:           Fri May 16 2025 (Day 84)     CLM $7.32 | CRF $7.06
+1 month after record: Jun 5 2025                   CLM $7.88 | CRF $7.60
+Final sub price:      CLM $7.30 (ABOVE the $6.66 record-date close)
 
-Price ROSE during 25-day subscription window:
-  Apr 21 (record date):   ~$6.92 (low)
-  May 15 (ex-div day):    ~$7.10 intraday low
-  May 16 (expiration):    ~$7.32 (higher than record date)
-  Jun 5 (1 month post):   ~$7.88 (full mean reversion underway)
-
-Key lesson: Open-market buyers at $6.92 (record date) beat RO subscribers ($6.61)
-on a short-term basis — the spread was $0.31, and price recovered $0.96 by June 5.
-The 25-day subscription window saw price APPRECIATION, not continuation of selling.
+Lesson: open-market buyers at the record date beat subscribers by $0.64/share. The low was
+pulled forward to the record date by the tariff crash; in normal cycles it comes ~Day 70–90.
+(Prior CLAUDE.md values — N-2 "~$7.35", record "~$6.92", sub "~$6.61" — were wrong.)
 ```
 
 ---
 
-### 2026 RO — Live Data (Updated Sept 29, 2026)
+### 2026 RO — Live Data (Updated Sept 30, 2026)
 
 ```
 Ticker: CLM + CRF (concurrent cycle, both active)
@@ -628,15 +724,17 @@ PRIMARY CATALYST EVENTS — WHAT DROPS CLM/CRF PRICE DURING EVERY RO CYCLE:
      Premiums compress from multi-cycle highs to near-historical lows within 2 weeks.
      Key signal: EDGAR watcher fires → monitor.py dispatches CRITICAL → execute 99% sell.
 
-  ② N-2/A FILING (~Day 46-47): Second wave. Smaller but definitive.
+  ② N-2/A FILING (Day 27–47 historically, median ~38): Weak signal — median 3-day move −2.3%.
      SEC effectiveness declaration confirms exact dilution terms. Market re-prices
      the final sub price formula and record date. Any holders who waited to sell
      at the N-2 use the N-2/A as their exit point.
-     Expected 2026: Sept 29-30 (Day 46-47); Oct 1-2 only if delayed. Watch for 1-3 day price pressure after filing.
+     2026: NOT filed through Day 47 (Sept 30) — already the longest normal cycle on record.
+     The real drift historically runs N-2/A → record → expiration (median −6.7% vs SPY).
      Premium already near historical lows → limited incremental downside,
      but can create the final flush that sets the true cycle low.
 
-  ③ 424B3 / RECORD DATE (~Day 59): Historically the cycle low in 2022 and 2025.
+  ③ 424B3 / RECORD DATE (Day 37–59): The low ONLY in 2025 (tariff crash). In 7 of 9 cycles
+     the low came ~35 days later, around/after expiration (median Day 76).
      Sets exact record date + start of 25-day subscription window. Rights-holders
      who can subscribe begin doing so; non-subscribing holders sell rights on exchange.
      In 2026 this may not be the low (front-loaded compression already occurred)
@@ -647,8 +745,8 @@ PRIMARY CATALYST EVENTS — WHAT DROPS CLM/CRF PRICE DURING EVERY RO CYCLE:
      accumulation window before income buyers re-enter for next month's distribution.
      Best entry for cash buyers who missed the N-2 capitulation.
 
-  RULE FOR FUTURE CYCLES: Deploy capital in tranches around ① and ④.
-  Reserve 2/3 of DCA capital for events ② and ③ (N-2/A + record date).
+  RULE FOR FUTURE CYCLES: sell on ① (or before it — Phase 0). Re-enter in tranches from
+  ③ through expiration + 2 weeks, gated by RSI14 ≤ 35. See the Playbook at the top of §0-G.
 
 N-2 filed:               Aug 14, 2026 | CLM $7.35
 Aug 17 capitulation:     8.62M CLM vol (4.6× avg), Cornerstone press release day.
@@ -717,35 +815,24 @@ Sept 30 (Day 47):        EDGAR 07:17 HST: NO N-2/A yet. Cornerstone files after 
                          Close: CLM $6.40 (+0.16%, 2.11M vol) | CRF $6.16 (+0.49%, 1.40M vol) — faded from midday highs.
                          EDGAR after-close watch (20:10–22:31 UTC): NO N-2/A or 424B3. Day 47 passed.
                          → Now outside both prior-cycle matches (46d/47d). Oct 1-2 = Day 48-49 (delay window).
-N-2/A expected:          Day 46-47 from Aug 14 N-2 = SEPT 29 (Tue) or SEPT 30 (Wed)
-                         CORRECTED Sept 27: prior estimate "Oct 1-2" was wrong — those are Day 48-49.
-                         Historical window (46-47 calendar days):
-                           Day 46 = Sept 29 (Tuesday) ← 2025 cycle matched here
-                           Day 47 = Sept 30 (Wednesday) ← 2022 cycle matched here
-                           Day 48 = Oct 1 (Thursday) — possible if filing delayed
-                           Day 49 = Oct 2 (Friday) — possible but outside historical range
-                         Oct 1 = Thursday, Oct 2 = Friday (confirmed). Live watch starts Mon Sept 28.
-                         → Finalizes sub price; press release follows 2 days later
-                         → NEXT PRIMARY CATALYST: 1-3 day selling pressure = TRANCHE 2 DEPLOY WINDOW
-Record date estimated:   ~Oct 12-15, 2026
-                         Depends on N-2/A filing date (effective +2d, then record date +10-11d):
-                           N-2/A Sept 29 → record date ~Oct 12 (Monday)
-                           N-2/A Sept 30 → record date ~Oct 13 (Tuesday)
-                           N-2/A Oct 1   → record date ~Oct 14 (Wednesday)
-                           N-2/A Oct 2   → record date ~Oct 15 (Thursday) ← same day as Oct 15 ex-div
-                         TRANCHE 3 DEPLOY: around record date regardless of exact date
-Expiration estimated:    ~Nov 6-9, 2026 (record + 25 subscription days)
-                           N-2/A Sept 29 → expiration ~Nov 6 (Friday)
-                           N-2/A Sept 30 → expiration ~Nov 7 (Saturday) → effective Friday Nov 6
-                           N-2/A Oct 2   → expiration ~Nov 9 (Monday)
-                         → RO overhang clears; premium mean-reversion begins
+N-2/A expected:          NOT filed through Day 47 (Sept 30). Historical range 27–47d (median ~38),
+                         so 2026 is already the longest normal cycle. Only precedent: 2014 (7-month delay).
+                         N-2/As land Tue–Fri (never Monday), usually 4:30–6:40 pm ET (10:30 am–12:40 pm HST).
+                         Delay checkpoint: no N-2/A by Fri Oct 9 (Day 56) → treat as a 2014-style delay.
+Scenario grid (N-2/A → effective +1–7d → final prospectus/record +6–15d → expiration ~+25d):
+                           N-2/A Oct 1–2  → record ~Oct 12–15 (same week as Oct 15 ex-div) → exp. ~Nov 6–9
+                           N-2/A Oct 6–9  → record ~Oct 16–22 (splits from ex-div)         → exp. ~Nov 10–16
+                           N-2/A ≥ Oct 13 → record late Oct (overlaps Oct 31 NAV lock)    → exp. late Nov
+                         Historical low ≈ expiration + ~10 days → est. mid–late Nov if the N-2/A lands in early Oct.
+                         TRANCHE 3: around the record date + Oct 15 ex-div. Post-expiration window = data-backed option.
 Oct NAV lock:            End of October 2026 — Board sets 2027 distribution rate
-2027 FV estimate:        CLM ~$6.97 | CRF ~$6.74  (based on July NAV; actual locked end Oct)
+2027 FV estimate:        CLM ~$6.82 | CRF ~$6.61  (21% × projected Oct 31 NAV after Oct ex-div — see §0-B)
 
 WHY 2026 IS FRONT-LOADED (different from 2022 and 2025):
-  In 2022/2025, premiums were 17-25% when N-2 filed — gradual compression over 84 days.
+  In prior cycles, premiums were ~15-30% when the N-2 filed — gradual compression over ~76 days.
+  (2026 premium at filing ≈ 9% using the $6.73 NAV in the N-2 — lower than any prior cycle.)
   In 2026, the Aug 17 press release revealed the lower 2027 distribution immediately.
-  The market fully repriced from ~25% premium → ~2% premium by Day 31.
+  The market repriced to a ~2% premium by Day 31 and ~1–2% by Day 47.
   This means "bottom" likely formed much earlier (Aug-Sept) rather than at record date.
   2026 is the first cycle where open-market buyers beat RO participants BEFORE the record date.
   → Sub price formula (104% flat, no market floor) = lowest-ever RO discount.
@@ -760,7 +847,8 @@ Tiered re-entry zones (updated Sept 15, 2026):
   Tier 4 (peak fear):      CLM $6.00–$6.30 | CRF $5.75–$6.00 [Reserve — N-2/A or record date flush]
   RESERVE PLAN: 2/3 of DCA capital held. Deploy in 1-2 additional tranches:
     Tranche 2: on N-2/A filing (Sept 29-30 expected) — CLM $6.20–$6.35 / CRF $5.90–$6.10
-    Tranche 3: at/around record date (~Oct 12-15) + Oct 15 ex-div — historically the cycle low
+    Tranche 3: at/around record date (~Oct 12-15) + Oct 15 ex-div
+    Data note: historical lows cluster ~10 days AFTER expiration (7 of 9 cycles)
     If neither causes meaningful dip: deploy remaining reserve across Oct as income buyer
     support builds heading into subscription window expiration (~Nov 6-9).
 
@@ -774,119 +862,100 @@ when expiration occurs, and when the post-expiration recovery level is known.
 
 ```python
 # The open-market buyer beats RO participants when:
-open_market_price <= sub_price  # buying below 104%×NAV = definitively cheaper than rights
+open_market_price <= sub_price  # buying below the formula price = cheaper than subscribing
 
-# Below these levels = premium at/near historical lows — near-certain mean reversion:
-CLM_PREMIUM_LOW_HISTORICAL = 2.30   # 52w low premium (percent) — set Sept 14 2026 (was 6.08 in Aug)
-CRF_PREMIUM_LOW_HISTORICAL = 2.29   # 52w low premium (percent) — set Sept 14 2026 (was 4.66 in Aug)
+# Premium lows (percent) — the 2026 cycle set new records:
+CLM_PREMIUM_LOW_HISTORICAL = 1.75   # Sept 30 2026 close ($6.40 vs $6.29 NAV); was 2.30 (Sept 14)
+CRF_PREMIUM_LOW_HISTORICAL = 0.98   # Sept 30 2026 close ($6.16 vs $6.10 NAV); was 2.29 (Sept 14)
 
-# If price is near/at 52w low premium AND below 2027 FV → highest-conviction accumulate zone
-# Recovery driver: premium mean-reversion from ~2% back toward 19% avg = structural tailwind
-# Independent of the RO outcome — income buyers see >21% yield and return.
-
-# September ex-div window (both tickers, typically Sept 15):
-# Mechanical –$0.12 drop creates 1–3 day accumulation window before income buyers re-enter.
-# CRF post-ex-div typically lands at or below estimated sub price — best open-market entry.
+# Re-entry tranche gates (all from the cycle tables in this section):
+#   1. ro_dodge_active set AND ≥ Day 45 after N-2 (median low is Day 76 — don't front-run)
+#   2. RSI14 ≤ 35 (true at every cycle low since 2012)
+#   3. price ≤ sub price estimate (104% × latest NAV) AND yield ≥ 19% on the NEXT year's rate
+#   4. Window: record date → expiration → +14 days (7 of 9 lows landed here)
+# NAV is the floor when premium ≈ 0. Below NAV only on a broad-market selloff.
+# Ex-div "dip" ≈ the distribution itself; the real discount is only the drift beyond it
+# (Sept 2026: −$0.175 over 2 sessions vs −$0.1215 distribution → ~$0.05 real discount).
 ```
 
 ---
 
-### RO Cycle Comparison Table (add rows for each future cycle)
+### 2026 DCA Log (actions taken)
 
-| Cycle | Formula | N-2→N2/A | N-2 Price | Record Date | Low Price | Low Date | Sub Price | Post-Exp 1mo |
-|-------|---------|----------|-----------|-------------|-----------|----------|-----------|--------------|
-| 2022 CLM | 112%×NAV or 65%×mkt | 47d | — | Apr 18 | ~$6.92 | ~Record date | ~$6.61 | ~$7.88 (10% prem) |
-| 2025 CLM | 112%×NAV or 80%×mkt | 46d | ~$7.35 | Apr 21 | ~$6.92 | Record date | ~$6.61 | ~$7.88 |
-| 2026 CLM | 104%×NAV flat | 46-47d est. (pending Day 46) | $7.35 | ~Oct 12-15 est. | $6.23 (52w low) | Sept 17 (Day 34) | ~$6.56 est. | TBD |
-| 2026 CRF | 104%×NAV flat | 46-47d est. (pending Day 46) | ~$7.12 | ~Oct 12-15 est. | $6.05 (52w low) | Sept 17 (Day 34) | ~$6.37 est. | TBD |
+- Aug 14–17: N-2 filed Fri 4:43 pm ET. Dodge executed per Phase 1.
+- Sept 15: Tranche 1 (1/3) deployed at the ex-div dip (Tier 3 zone).
+- Sept 16: Added on the continued post-ex-div dip. Cycle lows: CLM $6.28 close / $6.23 intraday,
+  CRF $6.06 close / $6.05 intraday (Day 33–34). RSI14 hit 23.
+- Sept 25: Recovered to CLM $6.43 / CRF $6.19. Did not chase.
+- Sept 30 (Day 47): Close CLM $6.40 / CRF $6.16. No N-2/A. 2/3 reserve still held.
+- NEXT: Tranche 2 zone CLM $6.20–$6.35 / CRF $5.90–$6.10. Tranche 3 = record date + Oct 15 ex-div.
+  Data note: 7 of 9 historical lows came ~10 days AFTER expiration (est. mid-Nov 2026 if the
+  N-2/A lands early Oct). Decide whether part of the reserve waits for that window.
 
-**Key cross-cycle insight:** In 2022 and 2025, the low landed AT the record date. In 2026, prices
-broke below sub price by Day 31 (pre-ex-div) due to the concurrent distribution reset announcement.
-The 2026 cycle is front-loaded — premium collapsed at announcement, not gradually over 84 days.
-
-**Primary price-drop catalysts in every cycle (in order of magnitude):**
-1. **N-2 filing** — largest drop; institutions exit as dilution is confirmed
-2. **N-2/A filing** — second wave; confirms exact sub price math; 1-3 day pressure
-3. **424B3 / Record date** — final flush; historically THE cycle low in 2022 + 2025
-4. **Ex-dividend** — mechanical only; creates 1-3 day window, not a seller event
-
-**2026 DCA log:**
-- Sept 15: 1/3 deployed at ex-div dip (Tier 3 zone). 2/3 in reserve.
-- Sept 16: Continued dip the day AFTER ex-div — CLM/CRF drifted lower again. Added to
-  position. Confirms pattern: ex-div day + 1-2 days is an extended accumulation window,
-  not a single-session spike. Income buyers re-enter gradually, not all at once.
-  Post-ex-div lows confirmed: CLM $6.23 | CRF $6.05 (52w lows per Yahoo Finance Sept 25).
-- Sept 25: Prices recovering to CLM $6.43 / CRF $6.19. Do NOT chase — N-2/A is ~4 days away.
-- Sept 30: CLM $6.44 / CRF $6.18 midday, no N-2/A yet. Reserve still held (see §0-G Sept 30 entry for zones).
-  Hold 2/3 reserve for the two remaining catalysts.
-- Sept 29-30 (est.; Oct 1-2 if delayed): N-2/A filing — DEPLOY Tranche 2 if CLM dips $6.20–$6.35 / CRF $5.90–$6.10
-- Oct 15 (confirmed): Ex-dividend ($0.122 CLM announced) + estimated RO record date window (~Oct 12-15)
-  → DOUBLE catalyst window — DEPLOY Tranche 3 here regardless of price level
-  → Historically the cycle low in 2022 and 2025; doubly important with ex-div coinciding
-- Oct 16+: If neither catalyst creates a dip below today's levels, begin deploying remaining
-  reserve gradually — RO overhang clears at expiration (~Nov 6-9), premium recovery follows
-
-*Update TBD fields after 424B3 filing and post-expiration settlement.*
+*Update TBD fields after the N-2/A, the final prospectus (424B3), and expiration.*
 
 ---
 
-### Historical RO Cadence — CLM N-2 Filing Dates (EDGAR verified, Sept 17 2026)
-
-Source: SEC EDGAR CIK 0000814083 (CLM). CRF runs concurrent cycles.
-N-2/A amendments shown to confirm completion; each N-2 is a unique RO cycle.
+### Historical RO Cadence — Gaps Between Cycles (EDGAR verified)
 
 ```
-N-2 Filed      N-2/A Filed   Gap to next N-2    Notes
-──────────────────────────────────────────────────────────────────────
-2012-10-17     (2012-11-16)  →  329d (~11mo)   Annual cluster starts
-2013-09-12     (2013-10-18)  →  372d (~12mo)   Annual
-2014-09-19     (no N-2/A?)  →  685d (~23mo)   Gap — possible withdrawal or delay
-2016-08-05     (2016-09-14)  →  307d (~10mo)   Annual cluster resumes
-2017-06-09     (2017-07-07)  →  336d (~11mo)   Annual
-2018-05-11     (2018-06-07)  → 1014d (~34mo)  Long gap — 3 consecutive ROs then pause
-2021-02-19     (2021-04-01)  →  364d (~12mo)   Annual
-2022-02-18     (2022-04-06)  → 1098d (~37mo)  Long gap — another 3yr pause
-2025-02-21     (2025-04-08)  →  539d (~18mo)   Short gap — driven by distribution reset
-2026-08-14     (pending — Sept 29-30 exp.)     ← CURRENT CYCLE (none filed as of Sept 29 AM)
+N-2 Filed      Gap to next N-2    Pattern
+──────────────────────────────────────────────────────────────
+2012-10-17  →  330d (~11mo)   Annual cluster starts
+2013-09-12  →  372d (~12mo)   Annual
+2014-09-19  →  686d (~23mo)   Delayed cycle (effective Apr 2015 CLM / Jul 2015 CRF)
+2016-08-05  →  308d (~10mo)   Annual cluster resumes
+2017-06-09  →  336d (~11mo)   Annual
+2018-05-11  → 1015d (~34mo)   Pause after a 3-RO cluster
+2021-02-19  →  364d (~12mo)   Annual
+2022-02-18  → 1099d (~37mo)   Pause (2022 bear market)
+2025-02-21  →  539d (~18mo)   Short gap
+2026-08-14  →  —              CURRENT CYCLE
 ```
 
-**Inter-cycle gap statistics (9 measured gaps):**
-- Annual cycles (~10-12mo): 2012-14, 2016-18, 2021-22 — Cornerstone does clusters of 2-3
-- Long pauses (~34-37mo): after 2018 and after 2022 — cluster exhaustion, premium recovery needed
-- Anomalous short gap (~18mo): 2025→2026, triggered by concurrent distribution reset announcement
+- Clusters of 2–3 annual ROs (~10–12mo apart), then ~3-year pauses.
+- Calendar windows: Feb 18–21 (3 of the last 4 cycles), May–Jun, Aug–Oct.
+- Every N-2 since 2014 filed on a Friday after the close.
 
-**Seasonal preference (N-2 filing month):**
-- Feb-Mar: 4 cycles (2021, 2022, 2025, and prior years)
-- May-Jun: 2 cycles (2017, 2018)
-- Aug-Oct: 5 cycles (2012, 2013, 2014, 2016, 2026)
-Cornerstone uses Feb or Aug windows most often. The 2026 was Aug (distribution reset forced timing).
-
-**What gates the NEXT RO (premium threshold rule):**
-Cornerstone needs a premium sufficiently above NAV for the rights to have value.
-At 2% premium (today), the rights would price at almost nothing — no economic sense.
-Historical minimum premium to launch: ~10-15% (inferred from prior cycle start prices).
+**What gates the NEXT RO (premium threshold):**
+Rights only make sense when the market price is well above the sub price. At ~1–2% premium,
+an RO cannot raise money. 2026 launched at ~9% premium — the lowest observed — so the
+practical floor is ~8–10%.
 
 Premium recovery forecast:
-- Current: ~2% (Sept 2026)
-- Post-expiration (~Nov 2026): RO overhang clears; income buyers return
-- Premium recovery to 10%+: realistically 6-18 months post-expiration = May-Nov 2027
-- Premium recovery to 15-20%+: 12-24 months post-expiration = Nov 2027-Nov 2028
+- Now: ~1–2% (Sept 30 2026)
+- Post-expiration (~Nov 2026): overhang clears; income buyers return
+- Premium back to 8–10%: realistically 6–18 months after expiration (May–Nov 2027)
 
 **Next RO probability window:**
 ```
-Earliest possible N-2 filing: Aug 2027 (~12mo after current N-2, IF premium recovers fast)
-Most likely window:            Feb-Mar 2028 (~18mo post-expiration) — mirrors 2025 Feb cycle
-Conservative estimate:         Aug-Oct 2028 (~2yr post-expiration) — mirrors 3yr gap pattern
+Earliest plausible N-2:  Aug 2027 (12mo after this N-2; requires fast premium recovery)
+Most likely:             Feb 2028 (Feb 18–21 pattern; ~15mo after expiration)
+Conservative:            Aug–Oct 2028 (3-year-pause pattern)
 
-RULE: Monitor CLM/CRF premium quarterly. When premium re-enters 15-20% range for
-3+ consecutive weeks, flag as "RO risk elevated" and set ro_season_watch in DB.
-No premium recovery = no RO. 2% premium → Cornerstone cannot do a viable RO.
+RULE: run the RO Imminence Checklist every Friday once ≥10 months have passed since the
+last N-2 AND premium ≥ 8% for 3+ consecutive weeks. Set ro_season_watch in DB when 4+ of 6 align.
 ```
 
-**Watch signal for future cycles:**
-When NAV is locked end of October each year → if distribution INCREASES → premium likely
-expands → RO probability rises for the following Feb or Aug window.
-When distribution DECREASES (as in 2026) → premium compressed → RO delayed until recovery.
+**Distribution-lock signal:** the next year's rate = 21% × Oct 31 NAV. A higher locked rate
+→ premium expands → RO risk rises for the following Feb or Aug window. A lower rate (2026)
+→ premium compressed → RO delayed until recovery.
+
+---
+
+### Per-Cycle Data Logging Checklist (fill for every RO — feeds the tables above)
+
+```
+EDGAR (both CIKs):  N-2 / N-2/A(s) / EFFECT / 497 or 424B3 — date + acceptance time (ET)
+Press releases:     RO announcement, record date, expiration, final results (subscriptions, shares issued)
+Terms:              ratio, formula, transferable?, over-subscription %, final sub price
+Daily (Day 0 → expiration + 30 sessions):
+                    close, volume vs 20d avg, NAV, premium, RSI14, SPY, VIX, HY spread, 10Y
+                    → monitor.py log_ro_daily_snapshot() → ro_cycle_events (DB)
+Key prints:         N-2 close, Day+1, N-2/A +3d, record date, expiration, cycle low (+ RSI), +20 sessions
+Our execution:      sell date/price/shares, each re-entry tranche date/price/shares, net share change
+Pre-N-2 snapshot:   the 6 Imminence Checklist readings on the Friday of the filing
+```
 
 ---
 
