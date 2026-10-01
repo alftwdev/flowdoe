@@ -83,7 +83,7 @@ def dispatch_conviction_sync(engine, snap, report_label):
 
 def main():
     parser = argparse.ArgumentParser(description="Rockefeller Systemic Scheduler Dashboard.")
-    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "income_machine", "iv_crush", "post_market", "macro", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "futures_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
+    parser.add_argument("--mode", type=str, required=True, choices=["morning", "eod", "income", "income_machine", "iv_crush", "post_market", "macro", "weekly_scorecard", "wheel_signals", "wheel_position", "trending_plays", "crypto_social", "store_daily_iv", "cef_calibrate", "mlpi_entry", "personal_scorecard", "orb_scan", "box_spread_scan", "box_position", "exdiv_check", "strangle_scan"])
     parser.add_argument("--action", type=str, choices=["open", "close", "status"], help="wheel_position / box_position mode action")
     parser.add_argument("--symbol", type=str, help="wheel_position mode: underlying ticker")
     parser.add_argument("--type", type=str, dest="position_type", choices=["CSP", "CC"], help="wheel_position mode: CSP or CC")
@@ -2110,105 +2110,6 @@ def main():
 
             except Exception as e:
                 logger.error(f"Crypto social scan failed: {e}")
-
-        elif args.mode == "futures_social":
-            # ── FUTURES-ADJACENT SOCIAL SCAN + PATTERN SCAN → #futures-trading ─
-            # Segment 1: StockTwits + Reddit WSB filtered to energy/metals/rates/ag.
-            # Segment 2: Finviz TA pattern scan (bullish/bearish setups on volume).
-            try:
-                snap    = engine.generate_futures_social_snapshot()
-                plays   = snap.get("plays", [])
-                patterns = engine.fetch_finviz_pattern_scan()
-                today_l = datetime.now().strftime("%b %-d")
-
-                # ── Segment 1: Commodity social buzz ──
-                if plays:
-                    payload = f"**COMMODITY / MACRO BUZZ — {today_l}**\n\n"
-                    for p in plays[:8]:
-                        arrow = "▲" if p["chg_5d"] >= 0 else "▼"
-                        payload += (
-                            f"**{p['symbol']}** `${p['spot']:.2f}` {arrow}{abs(p['chg_5d']):.1f}% (5D)\n"
-                            f"┣ Buzz: {p['meter']} · {p['lean']}\n"
-                            f"┗ Vol: {p['vol_ratio']:.1f}x avg\n\n"
-                        )
-                    payload += "Social overlay for #futures context — not a directional call."
-                    if WEBHOOK_FUTURES:
-                        _buzz_avg = sum(p.get("chg_5d", 0) for p in plays[:8]) / max(len(plays[:8]), 1)
-                        _buzz_color = COLOR_GREEN if _buzz_avg > 0.5 else (COLOR_RED if _buzz_avg < -0.5 else COLOR_YELLOW)
-                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | Commodity & Macro Buzz", payload, _buzz_color)
-                        logger.info(f"Futures social dispatched: {len(plays)} names.")
-                else:
-                    logger.info("Futures social: no futures-adjacent names trending this session.")
-
-                # ── Segment 2: Finviz TA pattern scan ──
-                bullish = patterns.get("bullish", [])
-                bearish = patterns.get("bearish", [])
-                if bullish or bearish:
-                    pat_payload = f"**S&P TECHNICAL PATTERNS — {today_l}**\n\n"
-                    if bullish:
-                        pat_payload += "**Bullish Setups**\n"
-                        seen = set()
-                        for item in bullish:
-                            if item["symbol"] not in seen:
-                                seen.add(item["symbol"])
-                                sign = "+" if item["chg"] >= 0 else ""
-                                pat_payload += f"┣ `{item['symbol']}` ${item['price']:.2f} {sign}{item['chg']:.1f}% — {item['pattern']}\n"
-                        pat_payload = pat_payload.rstrip("┣ \n") + "\n\n"
-                    if bearish:
-                        pat_payload += "**Bearish Setups**\n"
-                        seen = set()
-                        for item in bearish:
-                            if item["symbol"] not in seen:
-                                seen.add(item["symbol"])
-                                sign = "+" if item["chg"] >= 0 else ""
-                                pat_payload += f"┣ `{item['symbol']}` ${item['price']:.2f} {sign}{item['chg']:.1f}% — {item['pattern']}\n"
-                        pat_payload = pat_payload.rstrip("┣ \n") + "\n\n"
-                    pat_payload = pat_payload.rstrip("\n")
-                    if WEBHOOK_FUTURES:
-                        _pat_color = COLOR_GREEN if len(bullish) > len(bearish) else (COLOR_RED if len(bearish) > len(bullish) else COLOR_YELLOW)
-                        send_essentials_embed(WEBHOOK_FUTURES, "FUTURES DESK | S&P Pattern Scan", pat_payload, _pat_color)
-                        logger.info(f"Pattern scan dispatched: {len(bullish)} bullish, {len(bearish)} bearish.")
-                else:
-                    logger.info("Pattern scan: no qualifying patterns returned (may be outside market hours).")
-
-                # ── Futures Community Radar ────────────────────────────────────
-                # r/FuturesTrading (primary), r/Daytrading, r/algotrading.
-                # Surfaces instrument codes and setups mentioned ≥2× in posts
-                # with futures/strategy context. Per community consensus: Reddit
-                # is for strategy/psychology — NOT breaking macro data (CPI/FOMC).
-                try:
-                    _futures_radar = engine.fetch_futures_community_intel()
-                    if _futures_radar and WEBHOOK_FUTURES:
-                        _fr_lines = []
-                        for item in _futures_radar:
-                            sym      = item["ticker"]
-                            mentions = item["mentions"]
-                            sources  = "+".join(item["sources"])
-                            # Display slash-notation for well-known futures codes
-                            display_sym = f"/{sym}" if sym in {"ES","NQ","CL","GC","YM","RTY","MES","MNQ","ZB","ZN"} else sym
-                            _fr_lines.append(f"┣ **{display_sym}** — `{mentions}` mentions · `{sources}`")
-                        if _fr_lines:
-                            _fr_lines[-1] = _fr_lines[-1].replace("┣", "┗", 1)
-                            _fr_payload = (
-                                "Instruments / setups appearing ≥2× in r/FuturesTrading, "
-                                "r/Daytrading, r/algotrading — auto-scanned every 6h.\n"
-                                "Strategy + sentiment context only — CPI/FOMC/NFP data "
-                                "comes from economic calendars, not Reddit.\n\n"
-                                + "\n".join(_fr_lines)
-                            )
-                            send_essentials_embed(
-                                WEBHOOK_FUTURES,
-                                "📡 FUTURES COMMUNITY RADAR | Reddit",
-                                _fr_payload, 0x2980b9
-                            )
-                            logger.info(f"Futures community radar dispatched: {len(_futures_radar)} symbols.")
-                    else:
-                        logger.info("Futures community radar: no symbols with ≥2 mentions this scan.")
-                except Exception as _fre:
-                    logger.error(f"Futures community radar failed: {_fre}")
-
-            except Exception as e:
-                logger.error(f"Futures social scan failed: {e}")
 
         # ── STORE DAILY IV — 21:30 UTC cron, saves ATM IV for IVR tracker ─────
         elif args.mode == "store_daily_iv":

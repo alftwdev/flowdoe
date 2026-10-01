@@ -1,6 +1,6 @@
 # Cashflow ZZZ Machine — Project Context
 *Master brief for Claude Code sessions. Update as ecosystem evolves.*
-*Last updated: Sept 30 2026 — §0-G rebuilt from full SEC EDGAR history (2012–2026) + daily closes: RO Capital-Protection Playbook, RO Imminence Checklist (pre-N-2 warning), filing-timing table, per-cycle price/RSI stats, RO terms, corrected 2025 forensics, logging checklist. Key corrections: N-2→N-2/A is 27–47d (median ~38), not a consistent 46–47d; cycle lows come ~Day 76 / ~10d after expiration in 7 of 9 cycles, not at the record date. EDGAR Sept 30 after close (Day 47): NO N-2/A filed.*
+*Last updated: Sept 30 2026 (HST) — #futures-trading rebuilt: removed Flowstate charts, late IB breakout scanner, futures_social (stock buzz / Finviz patterns / Reddit radar) and the /ES→SPY sync to #market-analysis. New mes_desk.py /MES desk (session plan 21:45 HST, morning-after recap, trade log + nightly stop + 2-MES ladder) — see §0-H. Earlier same day: §0-G RO memory rebuilt from full EDGAR history; Day 47 closed with NO N-2/A.*
 
 ---
 
@@ -959,6 +959,70 @@ Pre-N-2 snapshot:   the 6 Imminence Checklist readings on the Friday of the fili
 
 ---
 
+## 0-H. /MES Micro Futures Desk (personal — started Oct 2026)
+
+**Rules (locked Sept 30 2026):**
+```
+Instrument:   /MES (Micro E-mini S&P 500) — $5.00/point, tick 0.25 = $1.25
+Size:         1 contract. 2 only after the ladder clears (≥20 closed trades, net > $0,
+              max drawdown ≤ $150). mes_desk.py warns on 2+ before then.
+Stop:         10 points = $50/contract (this replaced the "−15%" idea — % stops don't map to futures)
+Target:       10 points = $50 (net ≈ $48.50 after est. $1.50 round-trip fees) → break-even win rate ≈ 52%
+Weekly goal:  $30–50 (≈ one net winning trade)
+Nightly stop: 2 losses or −$100 → done for the night
+Window:       22:00–00:00 HST = 08:00–10:00 UTC = London morning.
+              From Oct 25 (UK clocks back) 22:00 HST = 08:00 London = the London open.
+Broker:       Tradier Futures (planned) — separate account = futures risk segregated from
+              E*TRADE margin and the CLM/CRF cash buffer. $100 MES day-trade margin is very
+              high leverage (~$38k notional) — be flat by end of window.
+```
+
+**Data reality (verified Oct 1 2026):**
+- No CME feed in the stack. Twelve Data carries no CME futures; Tradier's brokerage API docs
+  cover equities/options only (no futures endpoints).
+- Twelve Data Grow plan: European S&P ETFs (CSPX/SPY5 LSE, SXR8/VUAA/SPYL Xetra, CSPX Euronext)
+  are **end-of-day delayed**; US pre/post-market needs the Pro plan. Only FX/crypto are live
+  during the window. → No live S&P proxy during 22:00–00:00 HST on the current plan.
+- Proxy chain (for plan + recap): CSPX:LSE → S&P via daily calibration (FRED SP500 ÷ SPY close;
+  CSPX/SPY median over the LSE/NYSE overlap) → /MES via fair value F = S × (1 + (r − q) × t),
+  r = FRED DTB3, q = 1.2%, t = days to expiry/365. Absolute levels ±~5 pts; distances exact.
+- CME redistribution: once a live CME feed exists, real-time quotes in a paid Discord need a
+  CME distribution license — keep subscriber posts derived/delayed.
+
+**Dispatches (mes_desk.py → #futures-trading, Discord only, no Pushover):**
+| UTC | HST | Post | Content |
+|-----|-----|------|---------|
+| 07:45 | 21:45 | 🌙 SESSION PLAN | Bias score (4H SMA50/200 stack, daily SMA200, prior NY session), prior-day H/L/C in MES pts, London opening-range times, risk plan, week/night/ladder status, VIX regime, econ events, basis |
+| 17:10 | 07:10 (next morning) | 🧾 SESSION RECAP | Window O/H/L/C + range, bias graded (±3 pts), model trade (first 5-min close outside the London range in bias direction, 10/10, same-bar = LOSS), your trades, week/ladder, track record |
+| manual | — | 📏 LONDON RANGE | Opening range + 4/9 EMA state + RSI + setup. Built, **not scheduled** until a live feed exists |
+| manual | — | 🟢/🔴/✅/❌/📒 TRADE LOG | open / close / status posts |
+
+**Trade log (run on PythonAnywhere so it writes the live DB):**
+```bash
+python3.10 mes_desk.py trade open --side long --entry 7712.25 --note "range retest"
+python3.10 mes_desk.py trade close --id 12 --exit 7722.25
+python3.10 mes_desk.py trade status
+python3.10 mes_desk.py recap --date 2026-10-01     # backfill / re-run a recap
+```
+Storage: `strategy_journal` (strategy='MES', event_type='TRADE_OPEN', P&L in post_mortem JSON).
+Grading: `signal_ledger` signal_type `mes_session_bias` and `mes_or_model`.
+Env overrides: MES_STOP_PTS, MES_TARGET_PTS, MES_FEES_RT, MES_DIV_YIELD.
+
+**Strategy notes (from Sept 30 2026 transcript review — Peachy futures content):**
+- Trade the reaction at the session's volume time, not the first break. Break-and-retest > first break.
+- The opening range is a magnet; its midpoint is the retest level when the range is wide.
+- Bias before entry: 4H SMA 50/200 stack, daily 200, prior session direction, prior-day/overnight H/L.
+- 4/9 EMA on 5-min: GREEN/YELLOW/RED trend state; continuation entries only on pullbacks to the
+  bands on trending days; no continuation when RSI is stretched; far from bands = don't add.
+- Base hits: target ≈ prior leg; stop at invalidation; small losses allow re-entry.
+- Add size only to winners at band retests — never when exhausted.
+
+**Next upgrade:** a live feed during the window (Tradier Futures platform data via API if it
+becomes available, or Twelve Data Pro for US pre-market from 04:00 ET) → schedule `mes_desk.py range`
+at 08:35 UTC (22:35 HST) and move the recap back to 10:05 UTC (00:05 HST).
+
+---
+
 ## 0-F. Weekly Maintenance Protocol (Weekend Audit)
 
 This section is the institutional-grade maintenance playbook. Run it every weekend — ideally Saturday after close. It catches signal drift, stale data, DB rot, and script regressions before they affect Monday's trades.
@@ -1178,9 +1242,12 @@ These are free, institutionally-tracked data sources to verify against our inter
 
 #### E. Futures & Crypto Channel Integrity
 
-**Futures (`cross_asset.py` → #futures-trading):**
-- Fires 4× daily: 07:00, 12:35, 14:00, 18:45 UTC (change-gated, not always a new embed)
-- Check: `/ES` and `/NQ` levels populated, yield curve (T10−T2) fresh, IB breakout scanner running
+**Futures (#futures-trading — cross_asset.py board + mes_desk.py /MES desk):**
+- Board fires 4× daily: 07:00, 12:35, 14:00, 18:45 UTC (change-gated, not always a new embed)
+- /MES plan 07:45 UTC (21:45 HST) + recap 17:10 UTC (07:10 HST) weekdays — check both posted
+- Check: `mes_calibration` date is current (stale flag false), `mes_plan_{date}` keys written,
+  signal_ledger `mes_session_bias` / `mes_or_model` rows graded (not stuck PENDING)
+- Check: `/ES` and `/NQ` levels populated, yield curve (T10−T2) fresh
 - DB dependency: `fred_yield_spread` (should be non-None), `gex_profile_SPY` (informational)
 - Cross-check: `vix_term_slope` from tqqq.py matches CBOE VIX term structure direction
 
@@ -1527,12 +1594,12 @@ SPY puts are best applied at the ~$100K+ portfolio stage using your actual margi
 | #announcements | *(none — manual only)* | Manual posts only | Subscriber-only operational channel. Change logs, PA maintenance windows, strategy updates, new feature rollouts. No webhook. |
 | #cornerstone | WEBHOOK_CORNERSTONE_RO | monitor.py | CLM/CRF protection engine |
 | #market-analysis | WEBHOOK_MARKET_ANALYSIS | market_analysis.py | 0800 HST premarket command center |
-| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day) + IB breakout scanner + yield curve/Fed Funds from FRED |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | cross_asset.py | Futures board (4×/day, change-gated) + yield curve/Fed Funds from FRED |
+| #futures-trading | WEBHOOK_FUTURES_TRADING | mes_desk.py | /MES session plan (21:45 HST) + session recap (07:10 HST) + trade log posts — see §0-H |
 | #crypto | WEBHOOK_CRYPTO | crypto.py | BTC/ETH spot, Fear & Greed, on-chain |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | options.py | Wheel strategy + TQQQ sniper signals |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode trending_plays`) | Social sentiment scanner (StockTwits + Reddit WSB + Finviz) → top 5 options plays with BTO setup when HIGH conviction |
 | #crypto | WEBHOOK_CRYPTO | scheduler.py (`--mode crypto_social`) | Fear & Greed + spot prices + funding rates + Binance derivatives stack (OI/L/S/taker) |
-| #futures-trading | WEBHOOK_FUTURES_TRADING | scheduler.py (`--mode futures_social`) | StockTwits + Reddit WSB filtered to energy/metals/rates/ag names |
 | #dividend-ccetfs | WEBHOOK_DIVIDEND_CCETFS | scheduler.py (`--mode income`) | Wheel Candidates v2 + New CC ETF Screener |
 | #options-wheel | WEBHOOK_TRADE_SIGNALS | scheduler.py (`--mode wheel_signals`) | Tier 2 IV Rank screener + open wheel position DTE countdown |
 | #fed | WEBHOOK_FED | fed.py | Fed rate/macro signals |
@@ -1570,12 +1637,13 @@ Bias scorer: 12+ signals (expanded from original 8). **Never add more standalone
 These channels don't drive direct trades — they sharpen conviction and provide
 macro context that informs all three strategies.
 
-**#futures-trading** (cross_asset.py + scheduler.py futures_social):
+**#futures-trading** (cross_asset.py board + mes_desk.py /MES desk — cleaned Sept 30 2026):
 - /ES /NQ /CL /GC overnight and session moves → bias for the day
 - Yield curve (T10-T2 from FRED) → recession watch, LEAP PUT conviction
 - Fed Funds rate → margin cost context
-- IB breakout scanner → early session momentum confirmation
-- Commodity moves → macro rotation signal
+- /MES session plan + recap + trade log (personal London-session desk, §0-H)
+- Removed (noise): Flowstate charts, IB breakout scanner (fired 4h late), stock buzz,
+  Finviz single-stock patterns, Reddit radar. Do not re-add equities content here.
 
 **#crypto** (scheduler.py crypto_social):
 - BTC/ETH Fear & Greed → cross-signal for LEAP CALL bottom-hunting
@@ -1723,16 +1791,17 @@ FRED_API_KEY = os.getenv("FRED_API_KEY") # confirmed in .env
 | `analytics.py` | ✅ Live | HighFidelityAnalyticsEngine — ledger, grading, OHLC, FRED helpers, Binance derivatives. Aug 2026: wheel VRP gate raised 2→5pp; Kelly sizer upgraded to 126-day VIX percentile rank (arXiv:2508.16598). |
 | `essentials_tools.py` | ✅ Live | Discord embed senders, chart generators |
 | `market_analysis.py` | ✅ Live | Always-on (6th PA slot). 3 messages/day → #market-analysis (refactored Aug 2026). Morning brief: 03:10 HST (13:10 UTC). Mid-session: 07:00 HST (17:00 UTC). EOD: via scheduler.py --mode eod at 20:20 UTC. 12+ flag bias scorer (BULLISH/NEUTRAL/BEARISH). Includes Overnight Market Structure section (SPY POC/VAH/VAL from DB), macro with 10Y/2Y+unemployment, congressional trades filtered to 30 days. |
-| `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED + ES/NQ market profile + CVD + structure + IB breakout scanner |
+| `cross_asset.py` | ✅ Live | Futures board (change-gated, 4h heartbeat) + yield curve/Fed Funds from FRED. SPY/QQQ market profile (POC/VAH/VAL/VWAP) is DB-only for market_analysis.py — no dispatch. Flowstate charts + IB scanner removed Sept 30 2026. |
+| `mes_desk.py` | ✅ Live | /MES micro futures desk → #futures-trading (Discord only). Session plan, morning-after recap (bias + model-trade grading in signal_ledger), trade log CLI with nightly stop and 2-MES ladder. CSPX:LSE → S&P → MES fair-value proxy. See §0-H. |
 | `crypto.py` | 🔲 To build | BTC/ETH spot, Fear & Greed, funding rates |
-| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/futures_social/store_daily_iv/cef_calibrate/mlpi_entry/personal_scorecard. Removed: `gex`, `options_flow`, `spx_income` (iron condor — purged Jul 19); `market_intraday` (purged Aug 2026 — market_analysis.py always-on handles it); `macro_pm` (purged Aug 2026 — was duplicating morning brief data). `--mode morning` now only writes DB keys and runs conviction sync — no longer dispatches standalone embeds to #market-analysis. |
+| `scheduler.py` | ✅ Live | Central dispatcher. Active modes: morning/eod/income/iv_crush/post_market/macro/weekly_scorecard/wheel_signals/wheel_position/trending_plays/crypto_social/store_daily_iv/cef_calibrate/mlpi_entry/personal_scorecard. Removed: `gex`, `options_flow`, `spx_income` (iron condor — purged Jul 19); `market_intraday` (purged Aug 2026 — market_analysis.py always-on handles it); `macro_pm` (purged Aug 2026 — was duplicating morning brief data). `--mode morning` now only writes DB keys and runs conviction sync — no longer dispatches standalone embeds to #market-analysis. |
 | `stream.py` | ✅ Live | WebSocket-only sentry: BTC/USD hourly volatility breach alerts, SPY/QQQ perimeter alerts (RTH only), VIXY real-time price → DB for monitor.py. Subscribes: `BTC/USD,VIXY,SPY,QQQ` (RTH) / `BTC/USD` (off-hours). XAU/USD removed — forex channel deprecated. |
 | `tqqq.py` | ✅ Live | Bidirectional LEAP desk (CALL + PUT) + directional sniper + insurance put renewal clock. Aug 2026 upgrades: P/C z-score weight 15→8pts (index PCR weaker than single-name per 2025 research); VIX resolution bonus (+7pts when VIXY/VXZ ratio crosses back below 1.0, sustained 48h; state: `tqqq_vix_backwardation_active` + `tqqq_vix_resolution_ts` in DB). |
 | `daily_pulse.py` | ✅ Live | Personal financial snapshot → Pushover ONLY (never Discord). Runs as standalone PA cron at 06:00 UTC. SimpleFIN balance fetch with cache fallback: if SimpleFIN unreachable, shows yesterday's cached data + ⚠️ banner instead of $0.00 zeros. State stored in `.daily_pulse_state.json` (isolated from ecosystem DB — intentional, contains personal financial data). MARKET REGIME section removed Aug 2026. |
 | `market_structure.py` | ✅ Live | SMC toolkit — FVGs, liquidity sweeps, equal highs/lows, Supertrend (REST, no SDK threads). |
 | `tradier_client.py` | ✅ Live | Tradier options chain helper. Added `get_earnings_proximity()` — Tradier /markets/calendar, FORCE_CLOSE ≤7d / REVIEW ≤21d flags. |
 | `seed_cef_premiums.py` | 🗑️ Removed | Merged into db_tools.py (`python db_tools.py --seed-premiums`). |
-| `sentisense_client.py` | ✅ Live | SentiSense API client with full DB caching. Trackers added Jul 15: get_reddit_picks (7-day cache), get_sentiment_movers (daily), get_sentiment_leaderboard (daily). Wired into analytics.py trending_plays + futures_social as additional discovery sources. |
+| `sentisense_client.py` | ✅ Live | SentiSense API client with full DB caching. Trackers added Jul 15: get_reddit_picks (7-day cache), get_sentiment_movers (daily), get_sentiment_leaderboard (daily). Wired into analytics.py trending_plays as an additional discovery source (futures_social dispatch removed Sept 30 2026). |
 | `xdca.py` | ✅ Live | Tier 2 Income ETF near-bottom DCA scanner. Always-on 10-min RTH loop. Monitors XSPI, XQQI, MLPI, KQQQ for zone-based DCA signals. Zone A/B silent (DB only). Zone C/D = "BUYING OPPORTUNITY" → #dividend-ccetfs + Pushover (D only). Underlying proxies: XSPI→SPY, XQQI→QQQ, KQQQ→QQQ, MLPI→XLE. See xdca_design_notes.md for Option 2 (buffer reset date enhancement). |
 | `xdca_design_notes.md` | ✅ Live | Design notes for xdca.py. Documents Option 2 (Innovator quarterly buffer reset date seeding for XSPI/XQQI), NAV erosion hardening rationale, and future enhancements. Option 2 DB key memo also stored in DB as `xdca_option2_note`. |
 | `announcements.py` | 🔲 To build | Weekly accuracy scorecard for free tier |
@@ -1790,7 +1859,7 @@ All SentiSense fetches are **cached to DB** — zero redundant API calls across 
 | `get_institutional_flows(ticker)` | `/institutional/flows` | daily per ticker | wheel_signals 13F flow overlay |
 | `get_congressional_trades()` | `/politicians/activity` | daily | scheduler.py (available) |
 | `get_reddit_picks()` | `/trackers/reddit-picks` | 7-day (monthly refresh) | analytics.py `_fetch_reddit_wsb_mentions()` — primary source, replaces 403-prone Reddit scrape |
-| `get_sentiment_movers()` | `/trackers/sentiment-movers` | daily | analytics.py `generate_futures_social_snapshot()` — energy/metals movers |
+| `get_sentiment_movers()` | `/trackers/sentiment-movers` | daily | analytics.py `generate_futures_social_snapshot()` — no longer dispatched (futures_social removed Sept 30 2026) |
 | `get_sentiment_leaderboard()` | `/trackers/sentiment-leaderboard` | daily | analytics.py `generate_trending_options_plays()` — 4th discovery source (bullish side) |
 
 **monitor.py RO score cross-signals from SentiSense:**

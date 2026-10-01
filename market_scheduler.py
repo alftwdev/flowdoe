@@ -84,7 +84,14 @@ SCHEDULE = [
     (13, 28, "macro_am",           "scheduler",    ["--mode", "macro"],           True),
     # ── Signals & Income ────────────────────────────────────────────────────────
     (13, 35, "trending_plays",     "scheduler",    ["--mode", "trending_plays"],  True),
-    (13, 40, "futures_social",     "scheduler",    ["--mode", "futures_social"],  True),
+    # futures_social removed Sept 30 2026 — stock buzz / Finviz patterns / Reddit radar
+    # were equities noise in #futures-trading. /MES desk is in mes_desk.py (see below).
+    # ── /MES desk (mes_desk.py) → #futures-trading — trader window 22:00–00:00 HST ────
+    # UTC weekdays = Sun–Thu nights HST. ~5 Twelve Data credits at plan, 1 at recap.
+    # Recap runs the morning after: London bars are end-of-day delayed on the Grow plan.
+    # mes_range (live London opening-range alert) waits for a live feed — not scheduled.
+    ( 7, 45, "mes_plan",           "mes_desk",     ["plan"],                      True),  # 21:45 HST
+    (17, 10, "mes_recap",          "mes_desk",     ["recap"],                     True),  # 07:10 HST next morning
     (13, 45, "wheel_signals",      "scheduler",    ["--mode", "wheel_signals"],   True),
     (13, 50, "crypto_social",      "scheduler",    ["--mode", "crypto_social"],   True),
     # options_flow (×3) removed — GEX always returns UNKNOWN at this plan tier;
@@ -204,6 +211,8 @@ def build_cmd(script: str, args: list) -> list:
     if script == "bait_dispatcher":
         cmd = [PYTHON, os.path.join(BASE_DIR, "bait_dispatcher.py")]
         return cmd + args
+    if script == "mes_desk":
+        return [PYTHON, os.path.join(BASE_DIR, "mes_desk.py")] + args
     if script == "tqqq":
         return [PYTHON, os.path.join(BASE_DIR, "tqqq.py"), "--run-once"]
     raise ValueError(f"Unknown script type: {script}")

@@ -828,7 +828,8 @@ class EcosystemDatabase:
 
     # Event types that may repeat multiple times in one day (bypass daily dedup).
     # FLOOR_BREACH and DAILY_OBSERVATION are NOT here — daily dedup prevents loop-tick spam.
-    _JOURNAL_NOTABLE = {"PRICE_DROP", "RO_ELEVATED", "RO_CRITICAL", "SIGNAL_FIRED", "SETUP_FOUND"}
+    _JOURNAL_NOTABLE = {"PRICE_DROP", "RO_ELEVATED", "RO_CRITICAL", "SIGNAL_FIRED", "SETUP_FOUND",
+                        "TRADE_OPEN"}  # TRADE_OPEN: mes_desk.py trade log — every trade is its own row
 
     def log_journal_entry(self, strategy: str, event_type: str, ticker: str, action: str,
                           conviction: int, thesis: str, confluences: dict, conflicts: dict,

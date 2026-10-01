@@ -1,26 +1,19 @@
 import os
 import sys
-import io
 import logging
 import requests
 import pandas as pd
 from datetime import datetime, date, timedelta, time as dtime
 import pytz
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from market_structure import analyze_market_structure
 from dotenv import load_dotenv
 from database import EcosystemDatabase
 from analytics import HighFidelityAnalyticsEngine
 
 try:
-    from essentials_tools import send_essentials_embed, send_essentials_embed_with_chart
+    from essentials_tools import send_essentials_embed
 except ImportError:
     def send_essentials_embed(url, title, desc, color):
         requests.post(url, json={"embeds": [{"title": title, "description": desc, "color": color}]}, timeout=10)
-    def send_essentials_embed_with_chart(url, title, desc, chart_bytes, color):
-        send_essentials_embed(url, title, desc, color)
 
 logger = logging.getLogger("Market_Profile_Matrix")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +27,6 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 TD_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 WEBHOOK_FUTURES = os.getenv("WEBHOOK_FUTURES_TRADING")
-WEBHOOK_MARKET = os.getenv("WEBHOOK_MARKET_ANALYSIS")
 db = EcosystemDatabase()
 engine = HighFidelityAnalyticsEngine()
 
@@ -146,32 +138,6 @@ def fetch_daily_levels(symbols):
     return levels
 
 # =====================================================================
-# 3-STRIKE DYNAMIC GATEKEEPER (single source of truth for the futures channel)
-# =====================================================================
-def evaluate_gatekeeper(channel, current_metric, major_threshold=5.0):
-    """
-    3-Strike Dynamic Gatekeeper protocol. Resets on major shifts, silences after 3 minor updates.
-    `channel` must be a globally unique key — engine.py no longer runs a competing futures gatekeeper.
-    """
-    state_key = f"gatekeeper_{channel}_pulse"
-    channel_state = db.get_state(state_key, {"strike_count": 0, "last_value": 0.0})
-
-    last_value = channel_state.get("last_value", 0.0)
-    strike_count = channel_state.get("strike_count", 0)
-
-    delta = abs(current_metric - last_value)
-    is_major_move = delta >= major_threshold
-
-    if is_major_move:
-        db.update_state(state_key, {"strike_count": 1, "last_value": current_metric})
-        return True, "🔴 MAJOR REGIME SHIFT DETECTED"
-    elif strike_count < 3:
-        db.update_state(state_key, {"strike_count": strike_count + 1, "last_value": last_value})
-        return True, f"🟡 TACTICAL PERSISTENCE REMINDER ({strike_count + 1}/3)"
-    else:
-        return False, "SILENT"
-
-# =====================================================================
 # SESSION HELPERS — futures trade ~23h/day, RTH-only gating hides the edge
 # =====================================================================
 def get_session_label(now_et=None):
@@ -187,63 +153,6 @@ def get_session_label(now_et=None):
 # =====================================================================
 # DATA FETCH
 # =====================================================================
-def fetch_pivot_points(symbol):
-    """
-    TD native pivot_points_hl endpoint — daily classical pivot levels (PP, R1/R2, S1/S2).
-    Used by the IB breakout scanner to confirm the target is not blocked by a nearby pivot,
-    and in the ES/NQ deep-dive as structural reference levels.
-    """
-    try:
-        res = requests.get(
-            f"https://api.twelvedata.com/pivot_points_hl",
-            params={"symbol": symbol, "interval": "1day", "time_period": 5, "apikey": TD_API_KEY},
-            timeout=12
-        ).json()
-        latest = res.get("values", [{}])[0]
-        return {
-            "pp":  float(latest.get("pp",  0.0)),
-            "r1":  float(latest.get("r1",  0.0)),
-            "r2":  float(latest.get("r2",  0.0)),
-            "s1":  float(latest.get("s1",  0.0)),
-            "s2":  float(latest.get("s2",  0.0)),
-        }
-    except Exception as e:
-        logger.warning(f"Pivot points fetch failed for {symbol}: {e}")
-        return None
-
-
-def fetch_ichimoku(symbol):
-    """
-    TD native ichimoku endpoint — cloud (Senkou A/B), Tenkan, Kijun, Chikou.
-    Cloud posture (price vs cloud, cloud color) is used in ES/NQ deep-dive as a dynamic
-    support/resistance overlay more responsive than static SMA200.
-    """
-    try:
-        res = requests.get(
-            f"https://api.twelvedata.com/ichimoku",
-            params={"symbol": symbol, "interval": "1day", "apikey": TD_API_KEY},
-            timeout=12
-        ).json()
-        latest = res.get("values", [{}])[0]
-        tenkan    = float(latest.get("tenkan_sen",  0.0))
-        kijun     = float(latest.get("kijun_sen",   0.0))
-        senkou_a  = float(latest.get("senkou_span_a", 0.0))
-        senkou_b  = float(latest.get("senkou_span_b", 0.0))
-        cloud_top = max(senkou_a, senkou_b)
-        cloud_bot = min(senkou_a, senkou_b)
-        return {
-            "tenkan": tenkan,
-            "kijun": kijun,
-            "cloud_top": cloud_top,
-            "cloud_bot": cloud_bot,
-            "cloud_bull": senkou_a > senkou_b,  # green cloud = bullish, red = bearish
-            "tenkan_cross_bull": tenkan > kijun,  # TK cross bullish
-        }
-    except Exception as e:
-        logger.warning(f"Ichimoku fetch failed for {symbol}: {e}")
-        return None
-
-
 def fetch_profile_time_series(symbol, outputsize=190):
     """Pulls 5-min bars covering both the prior overnight session and today's RTH."""
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize={outputsize}&apikey={TD_API_KEY}"
@@ -321,14 +230,6 @@ def compute_market_profile_nodes(df):
 
     return {"poc": poc_price, "vah": float(prices[right]), "val": float(prices[left])}
 
-def compute_cvd(df):
-    """Cumulative Volume Delta proxy (no order-flow feed): bull volume when close>open, else bear."""
-    direction = (df['close'] >= df['open']).map({True: 1, False: -1})
-    delta = direction * df['volume']
-    df = df.copy()
-    df['cvd'] = delta.cumsum()
-    return df
-
 def split_sessions(df):
     """Splits a 5-min dataframe into the most recent overnight (Globex) session and today's RTH."""
     df['date'] = df['datetime_est'].dt.date
@@ -342,34 +243,6 @@ def split_sessions(df):
     rth_df = df[rth_mask].copy()
     overnight_df = df[overnight_mask].copy()
     return rth_df, overnight_df
-
-# =====================================================================
-# CHART SNAPSHOT (matplotlib — no external chart service required)
-# =====================================================================
-def generate_market_profile_chart(label, df, profile, vwap, posture):
-    fig, ax = plt.subplots(figsize=(9, 5), dpi=120)
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#0d1117")
-
-    ax.plot(df['datetime_est'], df['close'], color="#58a6ff", linewidth=1.4, label="Price")
-    ax.axhline(profile['vah'], color="#3fb950", linestyle="--", linewidth=1, label=f"VAH {profile['vah']:.2f}")
-    ax.axhline(profile['poc'], color="#f1c40f", linestyle="-", linewidth=1.2, label=f"POC {profile['poc']:.2f}")
-    ax.axhline(profile['val'], color="#f85149", linestyle="--", linewidth=1, label=f"VAL {profile['val']:.2f}")
-    ax.axhline(vwap, color="#a371f7", linestyle=":", linewidth=1.2, label=f"VWAP {vwap:.2f}")
-
-    ax.set_title(f"{label} | Algorithmic Market Profile | {posture}", color="white", fontsize=11)
-    ax.tick_params(colors="white", labelsize=8)
-    for spine in ax.spines.values():
-        spine.set_color("#30363d")
-    ax.legend(facecolor="#161b22", edgecolor="#30363d", labelcolor="white", fontsize=8, loc="best")
-    ax.grid(color="#21262d", linewidth=0.5)
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
 
 # =====================================================================
 # FUTURES BOARD — condensed pulse with directional context
@@ -620,15 +493,17 @@ def run_futures_board():
     logger.info(f"Dispatched Futures Board ({session_label}, composite Δ {composite_change:.3f}%, heartbeat={heartbeat_due}, NQ={_nq_dir})")
 
 # =====================================================================
-# DEEP-DIVE MARKET PROFILE + CHART (ES/NQ) — fires only on gatekeeper approval
+# MARKET PROFILE DB WRITE (SPY/QQQ) — feeds market_analysis.py, no dispatch
 # =====================================================================
 def run_intraday_futures_update():
-    if not WEBHOOK_FUTURES:
-        return
-
+    """
+    DB-only: writes SPY/QQQ POC/VAH/VAL/VWAP for market_analysis.py's Overnight Market
+    Structure section. No Discord dispatch — the FUTURES FLOWSTATE charts and the
+    FUTURES → EQUITIES SIGNAL SYNC embed were removed Sept 30 2026 (channel cleanup).
+    """
     session_label = get_session_label()
     if session_label == "MAINTENANCE":
-        logger.info("Daily settlement break (16:00-18:00 ET) — skipping stale profile broadcast.")
+        logger.info("Daily settlement break (16:00-18:00 ET) — skipping profile DB write.")
         return
 
     for sym, label in PROFILE_ASSETS.items():
@@ -641,271 +516,32 @@ def run_intraday_futures_update():
         if active_df.empty:
             active_df = df
 
-        spot = df['close'].iloc[-1]
         profile = compute_market_profile_nodes(active_df)
-        # Degenerate case: too few distinct price levels (thin overnight/transition data) makes
-        # the value area collapse to a single price (VAH == POC == VAL), which makes the "fade
-        # value boundaries" directive meaningless — confirmed live, a /NQ dispatch showed exactly
-        # this. Skip this sweep rather than dispatch a zero-width boundary; more bars accumulate
-        # by the next sweep.
+        # Degenerate value area (VAH == VAL) on thin data — skip rather than write a zero-width zone.
         if profile["vah"] == profile["val"]:
-            logger.info(f"{label}: degenerate value area (insufficient distinct price levels) — skipping this sweep.")
+            logger.info(f"{label}: degenerate value area — skipping this sweep.")
             continue
         active_df = active_df.copy()
         active_df['pv'] = active_df['close'] * active_df['volume']
         vwap = active_df['pv'].sum() / active_df['volume'].sum()
-        cvd_df = compute_cvd(active_df)
-        cvd_now = float(cvd_df['cvd'].iloc[-1])
 
         db.update_state(f"{sym}_poc", profile["poc"])
         db.update_state(f"{sym}_vwap", vwap)
         db.update_state(f"{sym}_vah", profile["vah"])
         db.update_state(f"{sym}_val", profile["val"])
         db.update_state(f"{sym}_session", session_label)
-
-        if spot > profile["vah"]:
-            posture = "Outside Value Up | Aggressive buyers in control."
-        elif spot < profile["val"]:
-            posture = "Outside Value Down | Aggressive sellers routing positions."
-        else:
-            posture = "Inside Value Regime | Mean-reversion trading dominant."
-
-        cvd_bias = "Buyers absorbing offers (bullish delta)" if cvd_now > 0 else "Sellers absorbing bids (bearish delta)"
-
-        # Price-action market structure — fair value gaps, liquidity sweeps, equal highs/lows —
-        # computed on the same active_df already fetched above, so this costs zero extra API calls.
-        structure = analyze_market_structure(active_df)
-
-        # VIX-tiered regime shield + Unified Conviction Score (vault/philo.txt formulas) — reuses
-        # the same active_df, no extra API calls beyond the one VIXY fetch and one GEX/options fetch.
-        regime = engine.classify_vix_regime()
-        gex_state = engine.calculate_gex_profile(sym)
-        conviction = engine.calculate_unified_conviction_score(sym, active_df, gex_state=gex_state)
-
-        should_send, status_tag = evaluate_gatekeeper(f"futures_{sym}", spot, major_threshold=5.0)
-
-        # Ichimoku cloud — dynamic support/resistance zone, free extra call per symbol
-        ichi = fetch_ichimoku(sym)
-        if ichi:
-            cloud_color = "🟢 bullish" if ichi["cloud_bull"] else "🔴 bearish"
-            if spot > ichi["cloud_top"]:
-                ichi_posture = f"Above cloud ({cloud_color}) — trend confirmed"
-            elif spot < ichi["cloud_bot"]:
-                ichi_posture = f"Below cloud ({cloud_color}) — downtrend confirmed"
-            else:
-                ichi_posture = f"Inside cloud ({cloud_color}) — transition/chop zone"
-            tk_cross = "TK bullish ✅" if ichi["tenkan_cross_bull"] else "TK bearish ⚠️"
-            ichi_line = f"┣ Ichimoku: {ichi_posture} | {tk_cross} | Cloud: `${ichi['cloud_bot']:,.2f}`–`${ichi['cloud_top']:,.2f}`\n"
-        else:
-            ichi_line = ""
-
-        # Pivot levels — structural reference for value area context
-        pivots = fetch_pivot_points(sym)
-        pivot_line = ""
-        if pivots and pivots["pp"] > 0:
-            pivot_line = f"┣ Pivots: PP `${pivots['pp']:,.2f}` | R1 `${pivots['r1']:,.2f}` | S1 `${pivots['s1']:,.2f}`\n"
-
-        if should_send:
-            payload = (
-                f"**{session_label} Session Market Profile (Spot: `${spot:,.2f}`)**\n"
-                f"┣ Gatekeeper: {status_tag}\n"
-                f"┣ VWAP: `${vwap:,.2f}` | VAH: `${profile['vah']:,.2f}` | POC: `${profile['poc']:,.2f}` | VAL: `${profile['val']:,.2f}`\n"
-                f"┣ CVD: `{cvd_now:+,.0f}` — {cvd_bias}\n"
-                f"┣ Posture: {posture}\n"
-                f"{ichi_line}"
-                f"{pivot_line}"
-                f"┣ Structure: {structure['setup']} ({structure['bias']}) — {structure['detail']}\n"
-                f"┣ VIX Regime: {regime['tier']} (z `{regime['vixy_z']:+.2f}σ`) — {regime['posture']}\n"
-                f"┣ Conviction: `{conviction['score']}/100` — {conviction['verdict']}\n"
-                f"┗ Fade value boundaries `${profile['val']:,.2f}`–`${profile['vah']:,.2f}` for core setups"
-            )
-            _conv_score = conviction.get("score", 50)
-            _mp_color = COLOR_GREEN if _conv_score >= 70 else (COLOR_RED if _conv_score < 40 else COLOR_YELLOW)
-            try:
-                chart_bytes = generate_market_profile_chart(label, active_df, profile, vwap, posture.split('|')[0].strip())
-                send_essentials_embed_with_chart(
-                    WEBHOOK_FUTURES, f"FUTURES FLOWSTATE | {label}", payload, chart_bytes, color=_mp_color
-                )
-            except Exception as e:
-                logger.error(f"Chart generation failed, falling back to text-only dispatch: {e}")
-                send_essentials_embed(WEBHOOK_FUTURES, f"FUTURES FLOWSTATE | {label}", payload, _mp_color)
-            logger.info(f"Dispatched {status_tag} Futures Pulse for {label}")
-
-        # Cross-sector correlation: ES trading outside its OVERNIGHT value area heading into/around
-        # the cash open is a leading signal for SPY — broadcast that conviction to market analysis,
-        # not the futures channel, so it syncs with the rest of the ecosystem's signals.
-        if sym == "SPY" and not overnight_df.empty and session_label in ("RTH", "OVERNIGHT"):
-            try:
-                on_profile = compute_market_profile_nodes(overnight_df)
-                outside_on_value = spot > on_profile["vah"] or spot < on_profile["val"]
-                if outside_on_value and WEBHOOK_MARKET:
-                    on_metric = abs(spot - on_profile["poc"])
-                    corr_should_send, corr_status = evaluate_gatekeeper("futures_es_spy_correlation", on_metric, major_threshold=5.0)
-                    if corr_should_send:
-                        direction = "ABOVE" if spot > on_profile["vah"] else "BELOW"
-                        corr_payload = (
-                            f"⚡ **CROSS-ASSET CONVICTION | /ES → SPY CORRELATION**\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"┣ Status: {corr_status}\n"
-                            f"┣ /ES trading {direction} overnight Value Area (${on_profile['val']:,.2f} - ${on_profile['vah']:,.2f})\n"
-                            f"┣ Overnight POC: ${on_profile['poc']:,.2f} | Current: ${spot:,.2f}\n"
-                            f"┗ Final Actionable Posture: SPY likely opens/extends in the same direction — futures leads cash."
-                        )
-                        _sync_color = COLOR_GREEN if direction == "ABOVE" else COLOR_RED
-                        send_essentials_embed(WEBHOOK_MARKET, "FUTURES → EQUITIES SIGNAL SYNC", corr_payload, _sync_color)
-                        logger.info("Dispatched ES/SPY overnight correlation signal to Market Analysis channel")
-            except Exception as e:
-                logger.error(f"Correlation dispatch failed: {e}")
-
-# =====================================================================
-# INITIAL BALANCE BREAKOUT SCANNER (/ES, /NQ via SPY/QQQ proxy)
-#
-# From vault/philo.txt's documented "/ES Breakout Strategy Implementation Rules", with the IB
-# window corrected to the professional-standard 60 minutes (9:30-10:30 ET) rather than philo.txt's
-# 30 — confirmed against Axia Futures' published methodology for ES/NQ specifically, where the
-# first 60 minutes is when the largest institutional flow hits the tape.
-#
-# ENTRY: a closed 5-min bar breaks outside the IB range AND volume delta in that bar shows >55%
-#         buy (or sell) imbalance — momentum confirmation, not just a wick poke.
-# VIX FILTER: in ELEVATED/CRITICAL regimes, only fire if price is still within ~0.1% of the IB
-#             line (philo.txt's "within 2 ticks") — a breakout that's already run away in a choppy
-#             high-vol tape is a worse entry, not a better one.
-# RISK: stop at the IB midpoint, target sized for a minimum 2:1 reward:risk — both philo.txt's
-#       documented risk matrix. No live position management (no brokerage link) — this is a
-#       signal with explicit levels, not an auto-managed trade.
-# =====================================================================
-IB_START, IB_END = dtime(9, 30), dtime(10, 30)
-
-def compute_initial_balance(df, today):
-    ib_mask = (df['date'] == today) & (df['time'] >= IB_START) & (df['time'] <= IB_END)
-    ib_df = df[ib_mask]
-    if ib_df.empty:
-        return None
-    return {"high": float(ib_df["high"].max()), "low": float(ib_df["low"].min())}
-
-def run_ib_breakout_scan():
-    if not WEBHOOK_FUTURES:
-        return
-    now_et = datetime.now(ET)
-    if now_et.time() < IB_END or get_session_label(now_et) != "RTH":
-        logger.info("Initial Balance not yet sealed (before 10:30 ET) or outside RTH — skipping breakout scan.")
-        return
-
-    regime = engine.classify_vix_regime()
-
-    for sym, label in PROFILE_ASSETS.items():
-        try:
-            df = fetch_profile_time_series(sym, outputsize=120)
-            if df is None or df.empty:
-                continue
-            df['date'] = df['datetime_est'].dt.date
-            df['time'] = df['datetime_est'].dt.time
-            today = df['date'].max()
-
-            ib = compute_initial_balance(df, today)
-            if not ib or ib["high"] == ib["low"]:
-                continue
-
-            rth_today = df[df['date'] == today].reset_index(drop=True)
-            post_ib = rth_today[rth_today['time'] > IB_END]
-            if post_ib.empty:
-                continue
-
-            last_bar = post_ib.iloc[-1]
-            spot = float(last_bar["close"])
-
-            direction = None
-            if last_bar["close"] > ib["high"]:
-                direction = "BULLISH"
-                breakout_line = ib["high"]
-            elif last_bar["close"] < ib["low"]:
-                direction = "BEARISH"
-                breakout_line = ib["low"]
-            if direction is None:
-                continue
-
-            # Volume delta confirmation on the breakout bar itself, not the whole session.
-            recent = post_ib.tail(3)
-            up_vol = recent.loc[recent["close"] >= recent["open"], "volume"].sum()
-            total_vol = recent["volume"].sum()
-            buy_pct = (up_vol / total_vol * 100) if total_vol > 0 else 0.0
-            confirmed = buy_pct >= 55.0 if direction == "BULLISH" else buy_pct <= 45.0
-
-            if not confirmed:
-                continue
-
-            # VIX filter — in elevated/critical vol, don't chase a breakout that's already extended.
-            if regime["tier"] != "NORMAL":
-                distance_pct = abs(spot - breakout_line) / breakout_line * 100
-                if distance_pct > 0.10:
-                    logger.info(f"{label}: IB breakout confirmed but {regime['tier']} regime + {distance_pct:.2f}% extended — skipping chase entry.")
-                    continue
-
-            ib_mid = (ib["high"] + ib["low"]) / 2
-            risk = abs(spot - ib_mid)
-            if risk == 0:
-                continue
-            target = spot + (2 * risk) if direction == "BULLISH" else spot - (2 * risk)
-
-            # Pivot check: nearest level between spot and target — acts as resistance/support
-            pivots = fetch_pivot_points(sym)
-            pivot_note = ""
-            if pivots:
-                levels = [("R2", pivots["r2"]), ("R1", pivots["r1"]), ("PP", pivots["pp"]),
-                          ("S1", pivots["s1"]), ("S2", pivots["s2"])]
-                if direction == "BULLISH":
-                    blocking = [(n, v) for n, v in levels if spot < v <= target]
-                    if blocking:
-                        nearest_name, nearest_val = min(blocking, key=lambda x: x[1])
-                        target = min(target, nearest_val)  # cap target at nearest pivot
-                        pivot_note = f"┣ Pivot Check: `{nearest_name} ${nearest_val:,.2f}` in path — target adjusted\n"
-                    else:
-                        pivot_note = f"┣ Pivot Check: Path clear to target | PP `${pivots['pp']:,.2f}`\n"
-                else:
-                    blocking = [(n, v) for n, v in levels if target <= v < spot]
-                    if blocking:
-                        nearest_name, nearest_val = max(blocking, key=lambda x: x[1])
-                        target = max(target, nearest_val)
-                        pivot_note = f"┣ Pivot Check: `{nearest_name} ${nearest_val:,.2f}` in path — target adjusted\n"
-                    else:
-                        pivot_note = f"┣ Pivot Check: Path clear to target | PP `${pivots['pp']:,.2f}`\n"
-
-            state_key = f"ib_breakout_{sym}_{today}"
-            if db.get_state(state_key):
-                continue  # one breakout signal per symbol per day
-            db.update_state(state_key, direction)
-
-            rr = abs(target - spot) / risk if risk > 0 else 0.0
-            payload = (
-                f"**{label} Initial Balance Breakout — {direction}**\n"
-                f"┣ IB Range (9:30–10:30 ET): `${ib['low']:,.2f}` – `${ib['high']:,.2f}`\n"
-                f"┣ Breakout: Close `${spot:,.2f}` {'above' if direction == 'BULLISH' else 'below'} IB {'high' if direction == 'BULLISH' else 'low'} | Vol Delta: `{buy_pct:.0f}%`\n"
-                f"┣ VIX Regime: {regime['tier']} (z `{regime['vixy_z']:+.2f}σ`)\n"
-                f"{pivot_note}"
-                f"┣ Entry: `${spot:,.2f}` | Stop: `${ib_mid:,.2f}` (IB mid) | Target: `${target:,.2f}`\n"
-                f"┗ R/R: `1:{rr:.1f}` | Shift stop to breakeven at 2× initial risk"
-            )
-            send_essentials_embed(WEBHOOK_FUTURES, f"📐 IB BREAKOUT | {label}", payload, 0x2ecc71 if direction == "BULLISH" else 0xe74c3c)
-            logger.info(f"IB breakout signal dispatched: {label} {direction} (buy_pct={buy_pct:.0f}%)")
-        except Exception as e:
-            logger.error(f"IB breakout scan failed for {sym}: {e}")
+        logger.info(f"{label}: profile written to DB (POC {profile['poc']:.2f}, VWAP {vwap:.2f})")
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
     if mode == "board":
         run_futures_board()
     elif mode == "profile":
-        # Manual-only — not part of the scheduled cron run.
-        # The deep-dive profile (VWAP/VAH/POC/CVD/Ichimoku) is available on demand
-        # but no longer fires automatically as a morning or EOD report.
         run_intraday_futures_update()
-    elif mode == "ib_breakout":
-        run_ib_breakout_scan()
     else:
-        # Default cron invocation: change-gated board + IB breakout scanner + DB profile write.
-        # run_intraday_futures_update() writes SPY_poc/vah/val/vwap to DB so market_analysis.py
-        # morning brief Overnight Market Structure section has real data. No extra API calls —
-        # it uses the same SPY time series already fetched by run_futures_board().
+        # Default cron invocation: change-gated board + DB-only profile write
+        # (SPY/QQQ POC/VAH/VAL/VWAP for market_analysis.py). The IB breakout scanner
+        # was removed Sept 30 2026 — it only ran at 14:45 ET, 4h after the IB sealed.
+        # Session-timed /MES alerts now live in mes_desk.py.
         run_futures_board()
-        run_ib_breakout_scan()
         run_intraday_futures_update()
